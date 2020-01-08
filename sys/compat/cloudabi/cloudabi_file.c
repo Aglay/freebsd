@@ -159,9 +159,6 @@ cloudabi_sys_file_create(struct thread *td,
 	case CLOUDABI_FILETYPE_DIRECTORY:
 		error = kern_mkdirat(td, uap->fd, path, UIO_SYSSPACE, 0777);
 		break;
-	case CLOUDABI_FILETYPE_FIFO:
-		error = kern_mkfifoat(td, uap->fd, path, UIO_SYSSPACE, 0666);
-		break;
 	default:
 		error = EINVAL;
 		break;
@@ -294,7 +291,7 @@ cloudabi_sys_file_open(struct thread *td,
 		finit(fp, (fflags & FMASK) | (fp->f_flag & FHASLOCK),
 		    DTYPE_VNODE, vp, &vnops);
 	}
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 
 	/* Truncate file. */
 	if (fflags & O_TRUNC) {
@@ -346,7 +343,7 @@ write_dirent(struct dirent *bde, cloudabi_dircookie_t cookie, struct uio *uio)
 		cde.d_type = CLOUDABI_FILETYPE_DIRECTORY;
 		break;
 	case DT_FIFO:
-		cde.d_type = CLOUDABI_FILETYPE_FIFO;
+		cde.d_type = CLOUDABI_FILETYPE_SOCKET_STREAM;
 		break;
 	case DT_LNK:
 		cde.d_type = CLOUDABI_FILETYPE_SYMBOLIC_LINK;
@@ -393,12 +390,11 @@ cloudabi_sys_file_readdir(struct thread *td,
 	struct file *fp;
 	struct vnode *vp;
 	void *readbuf;
-	cap_rights_t rights;
 	cloudabi_dircookie_t offset;
 	int error;
 
 	/* Obtain directory vnode. */
-	error = getvnode(td, uap->fd, cap_rights_init(&rights, CAP_READ), &fp);
+	error = getvnode(td, uap->fd, &cap_read_rights, &fp);
 	if (error != 0) {
 		if (error == EINVAL)
 			return (ENOTDIR);
@@ -438,14 +434,14 @@ cloudabi_sys_file_readdir(struct thread *td,
 		/* Validate file type. */
 		vn_lock(vp, LK_SHARED | LK_RETRY);
 		if (vp->v_type != VDIR) {
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 			error = ENOTDIR;
 			goto done;
 		}
 #ifdef MAC
 		error = mac_vnode_check_readdir(td->td_ucred, vp);
 		if (error != 0) {
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 			goto done;
 		}
 #endif /* MAC */
@@ -455,7 +451,7 @@ cloudabi_sys_file_readdir(struct thread *td,
 		ncookies = 0;
 		error = VOP_READDIR(vp, &readuio, fp->f_cred, &eof,
 		    &ncookies, &cookies);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		if (error != 0)
 			goto done;
 
@@ -562,12 +558,13 @@ cloudabi_sys_file_stat_fget(struct thread *td,
 	struct stat sb;
 	cloudabi_filestat_t csb;
 	struct file *fp;
-	cap_rights_t rights;
 	cloudabi_filetype_t filetype;
 	int error;
 
+	memset(&csb, 0, sizeof(csb));
+
 	/* Fetch file descriptor attributes. */
-	error = fget(td, uap->fd, cap_rights_init(&rights, CAP_FSTAT), &fp);
+	error = fget(td, uap->fd, &cap_fstat_rights, &fp);
 	if (error != 0)
 		return (error);
 	error = fo_stat(fp, &sb, td->td_ucred, td);
@@ -653,6 +650,8 @@ cloudabi_sys_file_stat_get(struct thread *td,
 	char *path;
 	int error;
 
+	memset(&csb, 0, sizeof(csb));
+
 	error = copyin_path(uap->path, uap->path_len, &path);
 	if (error != 0)
 		return (error);
@@ -673,7 +672,7 @@ cloudabi_sys_file_stat_get(struct thread *td,
 	else if (S_ISDIR(sb.st_mode))
 		csb.st_filetype = CLOUDABI_FILETYPE_DIRECTORY;
 	else if (S_ISFIFO(sb.st_mode))
-		csb.st_filetype = CLOUDABI_FILETYPE_FIFO;
+		csb.st_filetype = CLOUDABI_FILETYPE_SOCKET_STREAM;
 	else if (S_ISREG(sb.st_mode))
 		csb.st_filetype = CLOUDABI_FILETYPE_REGULAR_FILE;
 	else if (S_ISSOCK(sb.st_mode)) {
@@ -753,9 +752,11 @@ cloudabi_sys_file_unlink(struct thread *td,
 		return (error);
 
 	if (uap->flags & CLOUDABI_UNLINK_REMOVEDIR)
-		error = kern_rmdirat(td, uap->fd, path, UIO_SYSSPACE);
+		error = kern_frmdirat(td, uap->fd, path, FD_NONE,
+		    UIO_SYSSPACE, 0);
 	else
-		error = kern_unlinkat(td, uap->fd, path, UIO_SYSSPACE, 0);
+		error = kern_funlinkat(td, uap->fd, path, FD_NONE,
+		    UIO_SYSSPACE, 0, 0);
 	cloudabi_freestr(path);
 	return (error);
 }

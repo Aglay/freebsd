@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1997-2000 Doug Rabson
  * All rights reserved.
  *
@@ -161,7 +163,7 @@ linker_init(void *arg)
 	TAILQ_INIT(&linker_files);
 }
 
-SYSINIT(linker, SI_SUB_KLD, SI_ORDER_FIRST, linker_init, 0);
+SYSINIT(linker, SI_SUB_KLD, SI_ORDER_FIRST, linker_init, NULL);
 
 static void
 linker_stop_class_add(void *arg)
@@ -288,7 +290,7 @@ linker_file_sysuninit(linker_file_t lf)
 }
 
 static void
-linker_file_register_sysctls(linker_file_t lf)
+linker_file_register_sysctls(linker_file_t lf, bool enable)
 {
 	struct sysctl_oid **start, **stop, **oidp;
 
@@ -303,8 +305,34 @@ linker_file_register_sysctls(linker_file_t lf)
 
 	sx_xunlock(&kld_sx);
 	sysctl_wlock();
+	for (oidp = start; oidp < stop; oidp++) {
+		if (enable)
+			sysctl_register_oid(*oidp);
+		else
+			sysctl_register_disabled_oid(*oidp);
+	}
+	sysctl_wunlock();
+	sx_xlock(&kld_sx);
+}
+
+static void
+linker_file_enable_sysctls(linker_file_t lf)
+{
+	struct sysctl_oid **start, **stop, **oidp;
+
+	KLD_DPF(FILE,
+	    ("linker_file_enable_sysctls: enable SYSCTLs for %s\n",
+	    lf->filename));
+
+	sx_assert(&kld_sx, SA_XLOCKED);
+
+	if (linker_file_lookup_set(lf, "sysctl_set", &start, &stop, NULL) != 0)
+		return;
+
+	sx_xunlock(&kld_sx);
+	sysctl_wlock();
 	for (oidp = start; oidp < stop; oidp++)
-		sysctl_register_oid(*oidp);
+		sysctl_enable_oid(*oidp);
 	sysctl_wunlock();
 	sx_xlock(&kld_sx);
 }
@@ -383,7 +411,7 @@ linker_init_kernel_modules(void)
 }
 
 SYSINIT(linker_kernel, SI_SUB_KLD, SI_ORDER_ANY, linker_init_kernel_modules,
-    0);
+    NULL);
 
 static int
 linker_load_file(const char *filename, linker_file_t *result)
@@ -430,7 +458,7 @@ linker_load_file(const char *filename, linker_file_t *result)
 				return (error);
 			}
 			modules = !TAILQ_EMPTY(&lf->modules);
-			linker_file_register_sysctls(lf);
+			linker_file_register_sysctls(lf, false);
 			linker_file_sysinit(lf);
 			lf->flags |= LINKER_FILE_LINKED;
 
@@ -443,6 +471,7 @@ linker_load_file(const char *filename, linker_file_t *result)
 				linker_file_unload(lf, LINKER_UNLOAD_FORCE);
 				return (ENOEXEC);
 			}
+			linker_file_enable_sysctls(lf);
 			EVENTHANDLER_INVOKE(kld_load, lf);
 			*result = lf;
 			return (0);
@@ -595,6 +624,10 @@ linker_make_file(const char *pathname, linker_class_t lc)
 	lf->ndeps = 0;
 	lf->deps = NULL;
 	lf->loadcnt = ++loadcnt;
+#ifdef __arm__
+	lf->exidx_addr = 0;
+	lf->exidx_size = 0;
+#endif
 	STAILQ_INIT(&lf->common);
 	TAILQ_INIT(&lf->modules);
 	TAILQ_INSERT_TAIL(&linker_files, lf, link);
@@ -692,8 +725,8 @@ linker_file_unload(linker_file_t file, int flags)
 	 */
 	if (file->flags & LINKER_FILE_LINKED) {
 		file->flags &= ~LINKER_FILE_LINKED;
-		linker_file_sysuninit(file);
 		linker_file_unregister_sysctls(file);
+		linker_file_sysuninit(file);
 	}
 	TAILQ_REMOVE(&linker_files, file, link);
 
@@ -992,15 +1025,33 @@ linker_ddb_search_symbol_name(caddr_t value, char *buf, u_int buflen,
  * obey locking protocols, and offer a significantly less complex interface.
  */
 int
-linker_search_symbol_name(caddr_t value, char *buf, u_int buflen,
-    long *offset)
+linker_search_symbol_name_flags(caddr_t value, char *buf, u_int buflen,
+    long *offset, int flags)
 {
 	int error;
 
-	sx_slock(&kld_sx);
+	KASSERT((flags & (M_NOWAIT | M_WAITOK)) != 0 &&
+	    (flags & (M_NOWAIT | M_WAITOK)) != (M_NOWAIT | M_WAITOK),
+	    ("%s: bad flags: 0x%x", __func__, flags));
+
+	if (flags & M_NOWAIT) {
+		if (!sx_try_slock(&kld_sx))
+			return (EWOULDBLOCK);
+	} else
+		sx_slock(&kld_sx);
+
 	error = linker_debug_search_symbol_name(value, buf, buflen, offset);
 	sx_sunlock(&kld_sx);
 	return (error);
+}
+
+int
+linker_search_symbol_name(caddr_t value, char *buf, u_int buflen,
+    long *offset)
+{
+
+	return (linker_search_symbol_name_flags(value, buf, buflen, offset,
+	    M_WAITOK));
 }
 
 /*
@@ -1202,7 +1253,7 @@ out:
 int
 sys_kldstat(struct thread *td, struct kldstat_args *uap)
 {
-	struct kld_file_stat stat;
+	struct kld_file_stat *stat;
 	int error, version;
 
 	/*
@@ -1215,10 +1266,12 @@ sys_kldstat(struct thread *td, struct kldstat_args *uap)
 	    version != sizeof(struct kld_file_stat))
 		return (EINVAL);
 
-	error = kern_kldstat(td, uap->fileid, &stat);
-	if (error != 0)
-		return (error);
-	return (copyout(&stat, uap->stat, version));
+	stat = malloc(sizeof(*stat), M_TEMP, M_WAITOK | M_ZERO);
+	error = kern_kldstat(td, uap->fileid, stat);
+	if (error == 0)
+		error = copyout(stat, uap->stat, version);
+	free(stat, M_TEMP);
+	return (error);
 }
 
 int
@@ -1243,8 +1296,8 @@ kern_kldstat(struct thread *td, int fileid, struct kld_file_stat *stat)
 
 	/* Version 1 fields: */
 	namelen = strlen(lf->filename) + 1;
-	if (namelen > MAXPATHLEN)
-		namelen = MAXPATHLEN;
+	if (namelen > sizeof(stat->name))
+		namelen = sizeof(stat->name);
 	bcopy(lf->filename, &stat->name[0], namelen);
 	stat->refs = lf->refs;
 	stat->id = lf->id;
@@ -1252,8 +1305,8 @@ kern_kldstat(struct thread *td, int fileid, struct kld_file_stat *stat)
 	stat->size = lf->size;
 	/* Version 2 fields: */
 	namelen = strlen(lf->pathname) + 1;
-	if (namelen > MAXPATHLEN)
-		namelen = MAXPATHLEN;
+	if (namelen > sizeof(stat->pathname))
+		namelen = sizeof(stat->pathname);
 	bcopy(lf->pathname, &stat->pathname[0], namelen);
 	sx_xunlock(&kld_sx);
 
@@ -1642,7 +1695,7 @@ restart:
 		if (linker_file_lookup_set(lf, "sysinit_set", &si_start,
 		    &si_stop, NULL) == 0)
 			sysinit_add(si_start, si_stop);
-		linker_file_register_sysctls(lf);
+		linker_file_register_sysctls(lf, true);
 		lf->flags |= LINKER_FILE_LINKED;
 		continue;
 fail:
@@ -1653,7 +1706,7 @@ fail:
 	/* woohoo! we made it! */
 }
 
-SYSINIT(preload, SI_SUB_KLD, SI_ORDER_MIDDLE, linker_preload, 0);
+SYSINIT(preload, SI_SUB_KLD, SI_ORDER_MIDDLE, linker_preload, NULL);
 
 /*
  * Handle preload files that failed to load any modules.
@@ -1688,7 +1741,7 @@ linker_preload_finish(void *arg)
  * becomes runnable in SI_SUB_KTHREAD_INIT, so go slightly before that.
  */
 SYSINIT(preload_finish, SI_SUB_KTHREAD_INIT - 100, SI_ORDER_MIDDLE,
-    linker_preload_finish, 0);
+    linker_preload_finish, NULL);
 
 /*
  * Search for a not-loaded module by name.
@@ -1760,7 +1813,7 @@ linker_lookup_file(const char *path, int pathlen, const char *name,
 			type = nd.ni_vp->v_type;
 			if (vap)
 				VOP_GETATTR(nd.ni_vp, vap, td->td_ucred);
-			VOP_UNLOCK(nd.ni_vp, 0);
+			VOP_UNLOCK(nd.ni_vp);
 			vn_close(nd.ni_vp, FREAD, td->td_ucred, td);
 			if (type == VREG)
 				return (result);
@@ -1825,7 +1878,7 @@ linker_hints_lookup(const char *path, int pathlen, const char *modname,
 	    UIO_SYSSPACE, IO_NODELOCKED, cred, NOCRED, &reclen, td);
 	if (error)
 		goto bad;
-	VOP_UNLOCK(nd.ni_vp, 0);
+	VOP_UNLOCK(nd.ni_vp);
 	vn_close(nd.ni_vp, FREAD, cred, td);
 	nd.ni_vp = NULL;
 	if (reclen != 0) {
@@ -1893,7 +1946,7 @@ bad:
 	if (hints)
 		free(hints, M_TEMP);
 	if (nd.ni_vp != NULL) {
-		VOP_UNLOCK(nd.ni_vp, 0);
+		VOP_UNLOCK(nd.ni_vp);
 		vn_close(nd.ni_vp, FREAD, cred, td);
 	}
 	/*
@@ -2030,14 +2083,18 @@ linker_load_module(const char *kldname, const char *modname,
  		 */
 		KASSERT(verinfo == NULL, ("linker_load_module: verinfo"
 		    " is not NULL"));
+		/* check if root file system is not mounted */
+		if (rootvnode == NULL || curproc->p_fd->fd_rdir == NULL)
+			return (ENXIO);
 		pathname = linker_search_kld(kldname);
 	} else {
 		if (modlist_lookup2(modname, verinfo) != NULL)
 			return (EEXIST);
+		/* check if root file system is not mounted */
+		if (rootvnode == NULL || curproc->p_fd->fd_rdir == NULL)
+			return (ENXIO);
 		if (kldname != NULL)
 			pathname = strdup(kldname, M_LINKER);
-		else if (rootvnode == NULL)
-			pathname = NULL;
 		else
 			/*
 			 * Need to find a KLD with required module
@@ -2092,7 +2149,7 @@ linker_load_dependencies(linker_file_t lf)
 	const struct mod_depend *verinfo;
 	modlist_t mod;
 	const char *modname, *nmodname;
-	int ver, error = 0, count;
+	int ver, error = 0;
 
 	/*
 	 * All files are dependent on /kernel.
@@ -2105,7 +2162,7 @@ linker_load_dependencies(linker_file_t lf)
 			return (error);
 	}
 	if (linker_file_lookup_set(lf, MDT_SETNAME, &start, &stop,
-	    &count) != 0)
+	    NULL) != 0)
 		return (0);
 	for (mdp = start; mdp < stop; mdp++) {
 		mp = *mdp;

@@ -31,6 +31,7 @@
 
 #ifndef LOCORE
 
+#include <machine/debug_monitor.h>
 #include <machine/vfp.h>
 
 struct trapframe;
@@ -43,7 +44,6 @@ struct pcb {
 	uint64_t	pcb_sp;
 	uint64_t	pcb_tpidr_el0;
 	uint64_t	pcb_tpidrro_el0;
-	vm_offset_t	pcb_l0addr;
 
 	/* Fault handler, the error value is passed in x0 */
 	vm_offset_t	pcb_onfault;
@@ -56,6 +56,7 @@ struct pcb {
 	int		pcb_fpflags;
 #define	PCB_FP_STARTED	0x01
 #define	PCB_FP_KERN	0x02
+#define	PCB_FP_NOSAVE	0x04
 /* The bits passed to userspace in get_fpcontext */
 #define	PCB_FP_USERMASK	(PCB_FP_STARTED)
 	u_int		pcb_vfpcpu;	/* Last cpu this thread ran VFP code */
@@ -66,6 +67,8 @@ struct pcb {
 	 * Place last to simplify the asm to access the rest if the struct.
 	 */
 	struct vfpstate	pcb_fpustate;
+
+	struct debug_monitor_state pcb_dbg_regs;
 };
 
 #ifdef _KERNEL

@@ -53,7 +53,7 @@ __FBSDID("$FreeBSD$");
 #include <dialog.h>
 #endif
 
-#define	_PATH_ZONETAB		"/usr/share/zoneinfo/zone.tab"
+#define	_PATH_ZONETAB		"/usr/share/zoneinfo/zone1970.tab"
 #define	_PATH_ISO3166		"/usr/share/misc/iso3166"
 #define	_PATH_ZONEINFO		"/usr/share/zoneinfo"
 #define	_PATH_LOCALTIME		"/etc/localtime"
@@ -107,7 +107,7 @@ xdialog_count_rows(const char *p)
 		rows++;
 	}
 
-	return rows ? rows : 1;
+	return (rows ? rows : 1);
 }
 
 static int
@@ -124,7 +124,7 @@ xdialog_count_columns(const char *p)
 
 	len = strlen(p);
 	max_len = MAX(max_len, len);
-	return max_len;
+	return (max_len);
 }
 
 static int
@@ -164,7 +164,8 @@ xdialog_menu(const char *title, const char *cprompt, int height, int width,
 				tag_x = MAX(tag_x, l + k + 2);
 			}
 		}
-		width = MAX(xdialog_count_columns(cprompt), title != NULL ? xdialog_count_columns(title) : 0);
+		width = MAX(xdialog_count_columns(cprompt), title != NULL ?
+		    xdialog_count_columns(title) : 0);
 		width = MAX(width, tag_x + 4) + 4;
 	}
 	width = MAX(width, 24);
@@ -199,7 +200,7 @@ again:
 
 	free(listitems);
 	dlg_restore_vars(&save_vars);
-	return result;
+	return (result);
 }
 
 static int usedialog = 1;
@@ -216,7 +217,7 @@ struct continent {
 	int		nitems;
 };
 
-static struct continent	africa, america, antarctica, arctic, asia, atlantic;
+static struct continent	africa, america, antarctica, asia, atlantic;
 static struct continent	australia, europe, indian, pacific, utc;
 
 static struct continent_names {
@@ -226,7 +227,6 @@ static struct continent_names {
 	{ "Africa",	&africa },
 	{ "America",	&america },
 	{ "Antarctica",	&antarctica },
-	{ "Arctic",	&arctic },
 	{ "Asia",	&asia },
 	{ "Atlantic",	&atlantic },
 	{ "Australia",	&australia },
@@ -243,21 +243,20 @@ static struct continent_items {
 	{ "1",	"Africa" },
 	{ "2",	"America -- North and South" },
 	{ "3",	"Antarctica" },
-	{ "4",	"Arctic Ocean" },
-	{ "5",	"Asia" },
-	{ "6",	"Atlantic Ocean" },
-	{ "7",	"Australia" },
-	{ "8",	"Europe" },
-	{ "9",	"Indian Ocean" },
-	{ "0",	"Pacific Ocean" },
-	{ "a",	"UTC" }
+	{ "4",	"Asia" },
+	{ "5",	"Atlantic Ocean" },
+	{ "6",	"Australia" },
+	{ "7",	"Europe" },
+	{ "8",	"Indian Ocean" },
+	{ "9",	"Pacific Ocean" },
+	{ "0",	"UTC" }
 };
 
 #define	NCONTINENTS	\
     (int)((sizeof(continent_items)) / (sizeof(continent_items[0])))
 static dialogMenuItem continents[NCONTINENTS];
 
-#define	OCEANP(x)	((x) == 3 || (x) == 5 || (x) == 8 || (x) == 9)
+#define	OCEANP(x)	((x) == 4 || (x) == 7 || (x) == 8)
 
 static int
 continent_country_menu(dialogMenuItem *continent)
@@ -269,7 +268,7 @@ continent_country_menu(dialogMenuItem *continent)
 	int		rv;
 
 	if (strcmp(continent->title, "UTC") == 0)
-	        return set_zone_utc();
+		return (set_zone_utc());
 
 	/* Short cut -- if there's only one country, don't post a menu. */
 	if (contp->nitems == 1)
@@ -480,8 +479,8 @@ read_zones(void)
 	char		contbuf[16];
 	FILE		*fp;
 	struct continent *cont;
-	size_t		len;
-	char		*line, *tlc, *file, *descr, *p;
+	size_t		len, contlen;
+	char		*line, *country_list, *tlc, *file, *descr, *p;
 	int		lineno;
 
 	fp = fopen(path_zonetab, "r");
@@ -497,18 +496,19 @@ read_zones(void)
 		if (line[0] == '#')
 			continue;
 
-		tlc = strsep(&line, "\t");
-		if (strlen(tlc) != 2)
-			errx(1, "%s:%d: invalid country code `%s'",
-			    path_zonetab, lineno, tlc);
+		country_list = strsep(&line, "\t");
 		/* coord = */ strsep(&line, "\t");	 /* Unused */
 		file = strsep(&line, "\t");
+		/* get continent portion from continent/country */
 		p = strchr(file, '/');
 		if (p == NULL)
 			errx(1, "%s:%d: invalid zone name `%s'", path_zonetab,
 			    lineno, file);
-		contbuf[0] = '\0';
-		strncat(contbuf, file, p - file);
+		contlen = p - file + 1;		/* trailing nul */
+		if (contlen > sizeof(contbuf))
+			errx(1, "%s:%d: continent name in zone name `%s' too long",
+			    path_zonetab, lineno, file);
+		strlcpy(contbuf, file, contlen);
 		cont = find_continent(contbuf);
 		if (!cont)
 			errx(1, "%s:%d: invalid region `%s'", path_zonetab,
@@ -516,7 +516,13 @@ read_zones(void)
 
 		descr = (line != NULL && *line != '\0') ? line : NULL;
 
-		add_zone_to_country(lineno, tlc, descr, file, cont);
+		while (country_list != NULL) {
+			tlc = strsep(&country_list, ",");
+			if (strlen(tlc) != 2)
+				errx(1, "%s:%d: invalid country code `%s'",
+				    path_zonetab, lineno, tlc);
+			add_zone_to_country(lineno, tlc, descr, file, cont);
+		}
 	}
 	fclose(fp);
 }
@@ -642,7 +648,7 @@ set_zone_menu(dialogMenuItem *dmi)
 static int
 set_zone_utc(void)
 {
-	if (!confirm_zone(NULL))
+	if (!confirm_zone("UTC"))
 		return (DITEM_FAILURE | DITEM_RECREATE);
 
 	return (install_zoneinfo("UTC"));
@@ -656,7 +662,7 @@ confirm_zone(const char *filename)
 	struct tm	*tm;
 	int		rv;
 
-	setenv("TZ", filename == NULL ? "" : filename, 1);
+	setenv("TZ", filename, 1);
 	tzset();
 	tm = localtime(&t);
 
@@ -714,10 +720,7 @@ install_zoneinfo_file(const char *zoneinfo_file)
 
 #ifdef VERBOSE
 	snprintf(title, sizeof(title), "Info");
-	if (zoneinfo_file == NULL)
-		snprintf(prompt, sizeof(prompt),
-		    "Removing %s", path_localtime);
-	else if (copymode)
+	if (copymode)
 		snprintf(prompt, sizeof(prompt),
 		    "Copying %s to %s", zoneinfo_file, path_localtime);
 	else
@@ -733,49 +736,6 @@ install_zoneinfo_file(const char *zoneinfo_file)
 #endif
 
 	if (reallydoit) {
-		if (zoneinfo_file == NULL) {
-			if (unlink(path_localtime) < 0 && errno != ENOENT) {
-				snprintf(title, sizeof(title), "Error");
-				snprintf(prompt, sizeof(prompt),
-				     "Could not delete %s: %s", path_localtime,
-				     strerror(errno));
-#ifdef HAVE_DIALOG
-				if (usedialog)
-					dialog_msgbox(title, prompt, 8, 72, 1);
-				else
-#endif
-					fprintf(stderr, "%s\n", prompt);
-
-				return (DITEM_FAILURE | DITEM_RECREATE);
-			}
-			if (unlink(path_db) < 0 && errno != ENOENT) {
-				snprintf(title, sizeof(title), "Error");
-				snprintf(prompt, sizeof(prompt),
-				     "Could not delete %s: %s", path_db,
-				     strerror(errno));
-#ifdef HAVE_DIALOG
-				if (usedialog)
-					dialog_msgbox(title, prompt, 8, 72, 1);
-				else
-#endif
-					fprintf(stderr, "%s\n", prompt);
-
-				return (DITEM_FAILURE | DITEM_RECREATE);
-			}
-#ifdef VERBOSE
-			snprintf(title, sizeof(title), "Done");
-			snprintf(prompt, sizeof(prompt),
-			    "Removed %s", path_localtime);
-#ifdef HAVE_DIALOG
-			if (usedialog)
-				dialog_msgbox(title, prompt, 8, 72, 1);
-			else
-#endif
-				fprintf(stderr, "%s\n", prompt);
-#endif
-			return (DITEM_LEAVE_MENU);
-		}
-
 		if (copymode) {
 			fd1 = open(zoneinfo_file, O_RDONLY, 0);
 			if (fd1 < 0) {
@@ -794,7 +754,7 @@ install_zoneinfo_file(const char *zoneinfo_file)
 
 			if (unlink(path_localtime) < 0 && errno != ENOENT) {
 				snprintf(prompt, sizeof(prompt),
-				    "Could not unlink %s: %s",
+				    "Could not delete %s: %s",
 				    path_localtime, strerror(errno));
 #ifdef HAVE_DIALOG
 				if (usedialog) {
@@ -859,7 +819,7 @@ install_zoneinfo_file(const char *zoneinfo_file)
 			}
 			if (unlink(path_localtime) < 0 && errno != ENOENT) {
 				snprintf(prompt, sizeof(prompt),
-				    "Could not unlink %s: %s",
+				    "Could not delete %s: %s",
 				    path_localtime, strerror(errno));
 #ifdef HAVE_DIALOG
 				if (usedialog) {
@@ -999,7 +959,6 @@ main(int argc, char **argv)
 		sprintf(path_wall_cmos_clock, "%s/%s", chrootenv,
 		    _PATH_WALL_CMOS_CLOCK);
 	}
-
 
 	/* Override the user-supplied umask. */
 	(void)umask(S_IWGRP | S_IWOTH);

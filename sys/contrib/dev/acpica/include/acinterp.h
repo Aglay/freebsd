@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -214,7 +214,7 @@ ACPI_STATUS
 AcpiExConvertToInteger (
     ACPI_OPERAND_OBJECT     *ObjDesc,
     ACPI_OPERAND_OBJECT     **ResultDesc,
-    UINT32                  Flags);
+    UINT32                  ImplicitConversion);
 
 ACPI_STATUS
 AcpiExConvertToBuffer (
@@ -284,6 +284,11 @@ AcpiExTracePoint (
 /*
  * exfield - ACPI AML (p-code) execution - field manipulation
  */
+ACPI_STATUS
+AcpiExGetProtocolBufferLength (
+    UINT32                  ProtocolId,
+    UINT32                  *ReturnLength);
+
 ACPI_STATUS
 AcpiExCommonBufferSetup (
     ACPI_OPERAND_OBJECT     *ObjDesc,
@@ -495,6 +500,32 @@ AcpiExPrepFieldValue (
 
 
 /*
+ * exserial - FieldUnit support for serial address spaces
+ */
+ACPI_STATUS
+AcpiExReadSerialBus (
+    ACPI_OPERAND_OBJECT     *ObjDesc,
+    ACPI_OPERAND_OBJECT     **ReturnBuffer);
+
+ACPI_STATUS
+AcpiExWriteSerialBus (
+    ACPI_OPERAND_OBJECT     *SourceDesc,
+    ACPI_OPERAND_OBJECT     *ObjDesc,
+    ACPI_OPERAND_OBJECT     **ReturnBuffer);
+
+ACPI_STATUS
+AcpiExReadGpio (
+    ACPI_OPERAND_OBJECT     *ObjDesc,
+    void                    *Buffer);
+
+ACPI_STATUS
+AcpiExWriteGpio (
+    ACPI_OPERAND_OBJECT     *SourceDesc,
+    ACPI_OPERAND_OBJECT     *ObjDesc,
+    ACPI_OPERAND_OBJECT     **ReturnBuffer);
+
+
+/*
  * exsystem - Interface to OS services
  */
 ACPI_STATUS
@@ -682,9 +713,6 @@ AcpiExStoreObjectToNode (
     ACPI_NAMESPACE_NODE     *Node,
     ACPI_WALK_STATE         *WalkState,
     UINT8                   ImplicitConversion);
-
-#define ACPI_IMPLICIT_CONVERSION        TRUE
-#define ACPI_NO_IMPLICIT_CONVERSION     FALSE
 
 
 /*

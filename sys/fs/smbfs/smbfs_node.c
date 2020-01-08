@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000-2001 Boris Popov
  * All rights reserved.
  *
@@ -270,10 +272,6 @@ smbfs_reclaim(ap)
 
 	KASSERT((np->n_flag & NOPEN) == 0, ("file not closed before reclaim"));
 
-	/*
-	 * Destroy the vm object and flush associated pages.
-	 */
-	vnode_destroy_vobject(vp);
 	dvp = (np->n_parent && (np->n_flag & NREFPARENT)) ?
 	    np->n_parent : NULL;
 	

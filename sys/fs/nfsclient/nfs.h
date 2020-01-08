@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -89,8 +91,7 @@ enum nfsiod_state {
 /*
  * Function prototypes.
  */
-int ncl_meta_setsize(struct vnode *, struct ucred *, struct thread *,
-    u_quad_t);
+int ncl_meta_setsize(struct vnode *, struct thread *, u_quad_t);
 void ncl_doio_directwrite(struct buf *);
 int ncl_bioread(struct vnode *, struct uio *, int, struct ucred *);
 int ncl_biowrite(struct vnode *, struct uio *, int, struct ucred *);

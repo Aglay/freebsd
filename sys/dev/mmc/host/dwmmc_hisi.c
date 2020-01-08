@@ -32,6 +32,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/bus.h>
 #include <sys/module.h>
+#include <sys/queue.h>
+#include <sys/taskqueue.h>
 
 #include <machine/bus.h>
 
@@ -40,6 +42,8 @@ __FBSDID("$FreeBSD$");
 #include <dev/ofw/ofw_bus_subr.h>
 
 #include <dev/mmc/host/dwmmc_var.h>
+
+#include "opt_mmccam.h"
 
 static device_probe_t hisi_dwmmc_probe;
 static device_attach_t hisi_dwmmc_attach;
@@ -92,5 +96,11 @@ static devclass_t hisi_dwmmc_devclass;
 
 DEFINE_CLASS_1(hisi_dwmmc, hisi_dwmmc_driver, hisi_dwmmc_methods,
     sizeof(struct dwmmc_softc), dwmmc_driver);
+
 DRIVER_MODULE(hisi_dwmmc, simplebus, hisi_dwmmc_driver,
     hisi_dwmmc_devclass, 0, 0);
+DRIVER_MODULE(hisi_dwmmc, ofwbus, hisi_dwmmc_driver, hisi_dwmmc_devclass
+    , NULL, NULL);
+#ifndef MMCCAM
+MMC_DECLARE_BRIDGE(hisi_dwmmc);
+#endif

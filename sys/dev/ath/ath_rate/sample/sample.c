@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2005 John Bicket
  * All rights reserved.
  *
@@ -1016,6 +1018,12 @@ ath_rate_newassoc(struct ath_softc *sc, struct ath_node *an, int isnew)
 	if (isnew)
 		ath_rate_ctl_reset(sc, &an->an_node);
 }
+
+void
+ath_rate_update_rx_rssi(struct ath_softc *sc, struct ath_node *an, int rssi)
+{
+}
+
 
 static const struct txschedule *mrr_schedules[IEEE80211_MODE_MAX+2] = {
 	NULL,		/* IEEE80211_MODE_AUTO */

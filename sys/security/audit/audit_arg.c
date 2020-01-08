@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1999-2005 Apple Inc.
  * Copyright (c) 2016-2017 Robert N. M. Watson
  * All rights reserved.
@@ -534,7 +536,7 @@ audit_arg_auditinfo_addr(struct auditinfo_addr *au_info)
 }
 
 void
-audit_arg_text(char *text)
+audit_arg_text(const char *text)
 {
 	struct kaudit_record *ar;
 
@@ -688,7 +690,7 @@ audit_arg_file(struct proc *p, struct file *fp)
 		vp = fp->f_vnode;
 		vn_lock(vp, LK_SHARED | LK_RETRY);
 		audit_arg_vnode1(vp);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		break;
 
 	case DTYPE_SOCKET:
@@ -976,6 +978,6 @@ audit_sysclose(struct thread *td, int fd)
 	vp = fp->f_vnode;
 	vn_lock(vp, LK_SHARED | LK_RETRY);
 	audit_arg_vnode1(vp);
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 	fdrop(fp, td);
 }

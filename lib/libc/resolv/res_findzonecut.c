@@ -2,7 +2,9 @@
 static const char rcsid[] = "$Id: res_findzonecut.c,v 1.10 2005/10/11 00:10:16 marka Exp $";
 #endif /* not lint */
 
-/*
+/*-
+ * SPDX-License-Identifier: ISC
+ *
  * Copyright (c) 2004 by Internet Systems Consortium, Inc. ("ISC")
  * Copyright (c) 1999 by Internet Software Consortium.
  *
@@ -627,7 +629,7 @@ save_a(res_state statp, ns_msg *msg, ns_sect sect,
 			arr->addr.sin6.sin6_len = sizeof(arr->addr.sin6);
 #endif
 			memcpy(&arr->addr.sin6.sin6_addr, ns_rr_rdata(rr), 16);
-			arr->addr.sin.sin_port = htons(NAMESERVER_PORT);
+			arr->addr.sin6.sin6_port = htons(NAMESERVER_PORT);
 			nsrr->flags |= RR_NS_HAVE_V6;
 			break;
 		default:

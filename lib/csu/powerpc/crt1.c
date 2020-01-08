@@ -1,5 +1,7 @@
 /* LINTLIBRARY */
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright 2001 David E. O'Brien.
  * All rights reserved.
  * Copyright 1996-1998 John D. Polstra.
@@ -19,7 +21,7 @@
  * 3. All advertising materials mentioning features or use of this software
  *    must display the following acknowledgement:
  *          This product includes software developed for the
- *          FreeBSD Project.  See http://www.freebsd.org/ for
+ *          FreeBSD Project.  See https://www.freebsd.org/ for
  *          information about FreeBSD.
  *          This product includes software developed for the
  *          NetBSD Project.  See http://www.netbsd.org/ for
@@ -99,4 +101,10 @@ _start(int argc, char **argv, char **env,
 __asm__(".text");
 __asm__("eprol:");
 __asm__(".previous");
+#endif
+
+#ifndef PIC
+__asm__(".text\n"
+	"\t.global _GLOBAL_OFFSET_TABLE_\n"
+	"\t.reloc 0, R_PPC_NONE, _GLOBAL_OFFSET_TABLE_");
 #endif

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Edward Tomasz Napierala <trasz@FreeBSD.org>
  * Copyright (c) 2004-2006 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
@@ -42,6 +44,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/eventhandler.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/mountver/g_mountver.h>
 
 
@@ -82,14 +85,29 @@ struct g_class g_mountver_class = {
 };
 
 static void
+g_mountver_detach(void *arg, int flags __unused)
+{
+	struct g_consumer *cp = arg;
+
+	g_topology_assert();
+	if (cp->acr > 0 || cp->acw > 0 || cp->ace > 0)
+		g_access(cp, -cp->acr, -cp->acw, -cp->ace);
+	g_detach(cp);
+}
+
+static void
 g_mountver_done(struct bio *bp)
 {
+	struct g_mountver_softc *sc;
 	struct g_geom *gp;
+	struct g_consumer *cp;
 	struct bio *pbp;
 
+	cp = bp->bio_from;
+	gp = cp->geom;
 	if (bp->bio_error != ENXIO) {
 		g_std_done(bp);
-		return;
+		goto done;
 	}
 
 	/*
@@ -98,32 +116,45 @@ g_mountver_done(struct bio *bp)
 	 * gets called.  To work around that, we have to queue requests
 	 * that failed with ENXIO, in order to send them later.
 	 */
-	gp = bp->bio_from->geom;
-
 	pbp = bp->bio_parent;
 	KASSERT(pbp->bio_to == LIST_FIRST(&gp->provider),
 	    ("parent request was for someone else"));
 	g_destroy_bio(bp);
 	pbp->bio_inbed++;
 	g_mountver_queue(pbp);
+
+done:
+	sc = gp->softc;
+	mtx_lock(&sc->sc_mtx);
+	if (--cp->index == 0 && sc->sc_orphaned)
+		g_post_event(g_mountver_detach, cp, M_NOWAIT, NULL);
+	mtx_unlock(&sc->sc_mtx);
 }
 
+/*
+ * Send the BIO down.  The function is called with sc_mtx held to cover
+ * the race with orphan, but drops it before external calls.
+ */
 static void
-g_mountver_send(struct bio *bp)
+g_mountver_send(struct g_geom *gp, struct bio *bp)
 {
-	struct g_geom *gp;
+	struct g_mountver_softc *sc = gp->softc;
+	struct g_consumer *cp;
 	struct bio *cbp;
 
-	gp = bp->bio_to->geom;
-
+	mtx_assert(&sc->sc_mtx, MA_OWNED);
 	cbp = g_clone_bio(bp);
 	if (cbp == NULL) {
+		mtx_unlock(&sc->sc_mtx);
 		g_io_deliver(bp, ENOMEM);
 		return;
 	}
+	cp = LIST_FIRST(&gp->consumer);
+	cp->index++;
+	mtx_unlock(&sc->sc_mtx);
 
 	cbp->bio_done = g_mountver_done;
-	g_io_request(cbp, LIST_FIRST(&gp->consumer));
+	g_io_request(cbp, cp);
 }
 
 static void
@@ -149,10 +180,12 @@ g_mountver_send_queued(struct g_geom *gp)
 	sc = gp->softc;
 
 	mtx_lock(&sc->sc_mtx);
-	while ((bp = TAILQ_FIRST(&sc->sc_queue)) != NULL) {
+	while ((bp = TAILQ_FIRST(&sc->sc_queue)) != NULL && !sc->sc_orphaned) {
 		TAILQ_REMOVE(&sc->sc_queue, bp, bio_queue);
 		G_MOUNTVER_LOGREQ(bp, "Sending queued request.");
-		g_mountver_send(bp);
+		/* sc_mtx is dropped inside */
+		g_mountver_send(gp, bp);
+		mtx_lock(&sc->sc_mtx);
 	}
 	mtx_unlock(&sc->sc_mtx);
 }
@@ -168,8 +201,10 @@ g_mountver_discard_queued(struct g_geom *gp)
 	mtx_lock(&sc->sc_mtx);
 	while ((bp = TAILQ_FIRST(&sc->sc_queue)) != NULL) {
 		TAILQ_REMOVE(&sc->sc_queue, bp, bio_queue);
+		mtx_unlock(&sc->sc_mtx);
 		G_MOUNTVER_LOGREQ(bp, "Discarding queued request.");
 		g_io_deliver(bp, ENXIO);
+		mtx_lock(&sc->sc_mtx);
 	}
 	mtx_unlock(&sc->sc_mtx);
 }
@@ -189,14 +224,22 @@ g_mountver_start(struct bio *bp)
 	 * orphaning didn't happen yet.  In that case, queue all subsequent
 	 * requests in order to maintain ordering.
 	 */
+	mtx_lock(&sc->sc_mtx);
 	if (sc->sc_orphaned || !TAILQ_EMPTY(&sc->sc_queue)) {
+		mtx_unlock(&sc->sc_mtx);
+		if (sc->sc_shutting_down) {
+			G_MOUNTVER_LOGREQ(bp, "Discarding request due to shutdown.");
+			g_io_deliver(bp, ENXIO);
+			return;
+		}
 		G_MOUNTVER_LOGREQ(bp, "Queueing request.");
 		g_mountver_queue(bp);
 		if (!sc->sc_orphaned)
 			g_mountver_send_queued(gp);
 	} else {
 		G_MOUNTVER_LOGREQ(bp, "Sending request.");
-		g_mountver_send(bp);
+		/* sc_mtx is dropped inside */
+		g_mountver_send(gp, bp);
 	}
 }
 
@@ -252,7 +295,7 @@ g_mountver_create(struct gctl_req *req, struct g_class *mp, struct g_provider *p
 	}
 	gp = g_new_geomf(mp, "%s", name);
 	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
-	mtx_init(&sc->sc_mtx, "gmountver", NULL, MTX_DEF);
+	mtx_init(&sc->sc_mtx, "gmountver", NULL, MTX_DEF | MTX_RECURSE);
 	TAILQ_INIT(&sc->sc_queue);
 	sc->sc_provider_name = strdup(pp->name, M_GEOM);
 	gp->softc = sc;
@@ -265,8 +308,18 @@ g_mountver_create(struct gctl_req *req, struct g_class *mp, struct g_provider *p
 	newpp = g_new_providerf(gp, "%s", gp->name);
 	newpp->mediasize = pp->mediasize;
 	newpp->sectorsize = pp->sectorsize;
+	newpp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE;
+
+	if ((pp->flags & G_PF_ACCEPT_UNMAPPED) != 0) {
+		G_MOUNTVER_DEBUG(0, "Unmapped supported for %s.", gp->name);
+		newpp->flags |= G_PF_ACCEPT_UNMAPPED;
+	} else {
+		G_MOUNTVER_DEBUG(0, "Unmapped unsupported for %s.", gp->name);
+		newpp->flags &= ~G_PF_ACCEPT_UNMAPPED;
+	}
 
 	cp = g_new_consumer(gp);
+	cp->flags |= G_CF_DIRECT_SEND | G_CF_DIRECT_RECEIVE;
 	error = g_attach(cp, pp);
 	if (error != 0) {
 		gctl_error(req, "Cannot attach to provider %s.", pp->name);
@@ -448,14 +501,17 @@ static void
 g_mountver_orphan(struct g_consumer *cp)
 {
 	struct g_mountver_softc *sc;
+	int done;
 
 	g_topology_assert();
 
 	sc = cp->geom->softc;
+	mtx_lock(&sc->sc_mtx);
 	sc->sc_orphaned = 1;
-	if (cp->acr > 0 || cp->acw > 0 || cp->ace > 0)
-		g_access(cp, -cp->acr, -cp->acw, -cp->ace);
-	g_detach(cp);
+	done = (cp->index == 0);
+	mtx_unlock(&sc->sc_mtx);
+	if (done)
+		g_mountver_detach(cp, 0);
 	G_MOUNTVER_DEBUG(0, "%s is offline.  Mount verification in progress.", sc->sc_provider_name);
 }
 
@@ -553,8 +609,8 @@ g_mountver_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 			return (NULL);
 		}
 	}
-	g_mountver_send_queued(gp);
 	sc->sc_orphaned = 0;
+	g_mountver_send_queued(gp);
 	G_MOUNTVER_DEBUG(0, "%s has completed mount verification.", sc->sc_provider_name);
 
 	return (gp);
@@ -607,13 +663,20 @@ g_mountver_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 static void
 g_mountver_shutdown_pre_sync(void *arg, int howto)
 {
+	struct g_mountver_softc *sc;
 	struct g_class *mp;
 	struct g_geom *gp, *gp2;
 
 	mp = arg;
 	g_topology_lock();
-	LIST_FOREACH_SAFE(gp, &mp->geom, geom, gp2)
-		g_mountver_destroy(gp, 1);
+	LIST_FOREACH_SAFE(gp, &mp->geom, geom, gp2) {
+		if (gp->softc == NULL)
+			continue;
+		sc = gp->softc;
+		sc->sc_shutting_down = 1;
+		if (sc->sc_orphaned)
+			g_mountver_destroy(gp, 1);
+	}
 	g_topology_unlock();
 }
 
@@ -636,3 +699,4 @@ g_mountver_fini(struct g_class *mp)
 }
 
 DECLARE_GEOM_CLASS(g_mountver_class, g_mountver);
+MODULE_VERSION(geom_mountver, 0);

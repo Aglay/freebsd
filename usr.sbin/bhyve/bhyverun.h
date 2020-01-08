@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 NetApp, Inc.
  * All rights reserved.
  *
@@ -34,6 +36,7 @@
 
 struct vmctx;
 extern int guest_ncpus;
+extern uint16_t cores, sockets, threads;
 extern char *guest_uuid_str;
 extern char *vmname;
 

@@ -18,6 +18,8 @@ SRCS+=	opensolaris_nvpair_alloc_fixed.c
 SRCS+=	opensolaris_fnvpair.c
 .PATH:	${SYSDIR}/cddl/contrib/opensolaris/common/unicode
 SRCS+=	u8_textprep.c
+.PATH:	${SUNW}/common/lz4
+SRCS+=	lz4.c
 
 .PATH:	${SYSDIR}/cddl/compat/opensolaris/kern
 SRCS+=	opensolaris_acl.c
@@ -55,16 +57,7 @@ SRCS+=	list.c
 SRCS+=	nvpair_alloc_system.c
 
 .PATH:	${SUNW}/uts/common/zmod
-SRCS+=	adler32.c
-SRCS+=	opensolaris_crc32.c
-SRCS+=	deflate.c
-SRCS+=	inffast.c
-SRCS+=	inflate.c
-SRCS+=	inftrees.c
-SRCS+=	trees.c
 SRCS+=	zmod.c
-SRCS+=	zmod_subr.c
-SRCS+=	zutil.c
 
 .PATH:	${SYSDIR}/crypto/sha2
 SRCS+=	sha256c.c sha512c.c
@@ -79,18 +72,24 @@ ZFS_SRCS=	${ZFS_OBJS:C/.o$/.c/}
 SRCS+=	${ZFS_SRCS}
 SRCS+=	vdev_geom.c
 SRCS+=	trim_map.c
+.PATH:	${SUNW}/uts/common/fs/zfs/lua
+LUA_SRCS=	${LUA_OBJS:C/.o$/.c/}
+SRCS+=	${LUA_SRCS}
 
 # Use FreeBSD's namecache.
 CFLAGS+=-DFREEBSD_NAMECACHE
 
 CFLAGS+=-I${SYSDIR}/cddl/compat/opensolaris
 CFLAGS+=-I${SUNW}/uts/common/fs/zfs
+CFLAGS+=-I${SUNW}/uts/common/fs/zfs/lua
 CFLAGS+=-I${SUNW}/uts/common/zmod
 CFLAGS+=-I${SUNW}/uts/common
 CFLAGS+=-I${SYSDIR}
 CFLAGS+=-I${SUNW}/common/zfs
+CFLAGS+=-I${SUNW}/common/lz4
 CFLAGS+=-I${SUNW}/common
 CFLAGS+=-DBUILDING_ZFS
+CFLAGS.gcc+=-fms-extensions
 
 .if ${MACHINE_ARCH} == "powerpc64"
 CFLAGS.gcc+=-mminimal-toc

@@ -38,10 +38,12 @@ MAN=		atf-check.1
 CFLAGS+=	-I${ATF}
 CFLAGS+=	-DATF_SHELL='"/bin/sh"'
 
+# Silence warnings about usage of deprecated std::auto_ptr
+CXXWARNFLAGS+=	-Wno-deprecated-declarations
+
 LIBADD=		atf_cxx
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.prog.mk>

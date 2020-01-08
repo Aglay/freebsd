@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009 Alexander Motin <mav@FreeBSD.org>
  * All rights reserved.
  *
@@ -116,7 +118,9 @@ typedef enum {
 	ADA_Q_4K		= 0x01,
 	ADA_Q_NCQ_TRIM_BROKEN	= 0x02,
 	ADA_Q_LOG_BROKEN	= 0x04,
-	ADA_Q_SMR_DM		= 0x08
+	ADA_Q_SMR_DM		= 0x08,
+	ADA_Q_NO_TRIM		= 0x10,
+	ADA_Q_128KB		= 0x20
 } ada_quirks;
 
 #define ADA_Q_BIT_STRING	\
@@ -124,7 +128,9 @@ typedef enum {
 	"\0014K"		\
 	"\002NCQ_TRIM_BROKEN"	\
 	"\003LOG_BROKEN"	\
-	"\004SMR_DM"
+	"\004SMR_DM"		\
+	"\005NO_TRIM"		\
+	"\006128KB"
 
 typedef enum {
 	ADA_CCB_RAHEAD		= 0x01,
@@ -236,19 +242,23 @@ struct ada_softc {
 	int	 write_cache;
 	int	 unmappedio;
 	int	 rotating;
-#ifdef ADA_TEST_FAILURE
+#ifdef CAM_TEST_FAILURE
 	int      force_read_error;
 	int      force_write_error;
 	int      periodic_read_error;
 	int      periodic_read_count;
 #endif
-	struct	 disk_params params;
-	struct	 disk *disk;
+	struct ccb_pathinq	cpi;
+	struct disk_params	params;
+	struct disk		*disk;
 	struct task		sysctl_task;
 	struct sysctl_ctx_list	sysctl_ctx;
 	struct sysctl_oid	*sysctl_tree;
 	struct callout		sendordered_c;
 	struct trim_request	trim_req;
+	uint64_t		trim_count;
+	uint64_t		trim_ranges;
+	uint64_t		trim_lbas;
 #ifdef CAM_IO_STATS
 	struct sysctl_ctx_list	sysctl_stats_ctx;
 	struct sysctl_oid	*sysctl_stats_tree;
@@ -269,6 +279,11 @@ struct ada_quirk_entry {
 
 static struct ada_quirk_entry ada_quirk_table[] =
 {
+	{
+		/* Sandisk X400 */
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "SanDisk?SD8SB8U1T00*", "X4162000*" },
+		/*quirks*/ADA_Q_128KB
+	},
 	{
 		/* Hitachi Advanced Format (4k) drives */
 		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "Hitachi H??????????E3*", "*" },
@@ -361,7 +376,12 @@ static struct ada_quirk_entry ada_quirk_table[] =
 	},
 	{
 		/* WDC Caviar Black Advanced Format (4k) drives */
-		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "WDC WD??????EX*", "*" },
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "WDC WD????AZEX*", "*" },
+		/*quirks*/ADA_Q_4K
+	},
+	{
+		/* WDC Caviar Black Advanced Format (4k) drives */
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "WDC WD????FZEX*", "*" },
 		/*quirks*/ADA_Q_4K
 	},
 	{
@@ -533,6 +553,14 @@ static struct ada_quirk_entry ada_quirk_table[] =
 	},
 	{
 		/*
+		 * KingDian S200 60GB P0921B
+		 * Trimming crash the SSD
+		 */
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "KingDian S200 *", "*" },
+		/*quirks*/ADA_Q_NO_TRIM
+	},
+	{
+		/*
 		 * Kingston E100 Series SSDs
 		 * 4k optimised & trim only works in 4k requests + 4k aligned
 		 */
@@ -661,6 +689,14 @@ static struct ada_quirk_entry ada_quirk_table[] =
 	},
 	{
 		/*
+		 * Samsung 845 SSDs
+		 * 4k optimised, NCQ TRIM Broken (normal TRIM is fine)
+		 */
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "Samsung SSD 845*", "*" },
+		/*quirks*/ADA_Q_4K | ADA_Q_NCQ_TRIM_BROKEN
+	},
+	{
+		/*
 		 * Samsung 850 SSDs
 		 * 4k optimised, NCQ TRIM broken (normal TRIM fine)
 		 */
@@ -684,6 +720,14 @@ static struct ada_quirk_entry ada_quirk_table[] =
 		 * appear to be built with the same controllers as the 840/850.
 		 */
 		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "SAMSUNG MZ7*", "*" },
+		/*quirks*/ADA_Q_4K | ADA_Q_NCQ_TRIM_BROKEN
+	},
+	{
+		/*
+		 * Same as for SAMSUNG MZ7* but enable the quirks for SSD
+		 * starting with MZ7* too
+		 */
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "MZ7*", "*" },
 		/*quirks*/ADA_Q_4K | ADA_Q_NCQ_TRIM_BROKEN
 	},
 	{
@@ -737,7 +781,7 @@ static struct ada_quirk_entry ada_quirk_table[] =
 		 * Drive Managed SATA hard drive.  This drive doesn't report
 		 * in firmware that it is a drive managed SMR drive.
 		 */
-		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "ST8000AS0002*", "*" },
+		{ T_DIRECT, SIP_MEDIA_FIXED, "*", "ST8000AS000[23]*", "*" },
 		/*quirks*/ADA_Q_SMR_DM
 	},
 	{
@@ -764,6 +808,8 @@ static	void		adasysctlinit(void *context, int pending);
 static	int		adagetattr(struct bio *bp);
 static	void		adasetflags(struct ada_softc *softc,
 				    struct ccb_getdev *cgd);
+static void		adasetgeom(struct ada_softc *softc,
+				   struct ccb_getdev *cgd);
 static	periph_ctor_t	adaregister;
 static	void		ada_dsmtrim(struct ada_softc *softc, struct bio *bp,
 				    struct ccb_ataio *ataio);
@@ -779,9 +825,7 @@ static	void		adadone(struct cam_periph *periph,
 			       union ccb *done_ccb);
 static  int		adaerror(union ccb *ccb, u_int32_t cam_flags,
 				u_int32_t sense_flags);
-static void		adagetparams(struct cam_periph *periph,
-				struct ccb_getdev *cgd);
-static timeout_t	adasendorderedtag;
+static callout_func_t	adasendorderedtag;
 static void		adashutdown(void *arg, int howto);
 static void		adasuspend(void *arg);
 static void		adaresume(void *arg);
@@ -888,7 +932,7 @@ adaopen(struct disk *dp)
 	int error;
 
 	periph = (struct cam_periph *)dp->d_drv1;
-	if (cam_periph_acquire(periph) != CAM_REQ_CMP) {
+	if (cam_periph_acquire(periph) != 0) {
 		return(ENXIO);
 	}
 
@@ -934,7 +978,7 @@ adaclose(struct disk *dp)
 		ccb = cam_periph_getccb(periph, CAM_PRIORITY_NORMAL);
 		cam_fill_ataio(&ccb->ataio,
 				    1,
-				    adadone,
+				    NULL,
 				    CAM_DIR_NONE,
 				    0,
 				    NULL,
@@ -961,7 +1005,7 @@ adaclose(struct disk *dp)
 		cam_periph_sleep(periph, &softc->refcount, PRIBIO, "adaclose", 1);
 	cam_periph_unlock(periph);
 	cam_periph_release(periph);
-	return (0);	
+	return (0);
 }
 
 static void
@@ -985,7 +1029,7 @@ adastrategy(struct bio *bp)
 {
 	struct cam_periph *periph;
 	struct ada_softc *softc;
-	
+
 	periph = (struct cam_periph *)bp->bio_disk->d_drv1;
 	softc = (struct ada_softc *)periph->softc;
 
@@ -1009,7 +1053,7 @@ adastrategy(struct bio *bp)
 	 */
 	if (bp->bio_cmd == BIO_ZONE)
 		bp->bio_flags |= BIO_ORDERED;
-	
+
 	/*
 	 * Place it in the queue of disk activities for this disk
 	 */
@@ -1030,7 +1074,7 @@ adadump(void *arg, void *virtual, vm_offset_t physical, off_t offset, size_t len
 	struct	    cam_periph *periph;
 	struct	    ada_softc *softc;
 	u_int	    secsize;
-	union	    ccb ccb;
+	struct	    ccb_ataio ataio;
 	struct	    disk *dp;
 	uint64_t    lba;
 	uint16_t    count;
@@ -1039,22 +1083,19 @@ adadump(void *arg, void *virtual, vm_offset_t physical, off_t offset, size_t len
 	dp = arg;
 	periph = dp->d_drv1;
 	softc = (struct ada_softc *)periph->softc;
-	cam_periph_lock(periph);
 	secsize = softc->params.secsize;
 	lba = offset / secsize;
 	count = length / secsize;
-	
-	if ((periph->flags & CAM_PERIPH_INVALID) != 0) {
-		cam_periph_unlock(periph);
+	if ((periph->flags & CAM_PERIPH_INVALID) != 0)
 		return (ENXIO);
-	}
 
+	memset(&ataio, 0, sizeof(ataio));
 	if (length > 0) {
-		xpt_setup_ccb(&ccb.ccb_h, periph->path, CAM_PRIORITY_NORMAL);
-		ccb.ccb_h.ccb_state = ADA_CCB_DUMP;
-		cam_fill_ataio(&ccb.ataio,
+		xpt_setup_ccb(&ataio.ccb_h, periph->path, CAM_PRIORITY_NORMAL);
+		ataio.ccb_h.ccb_state = ADA_CCB_DUMP;
+		cam_fill_ataio(&ataio,
 		    0,
-		    adadone,
+		    NULL,
 		    CAM_DIR_OUT,
 		    0,
 		    (u_int8_t *) virtual,
@@ -1063,38 +1104,32 @@ adadump(void *arg, void *virtual, vm_offset_t physical, off_t offset, size_t len
 		if ((softc->flags & ADA_FLAG_CAN_48BIT) &&
 		    (lba + count >= ATA_MAX_28BIT_LBA ||
 		    count >= 256)) {
-			ata_48bit_cmd(&ccb.ataio, ATA_WRITE_DMA48,
+			ata_48bit_cmd(&ataio, ATA_WRITE_DMA48,
 			    0, lba, count);
 		} else {
-			ata_28bit_cmd(&ccb.ataio, ATA_WRITE_DMA,
+			ata_28bit_cmd(&ataio, ATA_WRITE_DMA,
 			    0, lba, count);
 		}
-		xpt_polled_action(&ccb);
-
-		error = cam_periph_error(&ccb,
+		error = cam_periph_runccb((union ccb *)&ataio, adaerror,
 		    0, SF_NO_RECOVERY | SF_NO_RETRY, NULL);
-		if ((ccb.ccb_h.status & CAM_DEV_QFRZN) != 0)
-			cam_release_devq(ccb.ccb_h.path, /*relsim_flags*/0,
-			    /*reduction*/0, /*timeout*/0, /*getcount_only*/0);
 		if (error != 0)
 			printf("Aborting dump due to I/O error.\n");
 
-		cam_periph_unlock(periph);
 		return (error);
 	}
 
 	if (softc->flags & ADA_FLAG_CAN_FLUSHCACHE) {
-		xpt_setup_ccb(&ccb.ccb_h, periph->path, CAM_PRIORITY_NORMAL);
+		xpt_setup_ccb(&ataio.ccb_h, periph->path, CAM_PRIORITY_NORMAL);
 
 		/*
 		 * Tell the drive to flush its internal cache. if we
 		 * can't flush in 5s we have big problems. No need to
 		 * wait the default 60s to detect problems.
 		 */
-		ccb.ccb_h.ccb_state = ADA_CCB_DUMP;
-		cam_fill_ataio(&ccb.ataio,
+		ataio.ccb_h.ccb_state = ADA_CCB_DUMP;
+		cam_fill_ataio(&ataio,
 				    0,
-				    adadone,
+				    NULL,
 				    CAM_DIR_NONE,
 				    0,
 				    NULL,
@@ -1102,20 +1137,14 @@ adadump(void *arg, void *virtual, vm_offset_t physical, off_t offset, size_t len
 				    5*1000);
 
 		if (softc->flags & ADA_FLAG_CAN_48BIT)
-			ata_48bit_cmd(&ccb.ataio, ATA_FLUSHCACHE48, 0, 0, 0);
+			ata_48bit_cmd(&ataio, ATA_FLUSHCACHE48, 0, 0, 0);
 		else
-			ata_28bit_cmd(&ccb.ataio, ATA_FLUSHCACHE, 0, 0, 0);
-		xpt_polled_action(&ccb);
-
-		error = cam_periph_error(&ccb,
+			ata_28bit_cmd(&ataio, ATA_FLUSHCACHE, 0, 0, 0);
+		error = cam_periph_runccb((union ccb *)&ataio, adaerror,
 		    0, SF_NO_RECOVERY | SF_NO_RETRY, NULL);
-		if ((ccb.ccb_h.status & CAM_DEV_QFRZN) != 0)
-			cam_release_devq(ccb.ccb_h.path, /*relsim_flags*/0,
-			    /*reduction*/0, /*timeout*/0, /*getcount_only*/0);
 		if (error != 0)
 			xpt_print(periph->path, "Synchronize cache failed\n");
 	}
-	cam_periph_unlock(periph);
 	return (error);
 }
 
@@ -1246,7 +1275,7 @@ adaasync(void *callback_arg, u_int32_t code,
 	{
 		struct ccb_getdev *cgd;
 		cam_status status;
- 
+
 		cgd = (struct ccb_getdev *)arg;
 		if (cgd == NULL)
 			break;
@@ -1279,9 +1308,11 @@ adaasync(void *callback_arg, u_int32_t code,
 		xpt_action((union ccb *)&cgd);
 
 		/*
-		 * Set/clear support flags based on the new Identify data.
+		 * Update our information based on the new Identify data.
 		 */
 		adasetflags(softc, &cgd);
+		adasetgeom(softc, &cgd);
+		disk_resize(softc->disk, M_NOWAIT);
 
 		cam_periph_async(periph, code, path, arg);
 		break;
@@ -1312,14 +1343,14 @@ adaasync(void *callback_arg, u_int32_t code,
 		xpt_action((union ccb *)&cgd);
 		if (ADA_RA >= 0 && softc->flags & ADA_FLAG_CAN_RAHEAD)
 			softc->state = ADA_STATE_RAHEAD;
-		else if (ADA_WC >= 0 && softc->flags & ADA_FLAG_CAN_RAHEAD)
+		else if (ADA_WC >= 0 && softc->flags & ADA_FLAG_CAN_WCACHE)
 			softc->state = ADA_STATE_WCACHE;
 		else if ((softc->flags & ADA_FLAG_CAN_LOG)
 		      && (softc->zone_mode != ADA_ZONE_NONE))
 			softc->state = ADA_STATE_LOGDIR;
 		else
 		    break;
-		if (cam_periph_acquire(periph) != CAM_REQ_CMP)
+		if (cam_periph_acquire(periph) != 0)
 			softc->state = ADA_STATE_NORMAL;
 		else
 			xpt_schedule(periph, CAM_PRIORITY_DEV);
@@ -1402,7 +1433,7 @@ adasysctlinit(void *context, int pending)
 {
 	struct cam_periph *periph;
 	struct ada_softc *softc;
-	char tmpstr[80], tmpstr2[80];
+	char tmpstr[32], tmpstr2[16];
 
 	periph = (struct cam_periph *)context;
 
@@ -1431,6 +1462,18 @@ adasysctlinit(void *context, int pending)
 		OID_AUTO, "delete_method", CTLTYPE_STRING | CTLFLAG_RW,
 		softc, 0, adadeletemethodsysctl, "A",
 		"BIO_DELETE execution method");
+	SYSCTL_ADD_UQUAD(&softc->sysctl_ctx,
+		SYSCTL_CHILDREN(softc->sysctl_tree), OID_AUTO,
+		"trim_count", CTLFLAG_RD, &softc->trim_count,
+		"Total number of dsm commands sent");
+	SYSCTL_ADD_UQUAD(&softc->sysctl_ctx,
+		SYSCTL_CHILDREN(softc->sysctl_tree), OID_AUTO,
+		"trim_ranges", CTLFLAG_RD, &softc->trim_ranges,
+		"Total number of ranges in dsm commands");
+	SYSCTL_ADD_UQUAD(&softc->sysctl_ctx,
+		SYSCTL_CHILDREN(softc->sysctl_tree), OID_AUTO,
+		"trim_lbas", CTLFLAG_RD, &softc->trim_lbas,
+		"Total lbas in the dsm commands sent");
 	SYSCTL_ADD_INT(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
 		OID_AUTO, "read_ahead", CTLFLAG_RW | CTLFLAG_MPSAFE,
 		&softc->read_ahead, 0, "Enable disk read ahead.");
@@ -1466,7 +1509,7 @@ adasysctlinit(void *context, int pending)
 		"max_seq_zones", CTLFLAG_RD, &softc->max_seq_zones,
 		"Maximum Number of Open Sequential Write Required Zones");
 
-#ifdef ADA_TEST_FAILURE
+#ifdef CAM_TEST_FAILURE
 	/*
 	 * Add a 'door bell' sysctl which allows one to set it from userland
 	 * and cause something bad to happen.  For the moment, we only allow
@@ -1484,6 +1527,10 @@ adasysctlinit(void *context, int pending)
 		OID_AUTO, "periodic_read_error", CTLFLAG_RW | CTLFLAG_MPSAFE,
 		&softc->periodic_read_error, 0,
 		"Force a read error every N reads (don't set too low).");
+	SYSCTL_ADD_PROC(&softc->sysctl_ctx, SYSCTL_CHILDREN(softc->sysctl_tree),
+		OID_AUTO, "invalidate", CTLTYPE_U64 | CTLFLAG_RW | CTLFLAG_MPSAFE,
+		periph, 0, cam_periph_invalidate_sysctl, "I",
+		"Write 1 to invalidate the drive immediately");
 #endif
 
 #ifdef CAM_IO_STATS
@@ -1601,7 +1648,8 @@ adasetflags(struct ada_softc *softc, struct ccb_getdev *cgd)
 		softc->flags &= ~ADA_FLAG_CAN_NCQ;
 
 	if ((cgd->ident_data.support_dsm & ATA_SUPPORT_DSM_TRIM) &&
-	    (cgd->inq_flags & SID_DMA)) {
+	    (cgd->inq_flags & SID_DMA) &&
+	    (softc->quirks & ADA_Q_NO_TRIM) == 0) {
 		softc->flags |= ADA_FLAG_CAN_TRIM;
 		softc->trim_max_ranges = TRIM_MAX_RANGES;
 		if (cgd->ident_data.max_dsm_blocks != 0) {
@@ -1669,13 +1717,11 @@ static cam_status
 adaregister(struct cam_periph *periph, void *arg)
 {
 	struct ada_softc *softc;
-	struct ccb_pathinq cpi;
 	struct ccb_getdev *cgd;
 	struct disk_params *dp;
 	struct sbuf sb;
 	char   *announce_buf;
 	caddr_t match;
-	u_int maxio;
 	int quirks;
 
 	cgd = (struct ccb_getdev *)arg;
@@ -1704,6 +1750,7 @@ adaregister(struct cam_periph *periph, void *arg)
 	}
 
 	periph->softc = softc;
+	xpt_path_inq(&softc->cpi, periph->path);
 
 	/*
 	 * See if this device has any quirks.
@@ -1716,11 +1763,6 @@ adaregister(struct cam_periph *periph, void *arg)
 		softc->quirks = ((struct ada_quirk_entry *)match)->quirks;
 	else
 		softc->quirks = ADA_Q_NONE;
-
-	bzero(&cpi, sizeof(cpi));
-	xpt_setup_ccb(&cpi.ccb_h, periph->path, CAM_PRIORITY_NONE);
-	cpi.ccb_h.func_code = XPT_PATH_INQ;
-	xpt_action((union ccb *)&cpi);
 
 	TASK_INIT(&softc->sysctl_task, 0, adasysctlinit, periph);
 
@@ -1747,6 +1789,8 @@ adaregister(struct cam_periph *periph, void *arg)
 	 * Set support flags based on the Identify data and quirks.
 	 */
 	adasetflags(softc, cgd);
+	if (softc->cpi.hba_misc & PIM_ATA_EXT)
+		softc->flags |= ADA_FLAG_PIM_ATA_EXT;
 
 	/* Disable queue sorting for non-rotational media by default. */
 	if (cgd->ident_data.media_rotation_rate == ATA_RATE_NON_ROTATING) {
@@ -1755,14 +1799,13 @@ adaregister(struct cam_periph *periph, void *arg)
 		softc->rotating = 1;
 	}
 	cam_iosched_set_sort_queue(softc->cam_iosched,  softc->rotating ? -1 : 0);
-	adagetparams(periph, cgd);
 	softc->disk = disk_alloc();
-	softc->disk->d_rotation_rate = cgd->ident_data.media_rotation_rate;
+	adasetgeom(softc, cgd);
 	softc->disk->d_devstat = devstat_new_entry(periph->periph_name,
 			  periph->unit_number, softc->params.secsize,
 			  DEVSTAT_ALL_SUPPORTED,
 			  DEVSTAT_TYPE_DIRECT |
-			  XPORT_DEVSTAT_TYPE(cpi.transport),
+			  XPORT_DEVSTAT_TYPE(softc->cpi.transport),
 			  DEVSTAT_PRIORITY_DISK);
 	softc->disk->d_open = adaopen;
 	softc->disk->d_close = adaclose;
@@ -1772,70 +1815,14 @@ adaregister(struct cam_periph *periph, void *arg)
 	softc->disk->d_gone = adadiskgonecb;
 	softc->disk->d_name = "ada";
 	softc->disk->d_drv1 = periph;
-	maxio = cpi.maxio;		/* Honor max I/O size of SIM */
-	if (maxio == 0)
-		maxio = DFLTPHYS;	/* traditional default */
-	else if (maxio > MAXPHYS)
-		maxio = MAXPHYS;	/* for safety */
-	if (softc->flags & ADA_FLAG_CAN_48BIT)
-		maxio = min(maxio, 65536 * softc->params.secsize);
-	else					/* 28bit ATA command limit */
-		maxio = min(maxio, 256 * softc->params.secsize);
-	softc->disk->d_maxsize = maxio;
 	softc->disk->d_unit = periph->unit_number;
-	softc->disk->d_flags = DISKFLAG_DIRECT_COMPLETION | DISKFLAG_CANZONE;
-	if (softc->flags & ADA_FLAG_CAN_FLUSHCACHE)
-		softc->disk->d_flags |= DISKFLAG_CANFLUSHCACHE;
-	if (softc->flags & ADA_FLAG_CAN_TRIM) {
-		softc->disk->d_flags |= DISKFLAG_CANDELETE;
-		softc->disk->d_delmaxsize = softc->params.secsize *
-					    ATA_DSM_RANGE_MAX *
-					    softc->trim_max_ranges;
-	} else if ((softc->flags & ADA_FLAG_CAN_CFA) &&
-	    !(softc->flags & ADA_FLAG_CAN_48BIT)) {
-		softc->disk->d_flags |= DISKFLAG_CANDELETE;
-		softc->disk->d_delmaxsize = 256 * softc->params.secsize;
-	} else
-		softc->disk->d_delmaxsize = maxio;
-	if ((cpi.hba_misc & PIM_UNMAPPED) != 0) {
-		softc->disk->d_flags |= DISKFLAG_UNMAPPED_BIO;
-		softc->unmappedio = 1;
-	}
-	if (cpi.hba_misc & PIM_ATA_EXT)
-		softc->flags |= ADA_FLAG_PIM_ATA_EXT;
-	strlcpy(softc->disk->d_descr, cgd->ident_data.model,
-	    MIN(sizeof(softc->disk->d_descr), sizeof(cgd->ident_data.model)));
-	strlcpy(softc->disk->d_ident, cgd->ident_data.serial,
-	    MIN(sizeof(softc->disk->d_ident), sizeof(cgd->ident_data.serial)));
-	softc->disk->d_hba_vendor = cpi.hba_vendor;
-	softc->disk->d_hba_device = cpi.hba_device;
-	softc->disk->d_hba_subvendor = cpi.hba_subvendor;
-	softc->disk->d_hba_subdevice = cpi.hba_subdevice;
-
-	softc->disk->d_sectorsize = softc->params.secsize;
-	softc->disk->d_mediasize = (off_t)softc->params.sectors *
-	    softc->params.secsize;
-	if (ata_physical_sector_size(&cgd->ident_data) !=
-	    softc->params.secsize) {
-		softc->disk->d_stripesize =
-		    ata_physical_sector_size(&cgd->ident_data);
-		softc->disk->d_stripeoffset = (softc->disk->d_stripesize -
-		    ata_logical_sector_offset(&cgd->ident_data)) %
-		    softc->disk->d_stripesize;
-	} else if (softc->quirks & ADA_Q_4K) {
-		softc->disk->d_stripesize = 4096;
-		softc->disk->d_stripeoffset = 0;
-	}
-	softc->disk->d_fwsectors = softc->params.secs_per_track;
-	softc->disk->d_fwheads = softc->params.heads;
-	ata_disk_firmware_geom_adjust(softc->disk);
 
 	/*
 	 * Acquire a reference to the periph before we register with GEOM.
 	 * We'll release this reference once GEOM calls us back (via
 	 * adadiskgonecb()) telling us that our provider has been freed.
 	 */
-	if (cam_periph_acquire(periph) != CAM_REQ_CMP) {
+	if (cam_periph_acquire(periph) != 0) {
 		xpt_print(periph->path, "%s: lost periph during "
 			  "registration!\n", __func__);
 		cam_periph_lock(periph);
@@ -1860,7 +1847,7 @@ adaregister(struct cam_periph *periph, void *arg)
 	 * Create our sysctl variables, now that we know
 	 * we have successfully attached.
 	 */
-	if (cam_periph_acquire(periph) == CAM_REQ_CMP)
+	if (cam_periph_acquire(periph) == 0)
 		taskqueue_enqueue(taskqueue_thread, &softc->sysctl_task);
 
 	/*
@@ -1908,7 +1895,7 @@ adaregister(struct cam_periph *periph, void *arg)
 static int
 ada_dsmtrim_req_create(struct ada_softc *softc, struct bio *bp, struct trim_request *req)
 {
-	uint64_t lastlba = (uint64_t)-1;
+	uint64_t lastlba = (uint64_t)-1, lbas = 0;
 	int c, lastcount = 0, off, ranges = 0;
 
 	bzero(req, sizeof(*req));
@@ -1927,6 +1914,7 @@ ada_dsmtrim_req_create(struct ada_softc *softc, struct bio *bp, struct trim_requ
 				(lastcount >> 8) & 0xff;
 			count -= c;
 			lba += c;
+			lbas += c;
 		}
 
 		while (count > 0) {
@@ -1941,6 +1929,7 @@ ada_dsmtrim_req_create(struct ada_softc *softc, struct bio *bp, struct trim_requ
 			req->data[off + 6] = c & 0xff;
 			req->data[off + 7] = (c >> 8) & 0xff;
 			lba += c;
+			lbas += c;
 			count -= c;
 			lastcount = c;
 			ranges++;
@@ -1962,6 +1951,9 @@ ada_dsmtrim_req_create(struct ada_softc *softc, struct bio *bp, struct trim_requ
 			break;
 		}
 	} while (1);
+	softc->trim_count++;
+	softc->trim_ranges += ranges;
+	softc->trim_lbas += lbas;
 
 	return (ranges);
 }
@@ -2131,7 +2123,7 @@ ada_zone_cmd(struct cam_periph *periph, union ccb *ccb, struct bio *bp,
 			error = ENOMEM;
 			goto bailout;
 		}
-		
+
 		ata_zac_mgmt_in(&ccb->ataio,
 				/*retries*/ ada_retry_count,
 				/*cbcfnp*/ adadone,
@@ -2287,7 +2279,7 @@ adastart(struct cam_periph *periph, union ccb *start_ccb)
 				data_ptr = bp;
 			}
 
-#ifdef ADA_TEST_FAILURE
+#ifdef CAM_TEST_FAILURE
 			int fail = 0;
 
 			/*
@@ -2448,7 +2440,6 @@ out:
 		cam_periph_unlock(periph);
 		xpt_action(start_ccb);
 		cam_periph_lock(periph);
-		softc->refcount--;
 
 		/* May have more work to do, so ensure we stay scheduled */
 		adaschedule(periph);
@@ -2625,10 +2616,8 @@ adaprobedone(struct cam_periph *periph, union ccb *ccb)
 static void
 adazonedone(struct cam_periph *periph, union ccb *ccb)
 {
-	struct ada_softc *softc;
 	struct bio *bp;
 
-	softc = periph->softc;
 	bp = (struct bio *)ccb->ccb_h.ccb_bp;
 
 	switch (bp->bio_zone.zone_cmd) {
@@ -2643,7 +2632,7 @@ adazonedone(struct cam_periph *periph, union ccb *ccb)
 		struct scsi_report_zones_hdr *hdr;
 		struct scsi_report_zones_desc *desc;
 		struct disk_zone_rep_entry *entry;
-		uint32_t num_alloced, hdr_len, num_avail;
+		uint32_t hdr_len, num_avail;
 		uint32_t num_to_fill, i;
 
 		rep = &bp->bio_zone.zone_params.report;
@@ -2658,7 +2647,6 @@ adazonedone(struct cam_periph *periph, union ccb *ccb)
 		 * be different than the amount of data transferred to
 		 * the user.
 		 */
-		num_alloced = rep->entries_allocated;
 		hdr = (struct scsi_report_zones_hdr *)ccb->ataio.data_ptr;
 		if (avail_len < sizeof(*hdr)) {
 			/*
@@ -2845,8 +2833,17 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 		if (softc->outstanding_cmds == 0)
 			softc->flags |= ADA_FLAG_WAS_OTAG;
 
+		/*
+		 * We need to call cam_iosched before we call biodone so that we
+		 * don't measure any activity that happens in the completion
+		 * routine, which in the case of sendfile can be quite
+		 * extensive.  Release the periph refcount taken in adastart()
+		 * for each CCB.
+		 */
 		cam_iosched_bio_complete(softc->cam_iosched, bp, done_ccb);
 		xpt_release_ccb(done_ccb);
+		KASSERT(softc->refcount >= 1, ("adadone softc %p refcount %d", softc, softc->refcount));
+		softc->refcount--;
 		if (state == ADA_CCB_TRIM) {
 			TAILQ_HEAD(, bio) queue;
 			struct bio *bp1;
@@ -2967,7 +2964,7 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 			 */
 			if ((softc->valid_logdir_len >=
 			    ((ATA_IDENTIFY_DATA_LOG + 1) * sizeof(uint16_t)))
-			 && (le16dec(softc->ata_logdir.header) == 
+			 && (le16dec(softc->ata_logdir.header) ==
 			     ATA_GP_LOG_DIR_VERSION)
 			 && (le16dec(&softc->ata_logdir.num_pages[
 			     (ATA_IDENTIFY_DATA_LOG *
@@ -2987,7 +2984,7 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 				 * then ATA logs are effectively not
 				 * supported even if the bit is set in the
 				 * identify data.
-				 */ 
+				 */
 				softc->flags &= ~(ADA_FLAG_CAN_LOG |
 						  ADA_FLAG_CAN_IDLOG);
 				if ((done_ccb->ccb_h.status &
@@ -3097,7 +3094,7 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 			softc->state = ADA_STATE_SUP_CAP;
 			xpt_release_ccb(done_ccb);
 			xpt_schedule(periph, priority);
-		} else 
+		} else
 			adaprobedone(periph, done_ccb);
 		return;
 	}
@@ -3161,11 +3158,10 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 					 * to an earlier spec, it won't have
 					 * the field.  So, assume all
 					 * commands are supported.
-					 */ 
+					 */
 					softc->zone_flags |=
 					    ADA_ZONE_FLAG_SUP_MASK;
 				}
-					    
 			}
 		} else {
 			error = adaerror(done_ccb, CAM_RETRY_SELTO,
@@ -3202,7 +3198,7 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 			softc->state = ADA_STATE_ZONE;
 			xpt_release_ccb(done_ccb);
 			xpt_schedule(periph, priority);
-		} else  
+		} else
 			adaprobedone(periph, done_ccb);
 		return;
 	}
@@ -3286,7 +3282,6 @@ adadone(struct cam_periph *periph, union ccb *done_ccb)
 							 /*getcount_only*/0);
 				}
 			}
-	
 		}
 		free(ataio->data_ptr, M_ATADA);
 
@@ -3329,20 +3324,21 @@ adaerror(union ccb *ccb, u_int32_t cam_flags, u_int32_t sense_flags)
 	}
 #endif
 
-	return(cam_periph_error(ccb, cam_flags, sense_flags, NULL));
+	return(cam_periph_error(ccb, cam_flags, sense_flags));
 }
 
 static void
-adagetparams(struct cam_periph *periph, struct ccb_getdev *cgd)
+adasetgeom(struct ada_softc *softc, struct ccb_getdev *cgd)
 {
-	struct ada_softc *softc = (struct ada_softc *)periph->softc;
 	struct disk_params *dp = &softc->params;
 	u_int64_t lbasize48;
 	u_int32_t lbasize;
+	u_int maxio, d_flags;
 
 	dp->secsize = ata_logical_sector_size(&cgd->ident_data);
 	if ((cgd->ident_data.atavalid & ATA_FLAG_54_58) &&
-		cgd->ident_data.current_heads && cgd->ident_data.current_sectors) {
+	    cgd->ident_data.current_heads != 0 &&
+	    cgd->ident_data.current_sectors != 0) {
 		dp->heads = cgd->ident_data.current_heads;
 		dp->secs_per_track = cgd->ident_data.current_sectors;
 		dp->cylinders = cgd->ident_data.cylinders;
@@ -3352,7 +3348,8 @@ adagetparams(struct cam_periph *periph, struct ccb_getdev *cgd)
 		dp->heads = cgd->ident_data.heads;
 		dp->secs_per_track = cgd->ident_data.sectors;
 		dp->cylinders = cgd->ident_data.cylinders;
-		dp->sectors = cgd->ident_data.cylinders * dp->heads * dp->secs_per_track;  
+		dp->sectors = cgd->ident_data.cylinders *
+			      (u_int32_t)(dp->heads * dp->secs_per_track);
 	}
 	lbasize = (u_int32_t)cgd->ident_data.lba_size_1 |
 		  ((u_int32_t)cgd->ident_data.lba_size_2 << 16);
@@ -3369,6 +3366,62 @@ adagetparams(struct cam_periph *periph, struct ccb_getdev *cgd)
 	if ((cgd->ident_data.support.command2 & ATA_SUPPORT_ADDRESS48) &&
 	    lbasize48 > ATA_MAX_28BIT_LBA)
 		dp->sectors = lbasize48;
+
+	maxio = softc->cpi.maxio;		/* Honor max I/O size of SIM */
+	if (maxio == 0)
+		maxio = DFLTPHYS;	/* traditional default */
+	else if (maxio > MAXPHYS)
+		maxio = MAXPHYS;	/* for safety */
+	if (softc->flags & ADA_FLAG_CAN_48BIT)
+		maxio = min(maxio, 65536 * softc->params.secsize);
+	else					/* 28bit ATA command limit */
+		maxio = min(maxio, 256 * softc->params.secsize);
+	if (softc->quirks & ADA_Q_128KB)
+		maxio = min(maxio, 128 * 1024);
+	softc->disk->d_maxsize = maxio;
+	d_flags = DISKFLAG_DIRECT_COMPLETION | DISKFLAG_CANZONE;
+	if (softc->flags & ADA_FLAG_CAN_FLUSHCACHE)
+		d_flags |= DISKFLAG_CANFLUSHCACHE;
+	if (softc->flags & ADA_FLAG_CAN_TRIM) {
+		d_flags |= DISKFLAG_CANDELETE;
+		softc->disk->d_delmaxsize = softc->params.secsize *
+		    ATA_DSM_RANGE_MAX * softc->trim_max_ranges;
+	} else if ((softc->flags & ADA_FLAG_CAN_CFA) &&
+	    !(softc->flags & ADA_FLAG_CAN_48BIT)) {
+		d_flags |= DISKFLAG_CANDELETE;
+		softc->disk->d_delmaxsize = 256 * softc->params.secsize;
+	} else
+		softc->disk->d_delmaxsize = maxio;
+	if ((softc->cpi.hba_misc & PIM_UNMAPPED) != 0) {
+		d_flags |= DISKFLAG_UNMAPPED_BIO;
+		softc->unmappedio = 1;
+	}
+	softc->disk->d_flags = d_flags;
+	strlcpy(softc->disk->d_descr, cgd->ident_data.model,
+	    MIN(sizeof(softc->disk->d_descr), sizeof(cgd->ident_data.model)));
+	strlcpy(softc->disk->d_ident, cgd->ident_data.serial,
+	    MIN(sizeof(softc->disk->d_ident), sizeof(cgd->ident_data.serial)));
+
+	softc->disk->d_sectorsize = softc->params.secsize;
+	softc->disk->d_mediasize = (off_t)softc->params.sectors *
+	    softc->params.secsize;
+	if (ata_physical_sector_size(&cgd->ident_data) !=
+	    softc->params.secsize) {
+		softc->disk->d_stripesize =
+		    ata_physical_sector_size(&cgd->ident_data);
+		softc->disk->d_stripeoffset = (softc->disk->d_stripesize -
+		    ata_logical_sector_offset(&cgd->ident_data)) %
+		    softc->disk->d_stripesize;
+	} else if (softc->quirks & ADA_Q_4K) {
+		softc->disk->d_stripesize = 4096;
+		softc->disk->d_stripeoffset = 0;
+	}
+	softc->disk->d_fwsectors = softc->params.secs_per_track;
+	softc->disk->d_fwheads = softc->params.heads;
+	ata_disk_firmware_geom_adjust(softc->disk);
+	softc->disk->d_rotation_rate = cgd->ident_data.media_rotation_rate;
+	snprintf(softc->disk->d_attachment, sizeof(softc->disk->d_attachment),
+	    "%s%d", softc->cpi.dev_name, softc->cpi.unit_number);
 }
 
 static void
@@ -3425,7 +3478,7 @@ adaflush(void)
 		ccb = cam_periph_getccb(periph, CAM_PRIORITY_NORMAL);
 		cam_fill_ataio(&ccb->ataio,
 				    0,
-				    adadone,
+				    NULL,
 				    CAM_DIR_NONE,
 				    0,
 				    NULL,
@@ -3451,7 +3504,7 @@ adaspindown(uint8_t cmd, int flags)
 {
 	struct cam_periph *periph;
 	struct ada_softc *softc;
-	union ccb *ccb;
+	struct ccb_ataio local_ccb;
 	int error;
 
 	CAM_PERIPH_FOREACH(periph, &adadriver) {
@@ -3471,23 +3524,24 @@ adaspindown(uint8_t cmd, int flags)
 		if (bootverbose)
 			xpt_print(periph->path, "spin-down\n");
 
-		ccb = cam_periph_getccb(periph, CAM_PRIORITY_NORMAL);
-		cam_fill_ataio(&ccb->ataio,
+		memset(&local_ccb, 0, sizeof(local_ccb));
+		xpt_setup_ccb(&local_ccb.ccb_h, periph->path, CAM_PRIORITY_NORMAL);
+		local_ccb.ccb_h.ccb_state = ADA_CCB_DUMP;
+
+		cam_fill_ataio(&local_ccb,
 				    0,
-				    adadone,
+				    NULL,
 				    CAM_DIR_NONE | flags,
 				    0,
 				    NULL,
 				    0,
 				    ada_default_timeout*1000);
-		ata_28bit_cmd(&ccb->ataio, cmd, 0, 0, 0);
-
-		error = cam_periph_runccb(ccb, adaerror, /*cam_flags*/0,
-		    /*sense_flags*/ SF_NO_RECOVERY | SF_NO_RETRY,
+		ata_28bit_cmd(&local_ccb, cmd, 0, 0, 0);
+		error = cam_periph_runccb((union ccb *)&local_ccb, adaerror,
+		    /*cam_flags*/0, /*sense_flags*/ SF_NO_RECOVERY | SF_NO_RETRY,
 		    softc->disk->d_devstat);
 		if (error != 0)
 			xpt_print(periph->path, "Spin-down disk failed\n");
-		xpt_release_ccb(ccb);
 		cam_periph_unlock(periph);
 	}
 }
@@ -3495,11 +3549,29 @@ adaspindown(uint8_t cmd, int flags)
 static void
 adashutdown(void *arg, int howto)
 {
+	int how;
 
 	adaflush();
-	if (ada_spindown_shutdown != 0 &&
-	    (howto & (RB_HALT | RB_POWEROFF)) != 0)
-		adaspindown(ATA_STANDBY_IMMEDIATE, 0);
+
+	/*
+	 * STANDBY IMMEDIATE saves any volatile data to the drive. It also spins
+	 * down hard drives. IDLE IMMEDIATE also saves the volatile data without
+	 * a spindown. We send the former when we expect to lose power soon. For
+	 * a warm boot, we send the latter to avoid a thundering herd of spinups
+	 * just after the kernel loads while probing. We have to do something to
+	 * flush the data because the BIOS in many systems resets the HBA
+	 * causing a COMINIT/COMRESET negotiation, which some drives interpret
+	 * as license to toss the volatile data, and others count as unclean
+	 * shutdown when in the Active PM state in SMART attributes.
+	 *
+	 * adaspindown will ensure that we don't send this to a drive that
+	 * doesn't support it.
+	 */
+	if (ada_spindown_shutdown != 0) {
+		how = (howto & (RB_HALT | RB_POWEROFF | RB_POWERCYCLE)) ?
+		    ATA_STANDBY_IMMEDIATE : ATA_IDLE_IMMEDIATE;
+		adaspindown(how, 0);
+	}
 }
 
 static void
@@ -3507,6 +3579,10 @@ adasuspend(void *arg)
 {
 
 	adaflush();
+	/*
+	 * SLEEP also fushes any volatile data, like STANDBY IMEDIATE,
+	 * so we don't need to send it as well.
+	 */
 	if (ada_spindown_suspend != 0)
 		adaspindown(ATA_SLEEP, CAM_DEV_QFREEZE);
 }
@@ -3543,7 +3619,7 @@ adaresume(void *arg)
 			 /*openings*/0,
 			 /*timeout*/0,
 			 /*getcount_only*/0);
-		
+
 		cam_periph_unlock(periph);
 	}
 }

@@ -27,8 +27,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kdb.h>
@@ -125,7 +123,6 @@ db_frame(struct db_variable *vp, db_expr_t *valuep, int op)
 #define	TRAP		1
 #define	INTERRUPT	2
 #define	SYSCALL		3
-#define	TRAP_INTERRUPT	5
 
 static void db_nextframe(struct amd64_frame **, db_addr_t *, struct thread *);
 static void db_print_stack_entry(const char *, db_addr_t, void *);
@@ -200,30 +197,27 @@ db_nextframe(struct amd64_frame **fp, db_addr_t *ip, struct thread *td)
 	if (name != NULL) {
 		if (strcmp(name, "calltrap") == 0 ||
 		    strcmp(name, "fork_trampoline") == 0 ||
+		    strcmp(name, "mchk_calltrap") == 0 ||
 		    strcmp(name, "nmi_calltrap") == 0 ||
 		    strcmp(name, "Xdblfault") == 0)
 			frame_type = TRAP;
 		else if (strncmp(name, "Xatpic_intr", 11) == 0 ||
 		    strncmp(name, "Xapic_isr", 9) == 0 ||
+		    strcmp(name, "Xxen_intr_upcall") == 0 ||
 		    strcmp(name, "Xtimerint") == 0 ||
 		    strcmp(name, "Xipi_intr_bitmap_handler") == 0 ||
 		    strcmp(name, "Xcpustop") == 0 ||
 		    strcmp(name, "Xcpususpend") == 0 ||
 		    strcmp(name, "Xrendezvous") == 0)
 			frame_type = INTERRUPT;
-		else if (strcmp(name, "Xfast_syscall") == 0)
+		else if (strcmp(name, "Xfast_syscall") == 0 ||
+		    strcmp(name, "Xfast_syscall_pti") == 0 ||
+		    strcmp(name, "fast_syscall_common") == 0)
 			frame_type = SYSCALL;
 #ifdef COMPAT_FREEBSD32
 		else if (strcmp(name, "Xint0x80_syscall") == 0)
 			frame_type = SYSCALL;
 #endif
-		/* XXX: These are interrupts with trap frames. */
-		else if (strcmp(name, "Xtimerint") == 0 ||
-		    strcmp(name, "Xcpustop") == 0 ||
-		    strcmp(name, "Xcpususpend") == 0 ||
-		    strcmp(name, "Xrendezvous") == 0 ||
-		    strcmp(name, "Xipi_intr_bitmap_handler") == 0)
-			frame_type = TRAP_INTERRUPT;
 	}
 
 	/*
@@ -255,7 +249,6 @@ db_nextframe(struct amd64_frame **fp, db_addr_t *ip, struct thread *td)
 			db_printf("--- syscall");
 			decode_syscall(tf->tf_rax, td);
 			break;
-		case TRAP_INTERRUPT:
 		case INTERRUPT:
 			db_printf("--- interrupt");
 			break;
@@ -335,7 +328,8 @@ db_backtrace(struct thread *td, struct trapframe *tf, struct amd64_frame *frame,
 					/* Probably an assembler symbol. */
 					actframe = (void *)(tf->tf_rsp - 8);
 				}
-			} else if (strcmp(name, "fork_trampoline") == 0) {
+			} else if (name != NULL &&
+			    strcmp(name, "fork_trampoline") == 0) {
 				/*
 				 * Don't try to walk back on a stack for a
 				 * process that hasn't actually been run yet.

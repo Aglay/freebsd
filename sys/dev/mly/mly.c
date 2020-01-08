@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000, 2001 Michael Smith
  * Copyright (c) 2000 BSDi
  * All rights reserved.
@@ -1213,7 +1215,6 @@ mly_fetch_event(struct mly_softc *sc)
 {
     struct mly_command		*mc;
     struct mly_command_ioctl	*mci;
-    int				s;
     u_int32_t			event;
 
     debug_called(1);
@@ -1235,14 +1236,11 @@ mly_fetch_event(struct mly_softc *sc)
      * Get an event number to fetch.  It's possible that we've raced with another
      * context for the last event, in which case there will be no more events.
      */
-    s = splcam();
     if (sc->mly_event_counter == sc->mly_event_waiting) {
 	mly_release_command(mc);
-	splx(s);
 	return;
     }
     event = sc->mly_event_counter++;
-    splx(s);
 
     /* 
      * Build the ioctl.
@@ -2892,8 +2890,7 @@ mly_user_command(struct mly_softc *sc, struct mly_user_command *uc)
     MLY_LOCK(sc);
     if (mly_alloc_command(sc, &mc)) {
 	MLY_UNLOCK(sc);
-	error = ENOMEM;
-	goto out;		/* XXX Linux version will wait for a command */
+	return (ENOMEM);	/* XXX Linux version will wait for a command */
     }
     MLY_UNLOCK(sc);
 
@@ -2952,11 +2949,9 @@ mly_user_command(struct mly_softc *sc, struct mly_user_command *uc)
  out:
     if (mc->mc_data != NULL)
 	free(mc->mc_data, M_DEVBUF);
-    if (mc != NULL) {
-	MLY_LOCK(sc);
-	mly_release_command(mc);
-	MLY_UNLOCK(sc);
-    }
+    MLY_LOCK(sc);
+    mly_release_command(mc);
+    MLY_UNLOCK(sc);
     return(error);
 }
 

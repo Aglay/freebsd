@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD AND 4-Clause-BSD
+ *
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -113,6 +115,8 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_extern.h>
 #include <vm/vm_pageout.h>
 
+#include <machine/cpu.h>
+#include <machine/hid.h>
 #include <machine/md_var.h>
 #include <machine/mmuvar.h>
 
@@ -127,6 +131,12 @@ __FBSDID("$FreeBSD$");
 
 #define	VSID_HASH_MASK	0x0000007fffffffffULL
 
+/* POWER9 only permits a 64k partition table size. */
+#define	PART_SIZE	0x10000
+
+static bool moea64_crop_tlbie;
+static bool moea64_need_lock;
+
 static __inline void
 TLBIE(uint64_t vpn) {
 #ifndef __powerpc64__
@@ -136,16 +146,31 @@ TLBIE(uint64_t vpn) {
 #endif
 
 	static volatile u_int tlbie_lock = 0;
+	bool need_lock = moea64_need_lock;
 
 	vpn <<= ADDR_PIDX_SHFT;
-	vpn &= ~(0xffffULL << 48);
 
 	/* Hobo spinlock: we need stronger guarantees than mutexes provide */
-	while (!atomic_cmpset_int(&tlbie_lock, 0, 1));
-	isync(); /* Flush instruction queue once lock acquired */
+	if (need_lock) {
+		while (!atomic_cmpset_int(&tlbie_lock, 0, 1));
+		isync(); /* Flush instruction queue once lock acquired */
+
+		if (moea64_crop_tlbie)
+			vpn &= ~(0xffffULL << 48);
+	}
 
 #ifdef __powerpc64__
-	__asm __volatile("tlbie %0" :: "r"(vpn) : "memory");
+	/*
+	 * Explicitly clobber r0.  The tlbie instruction has two forms: an old
+	 * one used by PowerISA 2.03 and prior, and a newer one used by PowerISA
+	 * 2.06 (maybe 2.05?) and later.  We need to support both, and it just
+	 * so happens that since we use 4k pages we can simply zero out r0, and
+	 * clobber it, and the assembler will interpret the single-operand form
+	 * of tlbie as having RB set, and everything else as 0.  The RS operand
+	 * in the newer form is in the same position as the L(page size) bit of
+	 * the old form, so a slong as RS is 0, we're good on both sides.
+	 */
+	__asm __volatile("li 0, 0 \n tlbie %0" :: "r"(vpn) : "r0", "memory");
 	__asm __volatile("eieio; tlbsync; ptesync" ::: "memory");
 #else
 	vpn_hi = (uint32_t)(vpn >> 32);
@@ -172,7 +197,8 @@ TLBIE(uint64_t vpn) {
 #endif
 
 	/* No barriers or special ops -- taken care of by ptesync above */
-	tlbie_lock = 0;
+	if (need_lock)
+		tlbie_lock = 0;
 }
 
 #define DISABLE_TRANS(msr)	msr = mfmsr(); mtmsr(msr & ~PSL_DR)
@@ -183,6 +209,14 @@ TLBIE(uint64_t vpn) {
  */
 static volatile struct lpte *moea64_pteg_table;
 static struct rwlock moea64_eviction_lock;
+
+static volatile struct pate *moea64_part_table;
+
+/*
+ * Dump function.
+ */
+static void	*moea64_dump_pmap_native(mmu_t mmu, void *ctx, void *buf,
+		    u_long *nbytes);
 
 /*
  * PTE calls.
@@ -205,6 +239,7 @@ static mmu_method_t moea64_native_methods[] = {
 	/* Internal interfaces */
 	MMUMETHOD(mmu_bootstrap,	moea64_bootstrap_native),
 	MMUMETHOD(mmu_cpu_bootstrap,	moea64_cpu_bootstrap_native),
+        MMUMETHOD(mmu_dump_pmap,        moea64_dump_pmap_native),
 
 	MMUMETHOD(moea64_pte_synch,	moea64_pte_synch_native),
 	MMUMETHOD(moea64_pte_clear,	moea64_pte_clear_native),	
@@ -222,16 +257,14 @@ static int64_t
 moea64_pte_synch_native(mmu_t mmu, struct pvo_entry *pvo)
 {
 	volatile struct lpte *pt = moea64_pteg_table + pvo->pvo_pte.slot;
-	struct lpte properpt;
-	uint64_t ptelo;
+	uint64_t ptelo, pvo_ptevpn;
 
 	PMAP_LOCK_ASSERT(pvo->pvo_pmap, MA_OWNED);
 
-	moea64_pte_from_pvo(pvo, &properpt);
+	pvo_ptevpn = moea64_pte_vpn_from_pvo_vpn(pvo);
 
 	rw_rlock(&moea64_eviction_lock);
-	if ((be64toh(pt->pte_hi) & LPTE_AVPN_MASK) !=
-	    (properpt.pte_hi & LPTE_AVPN_MASK)) {
+	if ((be64toh(pt->pte_hi) & LPTE_AVPN_MASK) != pvo_ptevpn) {
 		/* Evicted */
 		rw_runlock(&moea64_eviction_lock);
 		return (-1);
@@ -295,16 +328,14 @@ static int64_t
 moea64_pte_unset_native(mmu_t mmu, struct pvo_entry *pvo)
 {
 	volatile struct lpte *pt = moea64_pteg_table + pvo->pvo_pte.slot;
-	struct lpte properpt;
-	uint64_t ptelo;
+	uint64_t ptelo, pvo_ptevpn;
 
-	moea64_pte_from_pvo(pvo, &properpt);
+	pvo_ptevpn = moea64_pte_vpn_from_pvo_vpn(pvo);
 
 	rw_rlock(&moea64_eviction_lock);
-	if ((be64toh(pt->pte_hi & LPTE_AVPN_MASK)) !=
-	    (properpt.pte_hi & LPTE_AVPN_MASK)) {
+	if ((be64toh(pt->pte_hi & LPTE_AVPN_MASK)) != pvo_ptevpn) {
 		/* Evicted */
-		moea64_pte_overflow--;
+		STAT_MOEA64(moea64_pte_overflow--);
 		rw_runlock(&moea64_eviction_lock);
 		return (-1);
 	}
@@ -324,7 +355,46 @@ moea64_pte_unset_native(mmu_t mmu, struct pvo_entry *pvo)
 	rw_runlock(&moea64_eviction_lock);
 
 	/* Keep statistics */
-	moea64_pte_valid--;
+	STAT_MOEA64(moea64_pte_valid--);
+
+	return (ptelo & (LPTE_CHG | LPTE_REF));
+}
+
+static int64_t
+moea64_pte_replace_inval_native(mmu_t mmu, struct pvo_entry *pvo,
+    volatile struct lpte *pt)
+{
+	struct lpte properpt;
+	uint64_t ptelo;
+
+	moea64_pte_from_pvo(pvo, &properpt);
+
+	rw_rlock(&moea64_eviction_lock);
+	if ((be64toh(pt->pte_hi & LPTE_AVPN_MASK)) !=
+	    (properpt.pte_hi & LPTE_AVPN_MASK)) {
+		/* Evicted */
+		STAT_MOEA64(moea64_pte_overflow--);
+		rw_runlock(&moea64_eviction_lock);
+		return (-1);
+	}
+
+	/*
+	 * Replace the pte, briefly locking it to collect RC bits. No
+	 * atomics needed since this is protected against eviction by the lock.
+	 */
+	isync();
+	critical_enter();
+	pt->pte_hi = be64toh((pt->pte_hi & ~LPTE_VALID) | LPTE_LOCKED);
+	PTESYNC();
+	TLBIE(pvo->pvo_vpn);
+	ptelo = be64toh(pt->pte_lo);
+	EIEIO();
+	pt->pte_lo = htobe64(properpt.pte_lo);
+	EIEIO();
+	pt->pte_hi = htobe64(properpt.pte_hi); /* Release lock */
+	PTESYNC();
+	critical_exit();
+	rw_runlock(&moea64_eviction_lock);
 
 	return (ptelo & (LPTE_CHG | LPTE_REF));
 }
@@ -351,8 +421,7 @@ moea64_pte_replace_native(mmu_t mmu, struct pvo_entry *pvo, int flags)
 		rw_runlock(&moea64_eviction_lock);
 	} else {
 		/* Otherwise, need reinsertion and deletion */
-		ptelo = moea64_pte_unset_native(mmu, pvo);
-		moea64_pte_insert_native(mmu, pvo);
+		ptelo = moea64_pte_replace_inval_native(mmu, pvo, pt);
 	}
 
 	return (ptelo);
@@ -363,7 +432,7 @@ moea64_cpu_bootstrap_native(mmu_t mmup, int ap)
 {
 	int i = 0;
 	#ifdef __powerpc64__
-	struct slb *slb = PCPU_GET(slb);
+	struct slb *slb = PCPU_GET(aim.slb);
 	register_t seg0;
 	#endif
 
@@ -372,6 +441,12 @@ moea64_cpu_bootstrap_native(mmu_t mmup, int ap)
 	 */
 
 	mtmsr(mfmsr() & ~PSL_DR & ~PSL_IR);
+
+	switch(mfpvr() >> 16) {
+	case IBMPOWER9:
+		mtspr(SPR_HID0, mfspr(SPR_HID0) & ~HID0_RADIX);
+		break;
+	}
 
 	/*
 	 * Install kernel SLB entries
@@ -382,7 +457,7 @@ moea64_cpu_bootstrap_native(mmu_t mmup, int ap)
 		__asm __volatile ("slbmfee %0,%1; slbie %0;" : "=r"(seg0) :
 		    "r"(0));
 
-		for (i = 0; i < 64; i++) {
+		for (i = 0; i < n_slbs; i++) {
 			if (!(slb[i].slbe & SLBE_VALID))
 				continue;
 
@@ -398,9 +473,14 @@ moea64_cpu_bootstrap_native(mmu_t mmup, int ap)
 	 * Install page table
 	 */
 
-	__asm __volatile ("ptesync; mtsdr1 %0; isync"
-	    :: "r"((uintptr_t)moea64_pteg_table 
-		     | (uintptr_t)(flsl(moea64_pteg_mask >> 11))));
+	if (cpu_features2 & PPC_FEATURE2_ARCH_3_00)
+		mtspr(SPR_PTCR,
+		    ((uintptr_t)moea64_part_table & ~DMAP_BASE_ADDRESS) |
+		     flsl((PART_SIZE >> 12) - 1));
+	else
+		__asm __volatile ("ptesync; mtsdr1 %0; isync"
+		    :: "r"(((uintptr_t)moea64_pteg_table & ~DMAP_BASE_ADDRESS)
+			     | (uintptr_t)(flsl(moea64_pteg_mask >> 11))));
 	tlbia();
 }
 
@@ -415,12 +495,26 @@ moea64_bootstrap_native(mmu_t mmup, vm_offset_t kernelstart,
 
 	moea64_early_bootstrap(mmup, kernelstart, kernelend);
 
+	switch (mfpvr() >> 16) {
+	case IBMPOWER9:
+		moea64_need_lock = false;
+		break;
+	case IBMPOWER4:
+	case IBMPOWER4PLUS:
+	case IBM970:
+	case IBM970FX:
+	case IBM970GX:
+	case IBM970MP:
+		moea64_crop_tlbie = true;
+	default:
+		moea64_need_lock = true;
+	}
 	/*
 	 * Allocate PTEG table.
 	 */
 
 	size = moea64_pteg_count * sizeof(struct lpteg);
-	CTR2(KTR_PMAP, "moea64_bootstrap: %d PTEGs, %d bytes", 
+	CTR2(KTR_PMAP, "moea64_bootstrap: %lu PTEGs, %lu bytes", 
 	    moea64_pteg_count, size);
 	rw_init(&moea64_eviction_lock, "pte eviction");
 
@@ -430,11 +524,35 @@ moea64_bootstrap_native(mmu_t mmup, vm_offset_t kernelstart,
 	 * allocate. We don't have BAT. So drop to data real mode for a minute
 	 * as a measure of last resort. We do this a couple times.
 	 */
-
-	moea64_pteg_table = (struct lpte *)moea64_bootstrap_alloc(size, size);
+	/*
+	 * PTEG table must be aligned on a 256k boundary, but can be placed
+	 * anywhere with that alignment on POWER ISA 3+ systems. On earlier
+	 * systems, offset addition is done by the CPU with bitwise OR rather
+	 * than addition, so the table must also be aligned on a boundary of
+	 * its own size. Pick the larger of the two, which works on all
+	 * systems.
+	 */
+	moea64_pteg_table = (struct lpte *)moea64_bootstrap_alloc(size, 
+	    MAX(256*1024, size));
+	if (hw_direct_map)
+		moea64_pteg_table =
+		    (struct lpte *)PHYS_TO_DMAP((vm_offset_t)moea64_pteg_table);
+	/* Allocate partition table (ISA 3.0). */
+	if (cpu_features2 & PPC_FEATURE2_ARCH_3_00) {
+		moea64_part_table =
+		    (struct pate *)moea64_bootstrap_alloc(PART_SIZE, PART_SIZE);
+		moea64_part_table =
+		    (struct pate *)PHYS_TO_DMAP((vm_offset_t)moea64_part_table);
+	}
 	DISABLE_TRANS(msr);
 	bzero(__DEVOLATILE(void *, moea64_pteg_table), moea64_pteg_count *
 	    sizeof(struct lpteg));
+	if (cpu_features2 & PPC_FEATURE2_ARCH_3_00) {
+		bzero(__DEVOLATILE(void *, moea64_part_table), PART_SIZE);
+		moea64_part_table[0].pagetab =
+			(DMAP_TO_PHYS((vm_offset_t)moea64_pteg_table)) |
+			(uintptr_t)(flsl((moea64_pteg_count - 1) >> 11));
+	}
 	ENABLE_TRANS(msr);
 
 	CTR1(KTR_PMAP, "moea64_bootstrap: PTEG table at %p", moea64_pteg_table);
@@ -465,9 +583,23 @@ tlbia(void)
 	register_t msr, scratch;
 	#endif
 
+	i = 0xc00; /* IS = 11 */
+	switch (mfpvr() >> 16) {
+	case IBM970:
+	case IBM970FX:
+	case IBM970MP:
+	case IBM970GX:
+	case IBMPOWER4:
+	case IBMPOWER4PLUS:
+	case IBMPOWER5:
+	case IBMPOWER5PLUS:
+		i = 0; /* IS not supported */
+		break;
+	}
+
 	TLBSYNC();
 
-	for (i = 0; i < 0xFF000; i += 0x00001000) {
+	for (; i < 0x400000; i += 0x00001000) {
 		#ifdef __powerpc64__
 		__asm __volatile("tlbiel %0" :: "r"(i));
 		#else
@@ -554,21 +686,18 @@ moea64_insert_to_pteg_native(struct lpte *pvo_pt, uintptr_t slotbase,
 		 * "Modifying a Page Table Entry". Need to reconstruct
 		 * the virtual address for the outgoing entry to do that.
 		 */
-		if (oldptehi & LPTE_BIG)
-			va = oldptehi >> moea64_large_page_shift;
-		else
-			va = oldptehi >> ADDR_PIDX_SHFT;
+		va = oldptehi >> (ADDR_SR_SHFT - ADDR_API_SHFT64);
 		if (oldptehi & LPTE_HID)
 			va = (((k >> 3) ^ moea64_pteg_mask) ^ va) &
-			    VSID_HASH_MASK;
+			    (ADDR_PIDX >> ADDR_PIDX_SHFT);
 		else
-			va = ((k >> 3) ^ va) & VSID_HASH_MASK;
+			va = ((k >> 3) ^ va) & (ADDR_PIDX >> ADDR_PIDX_SHFT);
 		va |= (oldptehi & LPTE_AVPN_MASK) <<
 		    (ADDR_API_SHFT64 - ADDR_PIDX_SHFT);
 		PTESYNC();
 		TLBIE(va);
-		moea64_pte_valid--;
-		moea64_pte_overflow++;
+		STAT_MOEA64(moea64_pte_valid--);
+		STAT_MOEA64(moea64_pte_overflow++);
 	}
 
 	/*
@@ -581,7 +710,7 @@ moea64_insert_to_pteg_native(struct lpte *pvo_pt, uintptr_t slotbase,
 	PTESYNC();
 
 	/* Keep statistics */
-	moea64_pte_valid++;
+	STAT_MOEA64(moea64_pte_valid++);
 
 	return (k);
 }
@@ -660,3 +789,21 @@ moea64_pte_insert_native(mmu_t mmu, struct pvo_entry *pvo)
 	return (-1);
 }
 
+static void *
+moea64_dump_pmap_native(mmu_t mmu, void *ctx, void *buf, u_long *nbytes)
+{
+	struct dump_context *dctx;
+	u_long ptex, ptex_end;
+
+	dctx = (struct dump_context *)ctx;
+	ptex = dctx->ptex;
+	ptex_end = ptex + dctx->blksz / sizeof(struct lpte);
+	ptex_end = MIN(ptex_end, dctx->ptex_end);
+	*nbytes = (ptex_end - ptex) * sizeof(struct lpte);
+
+	if (*nbytes == 0)
+		return (NULL);
+
+	dctx->ptex = ptex_end;
+	return (__DEVOLATILE(struct lpte *, moea64_pteg_table) + ptex);
+}

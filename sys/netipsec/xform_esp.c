@@ -94,6 +94,8 @@ SYSCTL_VNET_PCPUSTAT(_net_inet_esp, IPSECCTL_STATS, stats,
     struct espstat, espstat,
     "ESP statistics (struct espstat, netipsec/esp_var.h");
 
+static struct timeval deswarn, blfwarn, castwarn, camelliawarn;
+
 static int esp_input_cb(struct cryptop *op);
 static int esp_output_cb(struct cryptop *crp);
 
@@ -156,6 +158,26 @@ esp_init(struct secasvar *sav, struct xformsw *xsp)
 			__func__));
 		return EINVAL;
 	}
+
+	switch (sav->alg_enc) {
+	case SADB_EALG_DESCBC:
+		if (ratecheck(&deswarn, &ipsec_warn_interval))
+			gone_in(13, "DES cipher for IPsec");
+		break;
+	case SADB_X_EALG_BLOWFISHCBC:
+		if (ratecheck(&blfwarn, &ipsec_warn_interval))
+			gone_in(13, "Blowfish cipher for IPsec");
+		break;
+	case SADB_X_EALG_CAST128CBC:
+		if (ratecheck(&castwarn, &ipsec_warn_interval))
+			gone_in(13, "CAST cipher for IPsec");
+		break;
+	case SADB_X_EALG_CAMELLIACBC:
+		if (ratecheck(&camelliawarn, &ipsec_warn_interval))
+			gone_in(13, "Camellia cipher for IPsec");
+		break;
+	}
+
 	/* subtract off the salt, RFC4106, 8.1 and RFC3686, 5.1 */
 	keylen = _KEYLEN(sav->key_enc) - SAV_ISCTRORGCM(sav) * 4;
 	if (txform->minkey > keylen || keylen > txform->maxkey) {
@@ -271,7 +293,7 @@ esp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 	struct cryptop *crp;
 	struct newesp *esp;
 	uint8_t *ivp;
-	uint64_t cryptoid;
+	crypto_session_t cryptoid;
 	int alen, error, hlen, plen;
 
 	IPSEC_ASSERT(sav != NULL, ("null SA"));
@@ -285,8 +307,17 @@ esp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 		ESPSTAT_INC(esps_badilen);
 		goto bad;
 	}
-	/* XXX don't pullup, just copy header */
-	IP6_EXTHDR_GET(esp, struct newesp *, m, skip, sizeof (struct newesp));
+
+	if (m->m_len < skip + sizeof(*esp)) {
+		m = m_pullup(m, skip + sizeof(*esp));
+		if (m == NULL) {
+			DPRINTF(("%s: cannot pullup header\n", __func__));
+			ESPSTAT_INC(esps_hdrops);	/*XXX*/
+			error = ENOBUFS;
+			goto bad;
+		}
+	}
+	esp = (struct newesp *)(mtod(m, caddr_t) + skip);
 
 	esph = sav->tdb_authalgxform;
 	espx = sav->tdb_encalgxform;
@@ -385,9 +416,11 @@ esp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 	/* Crypto operation descriptor */
 	crp->crp_ilen = m->m_pkthdr.len; /* Total input length */
 	crp->crp_flags = CRYPTO_F_IMBUF | CRYPTO_F_CBIFSYNC;
+	if (V_async_crypto)
+		crp->crp_flags |= CRYPTO_F_ASYNC | CRYPTO_F_ASYNC_KEEPORDER;
 	crp->crp_buf = (caddr_t) m;
 	crp->crp_callback = esp_input_cb;
-	crp->crp_sid = cryptoid;
+	crp->crp_session = cryptoid;
 	crp->crp_opaque = (caddr_t) xd;
 
 	/* These are passed as-is to the callback */
@@ -395,6 +428,7 @@ esp_input(struct mbuf *m, struct secasvar *sav, int skip, int protoff)
 	xd->protoff = protoff;
 	xd->skip = skip;
 	xd->cryptoid = cryptoid;
+	xd->vnet = curvnet;
 
 	/* Decryption descriptor */
 	IPSEC_ASSERT(crde != NULL, ("null esp crypto descriptor"));
@@ -439,14 +473,13 @@ esp_input_cb(struct cryptop *crp)
 	IPSEC_DEBUG_DECLARE(char buf[128]);
 	u_int8_t lastthree[3], aalg[AH_HMAC_MAXHASHLEN];
 	const struct auth_hash *esph;
-	const struct enc_xform *espx;
 	struct mbuf *m;
 	struct cryptodesc *crd;
 	struct xform_data *xd;
 	struct secasvar *sav;
 	struct secasindex *saidx;
 	caddr_t ptr;
-	uint64_t cryptoid;
+	crypto_session_t cryptoid;
 	int hlen, skip, protoff, error, alen;
 
 	crd = crp->crp_desc;
@@ -454,21 +487,22 @@ esp_input_cb(struct cryptop *crp)
 
 	m = (struct mbuf *) crp->crp_buf;
 	xd = (struct xform_data *) crp->crp_opaque;
+	CURVNET_SET(xd->vnet);
 	sav = xd->sav;
 	skip = xd->skip;
 	protoff = xd->protoff;
 	cryptoid = xd->cryptoid;
 	saidx = &sav->sah->saidx;
 	esph = sav->tdb_authalgxform;
-	espx = sav->tdb_encalgxform;
 
 	/* Check for crypto errors */
 	if (crp->crp_etype) {
 		if (crp->crp_etype == EAGAIN) {
 			/* Reset the session ID */
-			if (ipsec_updateid(sav, &crp->crp_sid, &cryptoid) != 0)
+			if (ipsec_updateid(sav, &crp->crp_session, &cryptoid) != 0)
 				crypto_freesession(cryptoid);
-			xd->cryptoid = crp->crp_sid;
+			xd->cryptoid = crp->crp_session;
+			CURVNET_RESTORE();
 			return (crypto_dispatch(crp));
 		}
 		ESPSTAT_INC(esps_noxform);
@@ -582,6 +616,13 @@ esp_input_cb(struct cryptop *crp)
 		}
 	}
 
+	/*
+	 * RFC4303 2.6:
+	 * Silently drop packet if next header field is IPPROTO_NONE.
+	 */
+	if (lastthree[2] == IPPROTO_NONE)
+		goto bad;
+
 	/* Trim the mbuf chain to remove trailing authenticator and padding */
 	m_adj(m, -(lastthree[1] + 2));
 
@@ -603,8 +644,10 @@ esp_input_cb(struct cryptop *crp)
 		panic("%s: Unexpected address family: %d saidx=%p", __func__,
 		    saidx->dst.sa.sa_family, saidx);
 	}
+	CURVNET_RESTORE();
 	return error;
 bad:
+	CURVNET_RESTORE();
 	if (sav != NULL)
 		key_freesav(&sav);
 	if (m != NULL)
@@ -632,7 +675,8 @@ esp_output(struct mbuf *m, struct secpolicy *sp, struct secasvar *sav,
 	struct secasindex *saidx;
 	unsigned char *pad;
 	uint8_t *ivp;
-	uint64_t cntr, cryptoid;
+	uint64_t cntr;
+	crypto_session_t cryptoid;
 	int hlen, rlen, padding, blks, alen, i, roff;
 	int error, maxpacketsize;
 	uint8_t prot;
@@ -762,7 +806,7 @@ esp_output(struct mbuf *m, struct secpolicy *sp, struct secasvar *sav,
 	 */
 	switch (sav->flags & SADB_X_EXT_PMASK) {
 	case SADB_X_EXT_PRAND:
-		(void) read_random(pad, padding - 2);
+		arc4random_buf(pad, padding - 2);
 		break;
 	case SADB_X_EXT_PZERO:
 		bzero(pad, padding - 2);
@@ -837,14 +881,17 @@ esp_output(struct mbuf *m, struct secpolicy *sp, struct secasvar *sav,
 	xd->sav = sav;
 	xd->idx = idx;
 	xd->cryptoid = cryptoid;
+	xd->vnet = curvnet;
 
 	/* Crypto operation descriptor. */
 	crp->crp_ilen = m->m_pkthdr.len; /* Total input length. */
 	crp->crp_flags = CRYPTO_F_IMBUF | CRYPTO_F_CBIFSYNC;
+	if (V_async_crypto)
+		crp->crp_flags |= CRYPTO_F_ASYNC | CRYPTO_F_ASYNC_KEEPORDER;
 	crp->crp_buf = (caddr_t) m;
 	crp->crp_callback = esp_output_cb;
 	crp->crp_opaque = (caddr_t) xd;
-	crp->crp_sid = cryptoid;
+	crp->crp_session = cryptoid;
 
 	if (esph) {
 		/* Authentication descriptor. */
@@ -875,11 +922,12 @@ esp_output_cb(struct cryptop *crp)
 	struct secpolicy *sp;
 	struct secasvar *sav;
 	struct mbuf *m;
-	uint64_t cryptoid;
+	crypto_session_t cryptoid;
 	u_int idx;
 	int error;
 
 	xd = (struct xform_data *) crp->crp_opaque;
+	CURVNET_SET(xd->vnet);
 	m = (struct mbuf *) crp->crp_buf;
 	sp = xd->sp;
 	sav = xd->sav;
@@ -890,9 +938,10 @@ esp_output_cb(struct cryptop *crp)
 	if (crp->crp_etype) {
 		if (crp->crp_etype == EAGAIN) {
 			/* Reset the session ID */
-			if (ipsec_updateid(sav, &crp->crp_sid, &cryptoid) != 0)
+			if (ipsec_updateid(sav, &crp->crp_session, &cryptoid) != 0)
 				crypto_freesession(cryptoid);
-			xd->cryptoid = crp->crp_sid;
+			xd->cryptoid = crp->crp_session;
+			CURVNET_RESTORE();
 			return (crypto_dispatch(crp));
 		}
 		ESPSTAT_INC(esps_noxform);
@@ -938,8 +987,10 @@ esp_output_cb(struct cryptop *crp)
 
 	/* NB: m is reclaimed by ipsec_process_done. */
 	error = ipsec_process_done(m, sp, sav, idx);
+	CURVNET_RESTORE();
 	return (error);
 bad:
+	CURVNET_RESTORE();
 	free(xd, M_XDATA);
 	crypto_freereq(crp);
 	key_freesav(&sav);

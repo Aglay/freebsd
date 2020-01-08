@@ -1,7 +1,8 @@
 /*-
- * Copyright (c) 2006 Marcel Moolenaar
- * Copyright (c) 2001 M. Warner Losh
- * All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2006 Marcel Moolenaar All rights reserved.
+ * Copyright (c) 2001 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -88,6 +89,8 @@ static const struct pci_id pci_ns8250_ids[] = {
 { 0x103c, 0x3301, 0xffff, 0, "HP iLO serial port", 0x10 },
 { 0x11c1, 0x0480, 0xffff, 0, "Agere Systems Venus Modem (V90, 56KFlex)", 0x14 },
 { 0x115d, 0x0103, 0xffff, 0, "Xircom Cardbus Ethernet + 56k Modem", 0x10 },
+{ 0x125b, 0x9100, 0xa000, 0x1000,
+	"ASIX AX99100 PCIe 1/2/3/4-port RS-232/422/485", 0x10 },
 { 0x1282, 0x6585, 0xffff, 0, "Davicom 56PDV PCI Modem", 0x10 },
 { 0x12b9, 0x1008, 0xffff, 0, "3Com 56K FaxModem Model 5610", 0x10 },
 { 0x131f, 0x1000, 0xffff, 0, "Siig CyberSerial (1-port) 16550", 0x18 },
@@ -121,6 +124,8 @@ static const struct pci_id pci_ns8250_ids[] = {
 	128 * DEFAULT_RCLK, 2},
 { 0x14e4, 0x4344, 0xffff, 0, "Sony Ericsson GC89 PC Card", 0x10},
 { 0x151f, 0x0000, 0xffff, 0, "TOPIC Semiconductor TP560 56k modem", 0x10 },
+{ 0x1d0f, 0x8250, 0x0000, 0, "Amazon PCI serial device", 0x10 },
+{ 0x1d0f, 0x8250, 0x1d0f, 0, "Amazon PCI serial device", 0x10 },
 { 0x1fd4, 0x1999, 0x1fd4, 0x0001, "Sunix SER5xxxx Serial Port", 0x10,
 	8 * DEFAULT_RCLK },
 { 0x8086, 0x0f0a, 0xffff, 0, "Intel ValleyView LPIO1 HSUART#1", 0x10,
@@ -202,7 +207,7 @@ uart_pci_probe(device_t dev)
 	return (ENXIO);
 
  match:
-	result = uart_bus_probe(dev, id->regshft, 0, id->rclk, id->rid, 0);
+	result = uart_bus_probe(dev, id->regshft, 0, id->rclk, id->rid, 0, 0);
 	/* Bail out on error. */
 	if (result > 0)
 		return (result);

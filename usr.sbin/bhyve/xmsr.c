@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 NetApp, Inc.
  * All rights reserved.
  *
@@ -70,6 +72,7 @@ emulate_wrmsr(struct vmctx *ctx, int vcpu, uint32_t num, uint64_t val)
 			return (0);
 
 		case MSR_NB_CFG1:
+		case MSR_LS_CFG:
 		case MSR_IC_CFG:
 			return (0);	/* Ignore writes */
 
@@ -139,6 +142,7 @@ emulate_rdmsr(struct vmctx *ctx, int vcpu, uint32_t num, uint64_t *val)
 			break;
 
 		case MSR_NB_CFG1:
+		case MSR_LS_CFG:
 		case MSR_IC_CFG:
 			/*
 			 * The reset value is processor family dependent so
@@ -188,7 +192,7 @@ emulate_rdmsr(struct vmctx *ctx, int vcpu, uint32_t num, uint64_t *val)
 		/*
 		 * OpenBSD guests test bit 0 of this MSR to detect if the
 		 * workaround for erratum 721 is already applied.
-		 * http://support.amd.com/TechDocs/41322_10h_Rev_Gd.pdf
+		 * https://support.amd.com/TechDocs/41322_10h_Rev_Gd.pdf
 		 */
 		case 0xC0011029:
 			*val = 1;

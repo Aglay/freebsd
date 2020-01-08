@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -281,7 +281,7 @@ AdCreateTableHeader (
 
         /* Revision of DSDT controls the ACPI integer width */
 
-        if (ACPI_COMPARE_NAME (Table->Signature, ACPI_SIG_DSDT))
+        if (ACPI_COMPARE_NAMESEG (Table->Signature, ACPI_SIG_DSDT))
         {
             AcpiOsPrintf (" **** 32-bit table (V1), no 64-bit math support");
         }
@@ -314,7 +314,7 @@ AdCreateTableHeader (
     /*
      * Print comments that come before this definition block.
      */
-    if (Gbl_CaptureComments)
+    if (AcpiGbl_CaptureComments)
     {
         ASL_CV_PRINT_ONE_COMMENT(AcpiGbl_ParseOpRoot,AML_COMMENT_STANDARD, NULL, 0);
     }
@@ -327,7 +327,7 @@ AdCreateTableHeader (
      * makes it easier to rename the disassembled ASL file if needed.
      */
     AcpiOsPrintf (
-        "DefinitionBlock (\"\", \"%4.4s\", %hu, \"%.6s\", \"%.8s\", 0x%8.8X)\n",
+        "DefinitionBlock (\"\", \"%4.4s\", %u, \"%.6s\", \"%.8s\", 0x%8.8X)\n",
         Table->Signature, Table->Revision,
         Table->OemId, Table->OemTableId, Table->OemRevision);
 }
@@ -443,8 +443,8 @@ AdGetLocalTables (
     /* Get the DSDT via table override */
 
     ACPI_MOVE_32_TO_32 (TableHeader.Signature, ACPI_SIG_DSDT);
-    AcpiOsTableOverride (&TableHeader, &NewTable);
-    if (!NewTable)
+    Status = AcpiOsTableOverride (&TableHeader, &NewTable);
+    if (ACPI_FAILURE (Status) || !NewTable)
     {
         fprintf (stderr, "Could not obtain DSDT\n");
         return (AE_NO_ACPI_TABLES);
@@ -508,6 +508,8 @@ AdParseTable (
     AmlStart = ((UINT8 *) Table + sizeof (ACPI_TABLE_HEADER));
     ASL_CV_INIT_FILETREE(Table, AmlStart, AmlLength);
 
+    AcpiUtSetIntegerWidth (Table->Revision);
+
     /* Create the root object */
 
     AcpiGbl_ParseOpRoot = AcpiPsCreateScopeOp (AmlStart);
@@ -517,7 +519,7 @@ AdParseTable (
     }
 
 #ifdef ACPI_ASL_COMPILER
-    if (Gbl_CaptureComments)
+    if (AcpiGbl_CaptureComments)
     {
         AcpiGbl_ParseOpRoot->Common.CvFilename = AcpiGbl_FileTreeRoot->Filename;
     }
@@ -543,7 +545,6 @@ AdParseTable (
     }
 
     WalkState->ParseFlags &= ~ACPI_PARSE_DELETE_TREE;
-    WalkState->ParseFlags |= ACPI_PARSE_DISASSEMBLE;
 
     Status = AcpiPsParseAml (WalkState);
     if (ACPI_FAILURE (Status))
@@ -601,7 +602,7 @@ AdParseTable (
     fprintf (stderr,
         "Parsing Deferred Opcodes (Methods/Buffers/Packages/Regions)\n");
 
-    Status = AcpiDmParseDeferredOps (AcpiGbl_ParseOpRoot);
+    (void) AcpiDmParseDeferredOps (AcpiGbl_ParseOpRoot);
     fprintf (stderr, "\n");
 
     /* Process Resource Templates */

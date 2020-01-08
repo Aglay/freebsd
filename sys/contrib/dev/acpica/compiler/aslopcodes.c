@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -239,7 +239,7 @@ OpcAmlOpcodeWalk (
     void                    *Context)
 {
 
-    TotalParseNodes++;
+    AslGbl_TotalParseNodes++;
 
     OpcGenerateAmlOpcode (Op);
     OpnGenerateAmlOperands (Op);
@@ -271,9 +271,9 @@ OpcGetIntegerWidth (
         return;
     }
 
-    if (Gbl_RevisionOverride)
+    if (AslGbl_RevisionOverride)
     {
-        AcpiUtSetIntegerWidth (Gbl_RevisionOverride);
+        AcpiUtSetIntegerWidth (AslGbl_RevisionOverride);
     }
     else
     {
@@ -328,7 +328,7 @@ OpcSetOptimalIntegerSize (
      *
      * This optimization is optional.
      */
-    if (Gbl_IntegerOptimizationFlag)
+    if (AslGbl_IntegerOptimizationFlag)
     {
         switch (Op->Asl.Value.Integer)
         {
@@ -404,7 +404,7 @@ OpcSetOptimalIntegerSize (
             AslError (ASL_WARNING, ASL_MSG_INTEGER_LENGTH,
                 Op, NULL);
 
-            if (!Gbl_IgnoreErrors)
+            if (!AslGbl_IgnoreErrors)
             {
                 /* Truncate the integer to 32-bit */
 
@@ -466,9 +466,9 @@ OpcDoAccessAs (
     /* Only a few AccessAttributes support AccessLength */
 
     Attribute = (UINT8) AttribOp->Asl.Value.Integer;
-    if ((Attribute != AML_FIELD_ATTRIB_MULTIBYTE) &&
+    if ((Attribute != AML_FIELD_ATTRIB_BYTES) &&
         (Attribute != AML_FIELD_ATTRIB_RAW_BYTES) &&
-        (Attribute != AML_FIELD_ATTRIB_RAW_PROCESS))
+        (Attribute != AML_FIELD_ATTRIB_RAW_PROCESS_BYTES))
     {
         return;
     }
@@ -550,7 +550,7 @@ OpcDoConnection (
      */
     BufferOp->Asl.ParseOpcode = PARSEOP_BUFFER;
     BufferOp->Asl.AmlOpcode = AML_BUFFER_OP;
-    BufferOp->Asl.CompileFlags = NODE_AML_PACKAGE | NODE_IS_RESOURCE_DESC;
+    BufferOp->Asl.CompileFlags = OP_AML_PACKAGE | OP_IS_RESOURCE_DESC;
     UtSetParseOpName (BufferOp);
 
     BufferLengthOp->Asl.ParseOpcode = PARSEOP_INTEGER;
@@ -598,7 +598,7 @@ OpcDoUnicode (
 
     /* Change op into a buffer object */
 
-    Op->Asl.CompileFlags &= ~NODE_COMPILE_TIME_CONST;
+    Op->Asl.CompileFlags &= ~OP_COMPILE_TIME_CONST;
     Op->Asl.ParseOpcode = PARSEOP_BUFFER;
     UtSetParseOpName (Op);
 
@@ -756,7 +756,7 @@ OpcDoEisaId (
      */
     Op->Asl.Value.Integer = EisaId;
 
-    Op->Asl.CompileFlags &= ~NODE_COMPILE_TIME_CONST;
+    Op->Asl.CompileFlags &= ~OP_COMPILE_TIME_CONST;
     Op->Asl.ParseOpcode = PARSEOP_INTEGER;
     (void) OpcSetOptimalIntegerSize (Op);
 
@@ -808,12 +808,12 @@ OpcDoUuId (
 
     /* Disable further optimization */
 
-    Op->Asl.CompileFlags &= ~NODE_COMPILE_TIME_CONST;
+    Op->Asl.CompileFlags &= ~OP_COMPILE_TIME_CONST;
     UtSetParseOpName (Op);
 
     /* Child node is the buffer length */
 
-    NewOp = TrAllocateNode (PARSEOP_INTEGER);
+    NewOp = TrAllocateOp (PARSEOP_INTEGER);
 
     NewOp->Asl.AmlOpcode = AML_BYTE_OP;
     NewOp->Asl.Value.Integer = 16;
@@ -824,7 +824,7 @@ OpcDoUuId (
 
     /* Peer to the child is the raw buffer data */
 
-    NewOp = TrAllocateNode (PARSEOP_RAW_DATA);
+    NewOp = TrAllocateOp (PARSEOP_RAW_DATA);
     NewOp->Asl.AmlOpcode = AML_RAW_DATA_BUFFER;
     NewOp->Asl.AmlLength = 16;
     NewOp->Asl.Value.String = ACPI_CAST_PTR (char, Buffer);
@@ -924,16 +924,7 @@ OpcGenerateAmlOpcode (
 
     case PARSEOP_INCLUDE:
 
-        Gbl_HasIncludeFiles = TRUE;
-        break;
-
-    case PARSEOP_EXTERNAL:
-
-        if (Gbl_DoExternals == FALSE)
-        {
-            Op->Asl.Child->Asl.ParseOpcode = PARSEOP_DEFAULT_ARG;
-            Op->Asl.Child->Asl.Next->Asl.ParseOpcode = PARSEOP_DEFAULT_ARG;
-        }
+        AslGbl_HasIncludeFiles = TRUE;
         break;
 
     case PARSEOP_TIMER:

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright 1997 Sean Eric Fagan
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,6 +41,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/ptrace.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 #include <assert.h>
@@ -58,13 +61,89 @@ __FBSDID("$FreeBSD$");
 #include "syscall.h"
 #include "extern.h"
 
-SET_DECLARE(procabi, struct procabi);
+struct procabi_table {
+	const char *name;
+	struct procabi *abi;
+};
 
 static sig_atomic_t detaching;
 
 static void	enter_syscall(struct trussinfo *, struct threadinfo *,
 		    struct ptrace_lwpinfo *);
 static void	new_proc(struct trussinfo *, pid_t, lwpid_t);
+
+
+static struct procabi cloudabi32 = {
+	"CloudABI32",
+	SYSDECODE_ABI_CLOUDABI32,
+	STAILQ_HEAD_INITIALIZER(cloudabi32.extra_syscalls),
+	{ NULL }
+};
+
+static struct procabi cloudabi64 = {
+	"CloudABI64",
+	SYSDECODE_ABI_CLOUDABI64,
+	STAILQ_HEAD_INITIALIZER(cloudabi64.extra_syscalls),
+	{ NULL }
+};
+
+static struct procabi freebsd = {
+	"FreeBSD",
+	SYSDECODE_ABI_FREEBSD,
+	STAILQ_HEAD_INITIALIZER(freebsd.extra_syscalls),
+	{ NULL }
+};
+
+#ifdef __LP64__
+static struct procabi freebsd32 = {
+	"FreeBSD32",
+	SYSDECODE_ABI_FREEBSD32,
+	STAILQ_HEAD_INITIALIZER(freebsd32.extra_syscalls),
+	{ NULL }
+};
+#endif
+
+static struct procabi linux = {
+	"Linux",
+	SYSDECODE_ABI_LINUX,
+	STAILQ_HEAD_INITIALIZER(linux.extra_syscalls),
+	{ NULL }
+};
+
+#ifdef __LP64__
+static struct procabi linux32 = {
+	"Linux32",
+	SYSDECODE_ABI_LINUX32,
+	STAILQ_HEAD_INITIALIZER(linux32.extra_syscalls),
+	{ NULL }
+};
+#endif
+
+static struct procabi_table abis[] = {
+	{ "CloudABI ELF32", &cloudabi32 },
+	{ "CloudABI ELF64", &cloudabi64 },
+#ifdef __LP64__
+	{ "FreeBSD ELF64", &freebsd },
+	{ "FreeBSD ELF32", &freebsd32 },
+#else
+	{ "FreeBSD ELF32", &freebsd },
+#endif
+#if defined(__powerpc64__)
+	{ "FreeBSD ELF64 V2", &freebsd },
+#endif
+#if defined(__amd64__)
+	{ "FreeBSD a.out", &freebsd32 },
+#endif
+#if defined(__i386__)
+	{ "FreeBSD a.out", &freebsd },
+#endif
+#ifdef __LP64__
+	{ "Linux ELF64", &linux },
+	{ "Linux ELF32", &linux32 },
+#else
+	{ "Linux ELF", &linux },
+#endif
+};
 
 /*
  * setup_and_wait() is called to start a process.  All it really does
@@ -150,8 +229,8 @@ detach_proc(pid_t pid)
 static struct procabi *
 find_abi(pid_t pid)
 {
-	struct procabi **pabi;
 	size_t len;
+	unsigned int i;
 	int error;
 	int mib[4];
 	char progt[32];
@@ -165,9 +244,9 @@ find_abi(pid_t pid)
 	if (error != 0)
 		err(2, "can not get sysvec name");
 
-	SET_FOREACH(pabi, procabi) {
-		if (strcmp((*pabi)->type, progt) == 0)
-			return (*pabi);
+	for (i = 0; i < nitems(abis); i++) {
+		if (strcmp(abis[i].name, progt) == 0)
+			return (abis[i].abi);
 	}
 	warnx("ABI %s for pid %ld is not supported", progt, (long)pid);
 	return (NULL);
@@ -373,7 +452,8 @@ enter_syscall(struct trussinfo *info, struct threadinfo *t,
 
 	alloc_syscall(t, pl);
 	narg = MIN(pl->pl_syscall_narg, nitems(t->cs.args));
-	if (narg != 0 && t->proc->abi->fetch_args(info, narg) != 0) {
+	if (narg != 0 && ptrace(PT_GET_SC_ARGS, t->tid, (caddr_t)t->cs.args,
+	    sizeof(t->cs.args)) != 0) {
 		free_syscall(t);
 		return;
 	}
@@ -405,7 +485,7 @@ enter_syscall(struct trussinfo *info, struct threadinfo *t,
 #endif
 		if (!(sc->args[i].type & OUT)) {
 			t->cs.s_args[i] = print_arg(&sc->args[i],
-			    t->cs.args, 0, info);
+			    t->cs.args, NULL, info);
 		}
 	}
 #if DEBUG
@@ -443,9 +523,8 @@ exit_syscall(struct trussinfo *info, struct ptrace_lwpinfo *pl)
 	struct threadinfo *t;
 	struct procinfo *p;
 	struct syscall *sc;
-	long retval[2];
+	struct ptrace_sc_ret psr;
 	u_int i;
-	int errorp;
 
 	t = info->curthread;
 	if (!t->in_syscall)
@@ -453,7 +532,7 @@ exit_syscall(struct trussinfo *info, struct ptrace_lwpinfo *pl)
 
 	clock_gettime(CLOCK_REALTIME, &t->after);
 	p = t->proc;
-	if (p->abi->fetch_retval(info, retval, &errorp) < 0) {
+	if (ptrace(PT_GET_SC_RET, t->tid, (caddr_t)&psr, sizeof(psr)) != 0) {
 		free_syscall(t);
 		return;
 	}
@@ -471,18 +550,18 @@ exit_syscall(struct trussinfo *info, struct ptrace_lwpinfo *pl)
 			 * If an error occurred, then don't bother
 			 * getting the data; it may not be valid.
 			 */
-			if (errorp) {
+			if (psr.sr_error != 0) {
 				asprintf(&temp, "0x%lx",
 				    t->cs.args[sc->args[i].offset]);
 			} else {
 				temp = print_arg(&sc->args[i],
-				    t->cs.args, retval, info);
+				    t->cs.args, psr.sr_retval, info);
 			}
 			t->cs.s_args[i] = temp;
 		}
 	}
 
-	print_syscall_ret(info, errorp, retval);
+	print_syscall_ret(info, psr.sr_error, psr.sr_retval);
 	free_syscall(t);
 
 	/*
@@ -520,12 +599,12 @@ print_line_prefix(struct trussinfo *info)
 		len += fprintf(info->outfile, ": ");
 	}
 	if (info->flags & ABSOLUTETIMESTAMPS) {
-		timespecsubt(&t->after, &info->start_time, &timediff);
+		timespecsub(&t->after, &info->start_time, &timediff);
 		len += fprintf(info->outfile, "%jd.%09ld ",
 		    (intmax_t)timediff.tv_sec, timediff.tv_nsec);
 	}
 	if (info->flags & RELATIVETIMESTAMPS) {
-		timespecsubt(&t->after, &t->before, &timediff);
+		timespecsub(&t->after, &t->before, &timediff);
 		len += fprintf(info->outfile, "%jd.%09ld ",
 		    (intmax_t)timediff.tv_sec, timediff.tv_nsec);
 	}
@@ -584,8 +663,62 @@ report_new_child(struct trussinfo *info)
 	fprintf(info->outfile, "<new process>\n");
 }
 
+void
+decode_siginfo(FILE *fp, siginfo_t *si)
+{
+	const char *str;
+
+	fprintf(fp, " code=");
+	str = sysdecode_sigcode(si->si_signo, si->si_code);
+	if (str == NULL)
+		fprintf(fp, "%d", si->si_code);
+	else
+		fprintf(fp, "%s", str);
+	switch (si->si_code) {
+	case SI_NOINFO:
+		break;
+	case SI_QUEUE:
+		fprintf(fp, " value=%p", si->si_value.sival_ptr);
+		/* FALLTHROUGH */
+	case SI_USER:
+	case SI_LWP:
+		fprintf(fp, " pid=%jd uid=%jd", (intmax_t)si->si_pid,
+		    (intmax_t)si->si_uid);
+		break;
+	case SI_TIMER:
+		fprintf(fp, " value=%p", si->si_value.sival_ptr);
+		fprintf(fp, " timerid=%d", si->si_timerid);
+		fprintf(fp, " overrun=%d", si->si_overrun);
+		if (si->si_errno != 0)
+			fprintf(fp, " errno=%d", si->si_errno);
+		break;
+	case SI_ASYNCIO:
+		fprintf(fp, " value=%p", si->si_value.sival_ptr);
+		break;
+	case SI_MESGQ:
+		fprintf(fp, " value=%p", si->si_value.sival_ptr);
+		fprintf(fp, " mqd=%d", si->si_mqd);
+		break;
+	default:
+		switch (si->si_signo) {
+		case SIGILL:
+		case SIGFPE:
+		case SIGSEGV:
+		case SIGBUS:
+			fprintf(fp, " trapno=%d", si->si_trapno);
+			fprintf(fp, " addr=%p", si->si_addr);
+			break;
+		case SIGCHLD:
+			fprintf(fp, " pid=%jd uid=%jd", (intmax_t)si->si_pid,
+			    (intmax_t)si->si_uid);
+			fprintf(fp, " status=%d", si->si_status);
+			break;
+		}
+	}
+}
+
 static void
-report_signal(struct trussinfo *info, siginfo_t *si)
+report_signal(struct trussinfo *info, siginfo_t *si, struct ptrace_lwpinfo *pl)
 {
 	struct threadinfo *t;
 	const char *signame;
@@ -596,7 +729,11 @@ report_signal(struct trussinfo *info, siginfo_t *si)
 	signame = sysdecode_signal(si->si_status);
 	if (signame == NULL)
 		signame = "?";
-	fprintf(info->outfile, "SIGNAL %u (%s)\n", si->si_status, signame);
+	fprintf(info->outfile, "SIGNAL %u (%s)", si->si_status, signame);
+	if (pl->pl_event == PL_EVENT_SIGNAL && pl->pl_flags & PL_FLAG_SI)
+		decode_siginfo(info->outfile, &pl->pl_siginfo);
+	fprintf(info->outfile, "\n");
+	
 }
 
 /*
@@ -673,7 +810,7 @@ eventloop(struct trussinfo *info)
 				pending_signal = 0;
 			} else {
 				if ((info->flags & NOSIGS) == 0)
-					report_signal(info, &si);
+					report_signal(info, &si, &pl);
 				pending_signal = si.si_status;
 			}
 			ptrace(PT_SYSCALL, si.si_pid, (caddr_t)1,

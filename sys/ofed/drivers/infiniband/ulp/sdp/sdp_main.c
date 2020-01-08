@@ -1,5 +1,6 @@
-
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1988, 1990, 1993, 1995
  *      The Regents of the University of California.  All rights reserved.
  * Copyright (c) 2004 The FreeBSD Foundation.  All rights reserved.
@@ -65,6 +66,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 
@@ -133,7 +135,7 @@ sdp_pcbbind(struct sdp_sock *ssk, struct sockaddr *nam, struct ucred *cred)
 	/* rdma_bind_addr handles bind races.  */
 	SDP_WUNLOCK(ssk);
 	if (ssk->id == NULL)
-		ssk->id = rdma_create_id(sdp_cma_handler, ssk, RDMA_PS_SDP, IB_QPT_RC);
+		ssk->id = rdma_create_id(&init_net, sdp_cma_handler, ssk, RDMA_PS_SDP, IB_QPT_RC);
 	if (ssk->id == NULL) {
 		SDP_WLOCK(ssk);
 		return (ENOMEM);
@@ -1123,7 +1125,8 @@ restart:
 		}
 		if (space < resid &&
 		    (atomic || space < so->so_snd.sb_lowat)) {
-			if ((so->so_state & SS_NBIO) || (flags & MSG_NBIO)) {
+			if ((so->so_state & SS_NBIO) ||
+			    (flags & (MSG_NBIO | MSG_DONTWAIT)) != 0) {
 				SOCKBUF_UNLOCK(&so->so_snd);
 				error = EWOULDBLOCK;
 				goto release;
@@ -1709,14 +1712,9 @@ int sdp_mod_usec = 0;
 void
 sdp_set_default_moderation(struct sdp_sock *ssk)
 {
-	struct ib_cq_attr attr;
 	if (sdp_mod_count <= 0 || sdp_mod_usec <= 0)
 		return;
-	memset(&attr, 0, sizeof(attr));
-	attr.moderation.cq_count = sdp_mod_count;
-	attr.moderation.cq_period = sdp_mod_usec;
-
-	ib_modify_cq(ssk->rx_ring.cq, &attr, IB_CQ_MODERATION);
+	ib_modify_cq(ssk->rx_ring.cq, sdp_mod_count, sdp_mod_usec);
 }
 
 static void
@@ -1726,12 +1724,9 @@ sdp_dev_add(struct ib_device *device)
 	struct sdp_device *sdp_dev;
 
 	sdp_dev = malloc(sizeof(*sdp_dev), M_SDP, M_WAITOK | M_ZERO);
-	sdp_dev->pd = ib_alloc_pd(device);
+	sdp_dev->pd = ib_alloc_pd(device, 0);
 	if (IS_ERR(sdp_dev->pd))
 		goto out_pd;
-        sdp_dev->mr = ib_get_dma_mr(sdp_dev->pd, IB_ACCESS_LOCAL_WRITE);
-        if (IS_ERR(sdp_dev->mr))
-		goto out_mr;
 	memset(&param, 0, sizeof param);
 	param.max_pages_per_fmr = SDP_FMR_SIZE;
 	param.page_shift = PAGE_SHIFT;
@@ -1746,15 +1741,13 @@ sdp_dev_add(struct ib_device *device)
 	return;
 
 out_fmr:
-	ib_dereg_mr(sdp_dev->mr);
-out_mr:
 	ib_dealloc_pd(sdp_dev->pd);
 out_pd:
 	free(sdp_dev, M_SDP);
 }
 
 static void
-sdp_dev_rem(struct ib_device *device)
+sdp_dev_rem(struct ib_device *device, void *client_data)
 {
 	struct sdp_device *sdp_dev;
 	struct sdp_sock *ssk;
@@ -1778,7 +1771,6 @@ sdp_dev_rem(struct ib_device *device)
 		return;
 	ib_flush_fmr_pool(sdp_dev->fmr_pool);
 	ib_destroy_fmr_pool(sdp_dev->fmr_pool);
-	ib_dereg_mr(sdp_dev->mr);
 	ib_dealloc_pd(sdp_dev->pd);
 	free(sdp_dev, M_SDP);
 }
@@ -1820,6 +1812,7 @@ sdp_pcblist(SYSCTL_HANDLER_ARGS)
 	if (error != 0)
 		return (error);
 
+	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof xig;
 	xig.xig_count = n;
 	xig.xig_gen = 0;
@@ -1888,7 +1881,7 @@ next:
 	return (error);
 }
 
-static SYSCTL_NODE(_net_inet, -1,  sdp,    CTLFLAG_RW, 0,  "SDP");
+SYSCTL_NODE(_net_inet, -1,  sdp,    CTLFLAG_RW, 0,  "SDP");
 
 SYSCTL_PROC(_net_inet_sdp, TCPCTL_PCBLIST, pcblist,
     CTLFLAG_RD | CTLTYPE_STRUCT, 0, 0, sdp_pcblist, "S,xtcpcb",

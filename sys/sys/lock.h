@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1997 Berkeley Software Design, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -105,6 +107,7 @@ struct lock_class {
 #define	LOP_TRYLOCK	0x00000004	/* Don't check lock order. */
 #define	LOP_EXCLUSIVE	0x00000008	/* Exclusive lock. */
 #define	LOP_DUPOK	0x00000010	/* Don't check for duplicate acquires */
+#define	LOP_NOSLEEP	0x00000020	/* Non-sleepable despite LO_SLEEPABLE */
 
 /* Flags passed to witness_assert. */
 #define	LA_MASKASSERT	0x000000ff	/* Mask for witness defined asserts. */
@@ -116,34 +119,6 @@ struct lock_class {
 #define	LA_NOTRECURSED	0x00000010	/* Lock is not recursed. */
 
 #ifdef _KERNEL
-/*
- * If any of WITNESS, INVARIANTS, or KTR_LOCK KTR tracing has been enabled,
- * then turn on LOCK_DEBUG.  When this option is on, extra debugging
- * facilities such as tracking the file and line number of lock operations
- * are enabled.  Also, mutex locking operations are not inlined to avoid
- * bloat from all the extra debugging code.  We also have to turn on all the
- * calling conventions for this debugging code in modules so that modules can
- * work with both debug and non-debug kernels.
- */
-#if defined(KLD_MODULE) || defined(WITNESS) || defined(INVARIANTS) || \
-    defined(LOCK_PROFILING) || defined(KTR)
-#define	LOCK_DEBUG	1
-#else
-#define	LOCK_DEBUG	0
-#endif
-
-/*
- * In the LOCK_DEBUG case, use the filename and line numbers for debugging
- * operations.  Otherwise, use default values to avoid the unneeded bloat.
- */
-#if LOCK_DEBUG > 0
-#define	LOCK_FILE	__FILE__
-#define	LOCK_LINE	__LINE__
-#else
-#define	LOCK_FILE	NULL
-#define	LOCK_LINE	0
-#endif
-
 /*
  * Macros for KTR_LOCK tracing.
  *
@@ -208,13 +183,17 @@ extern struct lock_class lock_class_lockmgr;
 extern struct lock_class *lock_classes[];
 
 struct lock_delay_config {
-	u_int base;
-	u_int max;
+	u_short base;
+	u_short max;
 };
+
+extern struct lock_delay_config locks_delay;
+extern u_short locks_delay_retries;
+extern u_short locks_delay_loops;
 
 struct lock_delay_arg {
 	struct lock_delay_config *config;
-	u_int delay;
+	u_short delay;
 	u_int spin_cnt;
 };
 
@@ -225,6 +204,13 @@ lock_delay_arg_init(struct lock_delay_arg *la, struct lock_delay_config *lc)
 	la->delay = lc->base;
 	la->spin_cnt = 0;
 }
+
+#define lock_delay_spin(n)	do {	\
+	u_int _i;			\
+					\
+	for (_i = (n); _i > 0; _i--)	\
+		cpu_spinwait();		\
+} while (0)
 
 #define	LOCK_DELAY_SYSINIT(func) \
 	SYSINIT(func##_ld, SI_SUB_LOCK, SI_ORDER_ANY, func, NULL)
@@ -264,6 +250,8 @@ const char *witness_file(struct lock_object *);
 void	witness_thread_exit(struct thread *);
 
 #ifdef	WITNESS
+int	witness_startup_count(void);
+void	witness_startup(void *);
 
 /* Flags for witness_warn(). */
 #define	WARN_GIANTOK	0x01	/* Giant is exempt from this check. */

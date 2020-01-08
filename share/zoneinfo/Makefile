@@ -95,8 +95,13 @@ zoneinfo: yearistype ${TDATA}
 	zic -D -d ${TZBUILDDIR} -p ${POSIXRULES} -m ${NOBINMODE} \
 	    ${LEAPFILE} -y ${.OBJDIR}/yearistype ${TZFILES}
 
+#
+# Sort TZS to ensure they are the same every build. find -s might
+# be a shorter way to express this, but it's non-portable. Any
+# differences between the two don't matter for this purpose.
+#
 .if make(*install*)
-TZS!= cd ${TZBUILDDIR} && find -s * -type f
+TZS!= cd ${TZBUILDDIR} && find * -type f | LC_ALL=C sort
 .endif
 
 beforeinstall: install-zoneinfo
@@ -110,6 +115,8 @@ install-zoneinfo:
 .endfor
 	${INSTALL} ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m ${NOBINMODE} \
 	    ${CONTRIBDIR}/zone.tab ${DESTDIR}/usr/share/zoneinfo/
+	${INSTALL} ${TAG_ARGS} -o ${BINOWN} -g ${BINGRP} -m ${NOBINMODE} \
+	    ${CONTRIBDIR}/zone1970.tab ${DESTDIR}/usr/share/zoneinfo/
 
 afterinstall:
 #
@@ -131,8 +138,7 @@ afterinstall:
 		echo "Run tzsetup(8) manually to update /etc/localtime."; \
 	fi
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.prog.mk>

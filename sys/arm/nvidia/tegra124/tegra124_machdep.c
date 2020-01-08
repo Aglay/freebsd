@@ -30,10 +30,11 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/bus.h>
-#include <sys/reboot.h>
 #include <sys/devmap.h>
+#include <sys/lock.h>
+#include <sys/reboot.h>
+#include <sys/systm.h>
 
 #include <vm/vm.h>
 
@@ -122,6 +123,7 @@ tegra124_cpu_reset(platform_t plat)
  *   option SOCDEV_VA=0x70000000
  *   option EARLY_PRINTF
  */
+#if 0
 #ifdef EARLY_PRINTF
 static void
 tegra124_early_putc(int c)
@@ -135,6 +137,7 @@ tegra124_early_putc(int c)
 	*UART_TX_REG = c;
 }
 early_putc_t *early_putc = tegra124_early_putc;
+#endif
 #endif
 
 static platform_method_t tegra124_methods[] = {

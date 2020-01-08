@@ -25,17 +25,21 @@ CSTD?=	gnu89
 
 .if ${TARGET_ARCH} != ${MACHINE_ARCH}
 CFLAGS+=	-DCROSS_DIRECTORY_STRUCTURE
+CFLAGS+=	-DTARGET_SYSTEM_ROOT=\"${TOOLS_PREFIX}\"
 .endif
 
 .if ${TARGET_CPUARCH} == "arm"
 CFLAGS+=	-DTARGET_ARM_EABI
 .endif
 
-.if ${TARGET_ARCH} == "armeb" || ${TARGET_ARCH} == "armv6eb"
+.if ${TARGET_ARCH:Marm*eb} != ""
 CFLAGS += -DTARGET_ENDIAN_DEFAULT=MASK_BIG_END
 .endif
-.if ${TARGET_ARCH} == "armv6" || ${TARGET_ARCH} == "armv6eb"
+.if ${TARGET_ARCH:Marmv6*} != ""
 CFLAGS += -DFREEBSD_ARCH_armv6
+.endif
+.if ${TARGET_ARCH:Marmv7*} != ""
+CFLAGS += -DFREEBSD_ARCH_armv7
 .endif
 
 .if ${TARGET_CPUARCH} == "mips"

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1983, 1988, 1993
  *	Regents of the University of California.  All rights reserved.
  *
@@ -212,6 +214,7 @@ int	mflag;		/* show memory stats */
 int	noutputs = 0;	/* how much outputs before we exit */
 int	numeric_addr;	/* show addresses numerically */
 int	numeric_port;	/* show ports numerically */
+int	Pflag;		/* show TCP log ID */
 static int pflag;	/* show given protocol */
 static int	Qflag;		/* show netisr information */
 int	rflag;		/* show routing tables (or routing stats) */
@@ -245,7 +248,7 @@ main(int argc, char *argv[])
 	if (argc < 0)
 		exit(EXIT_FAILURE);
 
-	while ((ch = getopt(argc, argv, "46AaBbdF:f:ghI:iLlM:mN:np:Qq:RrSTsuWw:xz"))
+	while ((ch = getopt(argc, argv, "46AaBbdF:f:ghI:iLlM:mN:nPp:Qq:RrSTsuWw:xz"))
 	    != -1)
 		switch(ch) {
 		case '4':
@@ -342,6 +345,9 @@ main(int argc, char *argv[])
 		case 'n':
 			numeric_addr = numeric_port = 1;
 			break;
+		case 'P':
+			Pflag = 1;
+			break;
 		case 'p':
 			if ((tp = name2protox(optarg)) == NULL) {
 				xo_errx(1, "%s: unknown or uninstrumented "
@@ -422,13 +428,12 @@ main(int argc, char *argv[])
 	if (!live) {
 		if (setgid(getgid()) != 0)
 			xo_err(-1, "setgid");
+		/* Load all necessary kvm symbols */
+		kresolve_list(nl);
 	}
 
 	if (xflag && Tflag)
 		xo_errx(1, "-x and -T are incompatible, pick one.");
-
-	/* Load all necessary kvm symbols */
-	kresolve_list(nl);
 
 	if (Bflag) {
 		if (!live)
@@ -479,8 +484,10 @@ main(int argc, char *argv[])
 	if (rflag) {
 		xo_open_container("statistics");
 		if (sflag) {
+			if (live) {
+				kresolve_list(nl);
+			}
 			rt_stats();
-			flowtable_stats();
 		} else
 			routepr(fib, af);
 		xo_close_container("statistics");

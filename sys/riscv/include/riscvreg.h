@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2015-2016 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015-2017 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * Portions of this software were developed by SRI International and the
@@ -51,6 +51,9 @@
 #define	EXCP_SUPERVISOR_ECALL		9
 #define	EXCP_HYPERVISOR_ECALL		10
 #define	EXCP_MACHINE_ECALL		11
+#define	EXCP_INST_PAGE_FAULT		12
+#define	EXCP_LOAD_PAGE_FAULT		13
+#define	EXCP_STORE_PAGE_FAULT		15
 #define	EXCP_INTR			(1ul << 63)
 
 #define	SSTATUS_UIE			(1 << 0)
@@ -68,7 +71,7 @@
 #define	SSTATUS_FS_MASK			(0x3 << SSTATUS_FS_SHIFT)
 #define	SSTATUS_XS_SHIFT		15
 #define	SSTATUS_XS_MASK			(0x3 << SSTATUS_XS_SHIFT)
-#define	SSTATUS_PUM			(1 << 18)
+#define	SSTATUS_SUM			(1 << 18)
 #define	SSTATUS32_SD			(1 << 63)
 #define	SSTATUS64_SD			(1 << 31)
 
@@ -134,6 +137,8 @@
 #define	SIE_SSIE	(1 << 1)
 #define	SIE_UTIE	(1 << 4)
 #define	SIE_STIE	(1 << 5)
+#define	SIE_UEIE	(1 << 8)
+#define	SIE_SEIE	(1 << 9)
 
 #define	MIP_SEIP	(1 << 9)
 
@@ -141,19 +146,43 @@
 #define	SIP_SSIP	(1 << 1)
 #define	SIP_STIP	(1 << 5)
 
-#if 0
-/* lowRISC TODO */
-#define	NCSRS		4096
-#define	CSR_IPI		0x783
-#define	CSR_IO_IRQ	0x7c0	/* lowRISC only? */
-#endif
+#define	SATP_PPN_S	0
+#define	SATP_PPN_M	(0xfffffffffff << SATP_PPN_S)
+#define	SATP_ASID_S	44
+#define	SATP_ASID_M	(0xffff << SATP_ASID_S)
+#define	SATP_MODE_S	60
+#define	SATP_MODE_M	(0xf << SATP_MODE_S)
+#define	SATP_MODE_SV39	(8ULL << SATP_MODE_S)
+#define	SATP_MODE_SV48	(9ULL << SATP_MODE_S)
 
-#define	XLEN		8
+#define	XLEN		__riscv_xlen
+#define	XLEN_BYTES	(XLEN / 8)
 #define	INSN_SIZE	4
+#define	INSN_C_SIZE	2
 
-#define	RISCV_INSN_NOP		0x00000013
-#define	RISCV_INSN_BREAK	0x00100073
-#define	RISCV_INSN_RET		0x00008067
+#define	X_RA	1
+#define	X_SP	2
+#define	X_GP	3
+#define	X_TP	4
+#define	X_T0	5
+#define	X_T1	6
+#define	X_T2	7
+#define	X_T3	28
+
+#define	RD_SHIFT	7
+#define	RD_MASK		(0x1f << RD_SHIFT)
+#define	RS1_SHIFT	15
+#define	RS1_MASK	(0x1f << RS1_SHIFT)
+#define	RS1_SP		(X_SP << RS1_SHIFT)
+#define	RS2_SHIFT	20
+#define	RS2_MASK	(0x1f << RS2_SHIFT)
+#define	RS2_RA		(X_RA << RS2_SHIFT)
+#define	IMM_SHIFT	20
+#define	IMM_MASK	(0xfff << IMM_SHIFT)
+
+#define	RS2_C_SHIFT	2
+#define	RS2_C_MASK	(0x1f << RS2_C_SHIFT)
+#define	RS2_C_RA	(X_RA << RS2_C_SHIFT)
 
 #define	CSR_ZIMM(val)							\
 	(__builtin_constant_p(val) && ((u_long)(val) < 32))
@@ -194,5 +223,24 @@
 	__asm __volatile("csrr %0, " #csr : "=r" (val));		\
 	val;								\
 })
+
+#if __riscv_xlen == 32
+#define	csr_read64(csr)							\
+({	uint64_t val;							\
+	uint32_t high, low;						\
+	__asm __volatile("1: "						\
+			 "csrr t0, " #csr "h\n"				\
+			 "csrr %0, " #csr "\n"				\
+			 "csrr %1, " #csr "h\n"				\
+			 "bne t0, %1, 1b"				\
+			 : "=r" (low), "=r" (high)			\
+			 :						\
+			 : "t0");					\
+	val = (low | ((uint64_t)high << 32));				\
+	val;								\
+})
+#else
+#define	csr_read64(csr)		((uint64_t)csr_read(csr))
+#endif
 
 #endif /* !_MACHINE_RISCVREG_H_ */

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1997, 1998 Justin T. Gibbs.
  * All rights reserved.
  *
@@ -71,8 +73,8 @@ struct bus_dma_tag {
 	bus_dma_filter_t *filter;
 	void		 *filterarg;
 	bus_size_t	  maxsize;
-	u_int		  nsegments;
 	bus_size_t	  maxsegsz;
+	u_int		  nsegments;
 	int		  flags;
 	int		  ref_count;
 	int		  map_count;
@@ -338,10 +340,68 @@ bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 	return (error);
 }
 
+void
+bus_dma_template_init(bus_dma_tag_template_t *t, bus_dma_tag_t parent)
+{
+
+	if (t == NULL)
+		return;
+
+	t->parent = parent;
+	t->alignment = 1;
+	t->boundary = 0;
+	t->lowaddr = t->highaddr = BUS_SPACE_MAXADDR;
+	t->maxsize = t->maxsegsize = BUS_SPACE_MAXSIZE;
+	t->nsegments = BUS_SPACE_UNRESTRICTED;
+	t->lockfunc = NULL;
+	t->lockfuncarg = NULL;
+	t->flags = 0;
+}
+
+int
+bus_dma_template_tag(bus_dma_tag_template_t *t, bus_dma_tag_t *dmat)
+{
+
+	if (t == NULL || dmat == NULL)
+		return (EINVAL);
+
+	return (bus_dma_tag_create(t->parent, t->alignment, t->boundary,
+	    t->lowaddr, t->highaddr, NULL, NULL, t->maxsize,
+	    t->nsegments, t->maxsegsize, t->flags, t->lockfunc, t->lockfuncarg,
+	    dmat));
+}
+
+void
+bus_dma_template_clone(bus_dma_tag_template_t *t, bus_dma_tag_t dmat)
+{
+
+	if (t == NULL || dmat == NULL)
+		return;
+
+	t->parent = dmat->parent;
+	t->alignment = dmat->alignment;
+	t->boundary = dmat->boundary;
+	t->lowaddr = dmat->lowaddr;
+	t->highaddr = dmat->highaddr;
+	t->maxsize = dmat->maxsize;
+	t->nsegments = dmat->nsegments;
+	t->maxsegsize = dmat->maxsegsz;
+	t->flags = dmat->flags;
+	t->lockfunc = dmat->lockfunc;
+	t->lockfuncarg = dmat->lockfuncarg;
+}
+
+int
+bus_dma_tag_set_domain(bus_dma_tag_t dmat, int domain)
+{
+
+	return (0);
+}
+
 int
 bus_dma_tag_destroy(bus_dma_tag_t dmat)
 {
-	bus_dma_tag_t dmat_copy;
+	bus_dma_tag_t dmat_copy __unused;
 	int error;
 
 	error = 0;
@@ -506,11 +566,9 @@ bus_dmamem_alloc(bus_dma_tag_t dmat, void** vaddr, int flags,
 
 	if (flags & BUS_DMA_ZERO)
 		mflags |= M_ZERO;
-#ifdef NOTYET
 	if (flags & BUS_DMA_NOCACHE)
 		attr = VM_MEMATTR_UNCACHEABLE;
 	else
-#endif
 		attr = VM_MEMATTR_DEFAULT;
 
 	/* 
@@ -533,9 +591,9 @@ bus_dmamem_alloc(bus_dma_tag_t dmat, void** vaddr, int flags,
 		 *     multi-seg allocations yet though.
 		 * XXX Certain AGP hardware does.
 		 */
-		*vaddr = (void *)kmem_alloc_contig(kmem_arena, dmat->maxsize,
-		    mflags, 0ul, dmat->lowaddr, dmat->alignment ?
-		    dmat->alignment : 1ul, dmat->boundary, attr);
+		*vaddr = (void *)kmem_alloc_contig(dmat->maxsize, mflags, 0ul,
+		    dmat->lowaddr, dmat->alignment ? dmat->alignment : 1ul,
+		    dmat->boundary, attr);
 		(*mapp)->contigalloc = 1;
 	}
 	if (*vaddr == NULL) {
@@ -561,7 +619,7 @@ bus_dmamem_free(bus_dma_tag_t dmat, void *vaddr, bus_dmamap_t map)
 	if (!map->contigalloc)
 		free(vaddr, M_DEVBUF);
 	else
-		kmem_free(kmem_arena, (vm_offset_t)vaddr, dmat->maxsize);
+		kmem_free((vm_offset_t)vaddr, dmat->maxsize);
 	bus_dmamap_destroy(dmat, map);
 	CTR3(KTR_BUSDMA, "%s: tag %p flags 0x%x", __func__, dmat, dmat->flags);
 }

@@ -65,6 +65,8 @@
 #include "tree.h"
 #include "oid.h"
 
+#include "trans_inet.h"
+
 #define	PATH_PID	"/var/run/%s.pid"
 #define PATH_CONFIG	"/etc/%s.config"
 #define	PATH_ENGINE	"/var/%s.engine"
@@ -927,7 +929,7 @@ fd_resume(void *p)
 #ifdef USE_LIBBEGEMOT
 	if (f->id >= 0)
 		return (0);
-	if ((f->id = poll_register(f->fd, input, f, POLL_IN)) < 0) {
+	if ((f->id = poll_register(f->fd, input, f, RPOLL_IN)) < 0) {
 		err = errno;
 		syslog(LOG_ERR, "select fd %d: %m", f->fd);
 		errno = err;
@@ -1038,7 +1040,7 @@ snmpd_input(struct port_input *pi, struct tport *tport)
 	ssize_t ret, slen;
 	int32_t vi;
 #ifdef USE_TCPWRAPPERS
-	char client[16];
+	char client[INET6_ADDRSTRLEN];
 #endif
 
 	ret = tport->transport->vtab->recv(tport, pi);
@@ -1160,8 +1162,8 @@ snmpd_input(struct port_input *pi, struct tport *tport)
 	 */
 	if (pdu.version < SNMP_V3 &&
 	    ((pi->cred && !pi->priv && pdu.type == SNMP_PDU_SET) ||
-	    (community != COMM_WRITE &&
-            (pdu.type == SNMP_PDU_SET || community != COMM_READ)))) {
+	    (comm != NULL && comm->private != COMM_WRITE &&
+            (pdu.type == SNMP_PDU_SET || comm->private != COMM_READ)))) {
 		snmpd_stats.inBadCommunityUses++;
 		snmp_pdu_free(&pdu);
 		snmp_input_consume(pi);
@@ -1184,8 +1186,12 @@ snmpd_input(struct port_input *pi, struct tport *tport)
 	    sndbuf, &sndlen, "SNMP", ierr, vi, NULL);
 
 	if (ferr == SNMPD_INPUT_OK) {
-		slen = tport->transport->vtab->send(tport, sndbuf, sndlen,
-		    pi->peer, pi->peerlen);
+		if (tport->transport->vtab->send != NULL)
+			slen = tport->transport->vtab->send(tport, sndbuf,
+			    sndlen, pi->peer, pi->peerlen);
+		else
+			slen = tport->transport->vtab->send2(tport, sndbuf,
+			    sndlen, pi);
 		if (slen == -1)
 			syslog(LOG_ERR, "send*: %m");
 		else if ((size_t)slen != sndlen)
@@ -1201,7 +1207,8 @@ snmpd_input(struct port_input *pi, struct tport *tport)
 }
 
 /*
- * Send a PDU to a given port
+ * Send a PDU to a given port. If this is a multi-socket port, use the
+ * first socket.
  */
 void
 snmp_send_port(void *targ, const struct asn_oid *port, struct snmp_pdu *pdu,
@@ -1224,7 +1231,10 @@ snmp_send_port(void *targ, const struct asn_oid *port, struct snmp_pdu *pdu,
 
 	snmp_output(pdu, sndbuf, &sndlen, "SNMP PROXY");
 
-	len = trans->vtab->send(tp, sndbuf, sndlen, addr, addrlen);
+	if (trans->vtab->send != NULL)
+		len = trans->vtab->send(tp, sndbuf, sndlen, addr, addrlen);
+	else
+		len = trans->vtab->send2(tp, sndbuf, sndlen, NULL);
 
 	if (len == -1)
 		syslog(LOG_ERR, "sendto: %m");
@@ -1238,16 +1248,37 @@ snmp_send_port(void *targ, const struct asn_oid *port, struct snmp_pdu *pdu,
 
 /*
  * Close an input source
+ *
+ * \param pi	input instance
  */
 void
 snmpd_input_close(struct port_input *pi)
 {
-	if (pi->id != NULL)
+	if (pi->id != NULL) {
 		fd_deselect(pi->id);
-	if (pi->fd >= 0)
+		pi->id = NULL;
+	}
+	if (pi->fd >= 0) {
 		(void)close(pi->fd);
-	if (pi->buf != NULL)
+		pi->fd = -1;
+	}
+	if (pi->buf != NULL) {
 		free(pi->buf);
+		pi->buf = NULL;
+	}
+}
+
+/*
+ * Initialize an input source.
+ *
+ * \param pi	input instance
+ */
+void
+snmpd_input_init(struct port_input *pi)
+{
+	pi->id = NULL;
+	pi->fd = -1;
+	pi->buf = NULL;
 }
 
 /*
@@ -1584,9 +1615,7 @@ main(int argc, char *argv[])
 	progargs = argv;
 	nprogargs = argc;
 
-	srandomdev();
-
-	snmp_serial_no = random();
+	snmp_serial_no = arc4random();
 
 #ifdef USE_TCPWRAPPERS
 	/*
@@ -1609,8 +1638,8 @@ main(int argc, char *argv[])
 	/*
 	 * Get standard communities
 	 */
-	(void)comm_define(1, "SNMP read", NULL, NULL);
-	(void)comm_define(2, "SNMP write", NULL, NULL);
+	comm_define(COMM_READ, "SNMP read", NULL, NULL);
+	comm_define(COMM_WRITE, "SNMP write", NULL, NULL);
 	community = COMM_INITIALIZE;
 
 	trap_reqid = reqid_allocate(512, NULL);
@@ -1633,6 +1662,8 @@ main(int argc, char *argv[])
 		syslog(LOG_WARNING, "cannot start UDP transport");
 	if (lsock_trans.start() != SNMP_ERR_NOERROR)
 		syslog(LOG_WARNING, "cannot start LSOCK transport");
+	if (inet_trans.start() != SNMP_ERR_NOERROR)
+		syslog(LOG_WARNING, "cannot start INET transport");
 
 #ifdef USE_LIBBEGEMOT
 	if (debug.evdebug > 0)
@@ -2027,11 +2058,58 @@ asn_error_func(const struct asn_buf *b, const char *err, ...)
 /*
  * Create a new community
  */
+struct community*
+comm_define_ordered(u_int priv, const char *descr, struct asn_oid *idx,
+    struct lmodule *owner, const char *str)
+{
+	struct community *c, *p;
+	u_int ncomm;
+
+	ncomm = idx->subs[idx->len - 1];
+
+	/* check that community doesn't already exist */
+	TAILQ_FOREACH(c, &community_list, link)
+		if (c->value == ncomm)
+			return (c);
+
+	if ((c = malloc(sizeof(struct community))) == NULL) {
+		syslog(LOG_ERR, "%s: %m", __func__);
+		return (NULL);
+	}
+	c->owner = owner;
+	c->value = ncomm;
+	c->descr = descr;
+	c->string = NULL;
+	c->private = priv;
+
+	if (str != NULL) {
+		if((c->string = malloc(strlen(str)+1)) == NULL) {
+			free(c);
+			return (NULL);
+		}
+		strcpy(c->string, str);
+	}
+	/*
+	 * Insert ordered
+	 */
+	c->index = *idx;
+	TAILQ_FOREACH(p, &community_list, link) {
+		if (asn_compare_oid(&p->index, &c->index) > 0) {
+			TAILQ_INSERT_BEFORE(p, c, link);
+			break;
+		}
+	}
+	if (p == NULL)
+		TAILQ_INSERT_TAIL(&community_list, c, link);
+	return (c);
+}
+
 u_int
 comm_define(u_int priv, const char *descr, struct lmodule *owner,
     const char *str)
 {
-	struct community *c, *p;
+	struct asn_oid idx, *p;
+	struct community *c;
 	u_int ncomm;
 
 	/* generate an identifier */
@@ -2043,44 +2121,18 @@ comm_define(u_int priv, const char *descr, struct lmodule *owner,
 				break;
 	} while (c != NULL);
 
-	if ((c = malloc(sizeof(struct community))) == NULL) {
-		syslog(LOG_ERR, "comm_define: %m");
-		return (0);
-	}
-	c->owner = owner;
-	c->value = ncomm;
-	c->descr = descr;
-	c->string = NULL;
-	c->private = priv;
-
-	if (str != NULL) {
-		if((c->string = malloc(strlen(str)+1)) == NULL) {
-			free(c);
-			return (0);
-		}
-		strcpy(c->string, str);
-	}
-
 	/* make index */
-	if (c->owner == NULL) {
-		c->index.len = 1;
-		c->index.subs[0] = 0;
-	} else {
-		c->index = c->owner->index;
+	if (owner != NULL)
+		p = &owner->index;
+	else {
+		p = &idx;
+		p->len = 1;
+		p->subs[0] = 0;
 	}
-	c->index.subs[c->index.len++] = c->private;
-
-	/*
-	 * Insert ordered
-	 */
-	TAILQ_FOREACH(p, &community_list, link) {
-		if (asn_compare_oid(&p->index, &c->index) > 0) {
-			TAILQ_INSERT_BEFORE(p, c, link);
-			break;
-		}
-	}
-	if (p == NULL)
-		TAILQ_INSERT_TAIL(&community_list, c, link);
+	p->subs[p->len++] = ncomm;
+	c = comm_define_ordered(priv, descr, p, owner, str);
+	if (c == NULL)
+		return (0);
 	return (c->value);
 }
 

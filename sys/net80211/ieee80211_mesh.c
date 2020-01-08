@@ -1,4 +1,6 @@
 /*- 
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009 The FreeBSD Foundation 
  * All rights reserved. 
  * 
@@ -1223,6 +1225,7 @@ mesh_forward(struct ieee80211vap *vap, struct mbuf *m,
 	M_WME_SETAC(mcopy, WME_AC_BE);
 
 	/* XXX do we know m_nextpkt is NULL? */
+	MPASS((mcopy->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
 	mcopy->m_pkthdr.rcvif = (void *) ni;
 
 	/*
@@ -1653,12 +1656,7 @@ mesh_input(struct ieee80211_node *ni, struct mbuf *m,
 		 * in the Mesh Control field and a 3 address qos frame
 		 * is used.
 		 */
-		if (IEEE80211_IS_DSTODS(wh))
-			*(uint16_t *)qos = *(uint16_t *)
-			    ((struct ieee80211_qosframe_addr4 *)wh)->i_qos;
-		else
-			*(uint16_t *)qos = *(uint16_t *)
-			    ((struct ieee80211_qosframe *)wh)->i_qos;
+		*(uint16_t *)qos = *(uint16_t *)ieee80211_getqos(wh);
 
 		/*
 		 * NB: The mesh STA sets the Mesh Control Present
@@ -2630,7 +2628,7 @@ mesh_recv_action_meshgate(struct ieee80211_node *ni,
 	/* popagate only if decremented ttl >= 1 && forwarding is enabled */
 	if ((ie.gann_ttl - 1) < 1 && !(ms->ms_flags & IEEE80211_MESHFLAGS_FWD))
 		return 0;
-		pgann.gann_flags = ie.gann_flags; /* Reserved */
+	pgann.gann_flags = ie.gann_flags; /* Reserved */
 	pgann.gann_hopcount = ie.gann_hopcount + 1;
 	pgann.gann_ttl = ie.gann_ttl - 1;
 	IEEE80211_ADDR_COPY(pgann.gann_addr, ie.gann_addr);

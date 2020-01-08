@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -169,6 +169,7 @@
 #define ACPI_USE_DO_WHILE_0
 #define ACPI_USE_LOCAL_CACHE
 #define ACPI_USE_NATIVE_DIVIDE
+#define ACPI_USE_NATIVE_MATH64
 #define ACPI_USE_SYSTEM_CLIBRARY
 
 #ifdef _KERNEL
@@ -201,6 +202,10 @@
 #endif /* DEBUGGER_THREADING */
 
 #define DEBUGGER_THREADING  0   /* integrated with DDB */
+
+#ifdef INVARIANTS
+#define ACPI_MUTEX_DEBUG
+#endif
 
 #else /* _KERNEL */
 

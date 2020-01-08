@@ -44,7 +44,6 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/ioccom.h>
 #include <sys/filio.h>
-#include <sys/tty.h>
 #include <sys/kbio.h>
 
 #include <dev/kbd/kbdreg.h>
@@ -271,8 +270,8 @@ gpiokeys_attach_key(struct gpiokeys_softc *sc, phandle_t node,
 	callout_init_mtx(&key->repeat_callout, &key->mtx, 0);
 
 	name = NULL;
-	if (OF_getprop_alloc(node, "label", 1, (void **)&name) == -1)
-		OF_getprop_alloc(node, "name", 1, (void **)&name);
+	if (OF_getprop_alloc(node, "label", (void **)&name) == -1)
+		OF_getprop_alloc(node, "name", (void **)&name);
 
 	if (name != NULL)
 		key_name = name;
@@ -433,7 +432,7 @@ gpiokeys_attach(device_t dev)
 #endif
 
 	if (bootverbose) {
-		genkbd_diag(kbd, 1);
+		kbdd_diag(kbd, 1);
 	}
 
 	total_keys = 0;
@@ -976,9 +975,7 @@ static keyboard_switch_t gpiokeyssw = {
 	.clear_state = &gpiokeys_clear_state,
 	.get_state = &gpiokeys_get_state,
 	.set_state = &gpiokeys_set_state,
-	.get_fkeystr = &genkbd_get_fkeystr,
 	.poll = &gpiokeys_poll,
-	.diag = &genkbd_diag,
 };
 
 KEYBOARD_DRIVER(gpiokeys, gpiokeyssw, gpiokeys_configure);

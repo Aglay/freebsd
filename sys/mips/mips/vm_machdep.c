@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986 The Regents of the University of California.
  * Copyright (c) 1989, 1990 William Jolitz
  * Copyright (c) 1994 John Dyson
@@ -41,7 +43,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
 #include "opt_ddb.h"
 
 #include <sys/param.h>
@@ -57,6 +58,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/unistd.h>
 
+#include <machine/abi.h>
 #include <machine/cache.h>
 #include <machine/clock.h>
 #include <machine/cpu.h>
@@ -80,30 +82,16 @@ __FBSDID("$FreeBSD$");
 #include <sys/user.h>
 #include <sys/mbuf.h>
 
-/* Duplicated from asm.h */
-#if defined(__mips_o32)
-#define	SZREG	4
-#else
-#define	SZREG	8
-#endif
-#if defined(__mips_o32) || defined(__mips_o64)
-#define	CALLFRAME_SIZ	(SZREG * (4 + 2))
-#elif defined(__mips_n32) || defined(__mips_n64)
-#define	CALLFRAME_SIZ	(SZREG * 4)
-#endif
-
 /*
  * Finish a fork operation, with process p2 nearly set up.
  * Copy and update the pcb, set up the stack so that the child
  * ready to run and return to user mode.
  */
 void
-cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2,int flags)
+cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 {
-	struct proc *p1;
 	struct pcb *pcb2;
 
-	p1 = td1->td_proc;
 	if ((flags & RFPROC) == 0)
 		return;
 	/* It is assumed that the vm_thread_alloc called
@@ -113,7 +101,7 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2,int flags)
 	/* Point the pcb to the top of the stack */
 	pcb2 = td2->td_pcb;
 
-	/* Copy p1's pcb, note that in this case
+	/* Copy td1's pcb, note that in this case
 	 * our pcb also includes the td_frame being copied
 	 * too. The older mips2 code did an additional copy
 	 * of the td_frame, for us that's not needed any
@@ -428,13 +416,7 @@ cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 	struct trapframe *tf;
 	register_t sp;
 
-	/*
-	 * At the point where a function is called, sp must be 8
-	 * byte aligned[for compatibility with 64-bit CPUs]
-	 * in ``See MIPS Run'' by D. Sweetman, p. 269
-	 * align stack
-	 */
-	sp = (((intptr_t)stack->ss_sp + stack->ss_size) & ~0x7) -
+	sp = (((intptr_t)stack->ss_sp + stack->ss_size) & ~(STACK_ALIGN - 1)) -
 	    CALLFRAME_SIZ;
 
 	/*
@@ -471,13 +453,20 @@ cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 	 */
 }
 
-/*
- * Implement the pre-zeroed page mechanism.
- * This routine is called from the idle loop.
- */
+bool
+cpu_exec_vmspace_reuse(struct proc *p __unused, vm_map_t map __unused)
+{
 
-#define	ZIDLE_LO(v)	((v) * 2 / 3)
-#define	ZIDLE_HI(v)	((v) * 4 / 5)
+	return (true);
+}
+
+int
+cpu_procctl(struct thread *td __unused, int idtype __unused, id_t id __unused,
+    int com __unused, void *data __unused)
+{
+
+	return (EINVAL);
+}
 
 /*
  * Software interrupt handler for queued VM system processing.

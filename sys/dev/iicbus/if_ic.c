@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998, 2001 Nicolas Souchu
  * All rights reserved.
  *
@@ -307,9 +309,13 @@ icintr(device_t dev, int event, char *ptr)
 		BPF_TAP(sc->ic_ifp, sc->ic_ifbuf, len + ICHDRLEN);
 		top = m_devget(sc->ic_ifbuf + ICHDRLEN, len, 0, sc->ic_ifp, 0);
 		if (top) {
+			struct epoch_tracker et;
+
 			mtx_unlock(&sc->ic_lock);
 			M_SETFIB(top, sc->ic_ifp->if_fib);
+			NET_EPOCH_ENTER(et);
 			netisr_dispatch(NETISR_IP, top);
+			NET_EPOCH_EXIT(et);
 			mtx_lock(&sc->ic_lock);
 		}
 		break;

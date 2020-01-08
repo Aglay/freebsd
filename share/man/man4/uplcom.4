@@ -29,7 +29,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd April 26, 2017
+.Dd April 24, 2018
 .Dt UPLCOM 4
 .Os
 .Sh NAME
@@ -179,6 +179,18 @@ Willcom W-SIM DD PHS terminal.(WS002IN)
 YC-Cable USB-Serial Adapter
 .It
 Zeagle N2iTion3 Diving Computer
+.El
+.Sh SYSCTL VARIABLES
+The following variables are available as both
+.Xr sysctl 8
+variables and
+.Xr loader 8
+tunables:
+.Bl -tag -width indent
+.It Va hw.usb.uplcom.debug
+Debug output level, where 0 is debugging disabled and larger values increase
+debug message verbosity.
+Default is 0.
 .El
 .Sh FILES
 .Bl -tag -width "/dev/ttyU*.init" -compact

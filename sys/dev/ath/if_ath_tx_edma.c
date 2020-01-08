@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Adrian Chadd <adrian@FreeBSD.org>
  * All rights reserved.
  *
@@ -1009,6 +1011,8 @@ ath_edma_tx_processq(struct ath_softc *sc, int dosched)
 			nacked++;
 			sc->sc_stats.ast_tx_rssi = ts.ts_rssi;
 			ATH_RSSI_LPF(sc->sc_halstats.ns_avgtxrssi,
+			    ts.ts_rssi);
+			ATH_RSSI_LPF(ATH_NODE(ni)->an_node_stats.ns_avgtxrssi,
 			    ts.ts_rssi);
 		}
 

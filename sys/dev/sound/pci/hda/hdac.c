@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006 Stephane E. Potvin <sepotvin@videotron.ca>
  * Copyright (c) 2006 Ariff Abdullah <ariff@FreeBSD.org>
  * Copyright (c) 2008-2012 Alexander Motin <mav@FreeBSD.org>
@@ -39,6 +41,7 @@
 #include <dev/pci/pcivar.h>
 
 #include <sys/ctype.h>
+#include <sys/endian.h>
 #include <sys/taskqueue.h>
 
 #include <dev/sound/pci/hda/hdac_private.h>
@@ -94,9 +97,17 @@ static const struct {
 	{ HDA_INTEL_LPTLP1,  "Intel Lynx Point-LP",	0, 0 },
 	{ HDA_INTEL_LPTLP2,  "Intel Lynx Point-LP",	0, 0 },
 	{ HDA_INTEL_SRPTLP,  "Intel Sunrise Point-LP",	0, 0 },
-	{ HDA_INTEL_KBLKLP,  "Intel Kabylake-LP",	0, 0 },
+	{ HDA_INTEL_KBLKLP,  "Intel Kaby Lake-LP",	0, 0 },
 	{ HDA_INTEL_SRPT,    "Intel Sunrise Point",	0, 0 },
-	{ HDA_INTEL_KBLK,    "Intel Kabylake",	0, 0 },
+	{ HDA_INTEL_KBLK,    "Intel Kaby Lake",	0, 0 },
+	{ HDA_INTEL_KBLKH,   "Intel Kaby Lake-H",	0, 0 },
+	{ HDA_INTEL_CFLK,    "Intel Coffee Lake",	0, 0 },
+	{ HDA_INTEL_CNLK,    "Intel Cannon Lake",	0, 0 },
+	{ HDA_INTEL_ICLK,    "Intel Ice Lake",		0, 0 },
+	{ HDA_INTEL_CMLKLP,  "Intel Comet Lake-LP",	0, 0 },
+	{ HDA_INTEL_CMLKH,   "Intel Comet Lake-H",	0, 0 },
+	{ HDA_INTEL_TGLK,    "Intel Tiger Lake",	0, 0 },
+	{ HDA_INTEL_GMLK,    "Intel Gemini Lake",	0, 0 },
 	{ HDA_INTEL_82801F,  "Intel 82801F",	0, 0 },
 	{ HDA_INTEL_63XXESB, "Intel 631x/632xESB",	0, 0 },
 	{ HDA_INTEL_82801G,  "Intel 82801G",	0, 0 },
@@ -104,8 +115,8 @@ static const struct {
 	{ HDA_INTEL_82801I,  "Intel 82801I",	0, 0 },
 	{ HDA_INTEL_82801JI, "Intel 82801JI",	0, 0 },
 	{ HDA_INTEL_82801JD, "Intel 82801JD",	0, 0 },
-	{ HDA_INTEL_PCH,     "Intel 5 Series/3400 Series",	0, 0 },
-	{ HDA_INTEL_PCH2,    "Intel 5 Series/3400 Series",	0, 0 },
+	{ HDA_INTEL_PCH,     "Intel Ibex Peak",	0, 0 },
+	{ HDA_INTEL_PCH2,    "Intel Ibex Peak",	0, 0 },
 	{ HDA_INTEL_SCH,     "Intel SCH",	0, 0 },
 	{ HDA_NVIDIA_MCP51,  "NVIDIA MCP51",	0, HDAC_QUIRK_MSI },
 	{ HDA_NVIDIA_MCP55,  "NVIDIA MCP55",	0, HDAC_QUIRK_MSI },
@@ -166,13 +177,14 @@ static const struct {
 	{ HDA_AMD_HUDSON2,   "AMD Hudson-2",	0, 0 },
 	{ HDA_RDC_M3010,     "RDC M3010",	0, 0 },
 	{ HDA_VIA_VT82XX,    "VIA VT8251/8237A",0, 0 },
-	{ HDA_SIS_966,       "SiS 966",		0, 0 },
+	{ HDA_SIS_966,       "SiS 966/968",	0, 0 },
 	{ HDA_ULI_M5461,     "ULI M5461",	0, 0 },
 	/* Unknown */
 	{ HDA_INTEL_ALL,  "Intel",		0, 0 },
 	{ HDA_NVIDIA_ALL, "NVIDIA",		0, 0 },
 	{ HDA_ATI_ALL,    "ATI",		0, 0 },
 	{ HDA_AMD_ALL,    "AMD",		0, 0 },
+	{ HDA_CREATIVE_ALL,    "Creative",	0, 0 },
 	{ HDA_VIA_ALL,    "VIA",		0, 0 },
 	{ HDA_SIS_ALL,    "SiS",		0, 0 },
 	{ HDA_ULI_ALL,    "ULI",		0, 0 },
@@ -564,7 +576,7 @@ hdac_dma_alloc(struct hdac_softc *sc, struct hdac_dma *dma, bus_size_t size)
 	    NULL,				/* lockfuncarg */
 	    &dma->dma_tag);			/* dmat */
 	if (result != 0) {
-		device_printf(sc->dev, "%s: bus_dma_tag_create failed (%x)\n",
+		device_printf(sc->dev, "%s: bus_dma_tag_create failed (%d)\n",
 		    __func__, result);
 		goto hdac_dma_alloc_fail;
 	}
@@ -574,10 +586,11 @@ hdac_dma_alloc(struct hdac_softc *sc, struct hdac_dma *dma, bus_size_t size)
 	 */
 	result = bus_dmamem_alloc(dma->dma_tag, (void **)&dma->dma_vaddr,
 	    BUS_DMA_NOWAIT | BUS_DMA_ZERO |
-	    ((sc->flags & HDAC_F_DMA_NOCACHE) ? BUS_DMA_NOCACHE : 0),
+	    ((sc->flags & HDAC_F_DMA_NOCACHE) ? BUS_DMA_NOCACHE :
+	     BUS_DMA_COHERENT),
 	    &dma->dma_map);
 	if (result != 0) {
-		device_printf(sc->dev, "%s: bus_dmamem_alloc failed (%x)\n",
+		device_printf(sc->dev, "%s: bus_dmamem_alloc failed (%d)\n",
 		    __func__, result);
 		goto hdac_dma_alloc_fail;
 	}
@@ -592,7 +605,7 @@ hdac_dma_alloc(struct hdac_softc *sc, struct hdac_dma *dma, bus_size_t size)
 	if (result != 0 || dma->dma_paddr == 0) {
 		if (result == 0)
 			result = ENOMEM;
-		device_printf(sc->dev, "%s: bus_dmamem_load failed (%x)\n",
+		device_printf(sc->dev, "%s: bus_dmamem_load failed (%d)\n",
 		    __func__, result);
 		goto hdac_dma_alloc_fail;
 	}
@@ -621,11 +634,9 @@ static void
 hdac_dma_free(struct hdac_softc *sc, struct hdac_dma *dma)
 {
 	if (dma->dma_paddr != 0) {
-#if 0
 		/* Flush caches */
 		bus_dmamap_sync(dma->dma_tag, dma->dma_map,
 		    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
-#endif
 		bus_dmamap_unload(dma->dma_tag, dma->dma_map);
 		dma->dma_paddr = 0;
 	}
@@ -713,7 +724,7 @@ hdac_irq_alloc(struct hdac_softc *sc)
 	    NULL, hdac_intr_handler, sc, &irq->irq_handle);
 	if (result != 0) {
 		device_printf(sc->dev,
-		    "%s: Unable to setup interrupt handler (%x)\n",
+		    "%s: Unable to setup interrupt handler (%d)\n",
 		    __func__, result);
 		goto hdac_irq_alloc_fail;
 	}
@@ -848,7 +859,6 @@ hdac_rirb_init(struct hdac_softc *sc)
 	HDAC_WRITE_1(&sc->mem, HDAC_RIRBCTL, HDAC_RIRBCTL_RINTCTL);
 #endif
 
-#if 0
 	/*
 	 * Make sure that the Host CPU cache doesn't contain any dirty
 	 * cache lines that falls in the rirb. If I understood correctly, it
@@ -857,7 +867,6 @@ hdac_rirb_init(struct hdac_softc *sc)
 	 */
 	bus_dmamap_sync(sc->rirb_dma.dma_tag, sc->rirb_dma.dma_map,
 	    BUS_DMASYNC_PREREAD);
-#endif
 }
 
 /****************************************************************************
@@ -895,25 +904,24 @@ hdac_rirb_flush(struct hdac_softc *sc)
 {
 	struct hdac_rirb *rirb_base, *rirb;
 	nid_t cad;
-	uint32_t resp;
+	uint32_t resp, resp_ex;
 	uint8_t rirbwp;
 	int ret;
 
 	rirb_base = (struct hdac_rirb *)sc->rirb_dma.dma_vaddr;
 	rirbwp = HDAC_READ_1(&sc->mem, HDAC_RIRBWP);
-#if 0
 	bus_dmamap_sync(sc->rirb_dma.dma_tag, sc->rirb_dma.dma_map,
 	    BUS_DMASYNC_POSTREAD);
-#endif
 
 	ret = 0;
 	while (sc->rirb_rp != rirbwp) {
 		sc->rirb_rp++;
 		sc->rirb_rp %= sc->rirb_size;
 		rirb = &rirb_base[sc->rirb_rp];
-		cad = HDAC_RIRB_RESPONSE_EX_SDATA_IN(rirb->response_ex);
-		resp = rirb->response;
-		if (rirb->response_ex & HDAC_RIRB_RESPONSE_EX_UNSOLICITED) {
+		resp = le32toh(rirb->response);
+		resp_ex = le32toh(rirb->response_ex);
+		cad = HDAC_RIRB_RESPONSE_EX_SDATA_IN(resp_ex);
+		if (resp_ex & HDAC_RIRB_RESPONSE_EX_UNSOLICITED) {
 			sc->unsolq[sc->unsolq_wp++] = resp;
 			sc->unsolq_wp %= HDAC_UNSOLQ_MAX;
 			sc->unsolq[sc->unsolq_wp++] = cad;
@@ -927,6 +935,9 @@ hdac_rirb_flush(struct hdac_softc *sc)
 		}
 		ret++;
 	}
+
+	bus_dmamap_sync(sc->rirb_dma.dma_tag, sc->rirb_dma.dma_map,
+	    BUS_DMASYNC_PREREAD);
 	return (ret);
 }
 
@@ -976,15 +987,11 @@ hdac_send_command(struct hdac_softc *sc, nid_t cad, uint32_t verb)
 	sc->corb_wp++;
 	sc->corb_wp %= sc->corb_size;
 	corb = (uint32_t *)sc->corb_dma.dma_vaddr;
-#if 0
 	bus_dmamap_sync(sc->corb_dma.dma_tag,
 	    sc->corb_dma.dma_map, BUS_DMASYNC_PREWRITE);
-#endif
-	corb[sc->corb_wp] = verb;
-#if 0
+	corb[sc->corb_wp] = htole32(verb);
 	bus_dmamap_sync(sc->corb_dma.dma_tag,
 	    sc->corb_dma.dma_map, BUS_DMASYNC_POSTWRITE);
-#endif
 	HDAC_WRITE_2(&sc->mem, HDAC_CORBWP, sc->corb_wp);
 
 	timeout = 10000;
@@ -1280,7 +1287,7 @@ hdac_attach(device_t dev)
 	    NULL,				/* lockfuncarg */
 	    &sc->chan_dmat);			/* dmat */
 	if (result != 0) {
-		device_printf(dev, "%s: bus_dma_tag_create failed (%x)\n",
+		device_printf(dev, "%s: bus_dma_tag_create failed (%d)\n",
 		     __func__, result);
 		goto hdac_attach_fail;
 	}
@@ -1307,8 +1314,9 @@ hdac_attach(device_t dev)
 
 hdac_attach_fail:
 	hdac_irq_free(sc);
-	for (i = 0; i < sc->num_ss; i++)
-		hdac_dma_free(sc, &sc->streams[i].bdl);
+	if (sc->streams != NULL)
+		for (i = 0; i < sc->num_ss; i++)
+			hdac_dma_free(sc, &sc->streams[i].bdl);
 	free(sc->streams, M_HDAC);
 	hdac_dma_free(sc, &sc->rirb_dma);
 	hdac_dma_free(sc, &sc->corb_dma);
@@ -1798,7 +1806,7 @@ hdac_find_stream(struct hdac_softc *sc, int dir, int stream)
 	int i, ss;
 
 	ss = -1;
-	/* Allocate ISS/BSS first. */
+	/* Allocate ISS/OSS first. */
 	if (dir == 0) {
 		for (i = 0; i < sc->num_iss; i++) {
 			if (sc->streams[i].stream == stream) {
@@ -1866,7 +1874,7 @@ hdac_stream_alloc(device_t dev, device_t child, int dir, int format, int stripe,
 
 	/* Allocate stream number */
 	if (ss >= sc->num_iss + sc->num_oss)
-		stream = 15 - (ss - sc->num_iss + sc->num_oss);
+		stream = 15 - (ss - sc->num_iss - sc->num_oss);
 	else if (ss >= sc->num_iss)
 		stream = ss - sc->num_iss + 1;
 	else
@@ -1922,12 +1930,15 @@ hdac_stream_start(device_t dev, device_t child,
 	addr = (uint64_t)buf;
 	bdle = (struct hdac_bdle *)sc->streams[ss].bdl.dma_vaddr;
 	for (i = 0; i < blkcnt; i++, bdle++) {
-		bdle->addrl = (uint32_t)addr;
-		bdle->addrh = (uint32_t)(addr >> 32);
-		bdle->len = blksz;
-		bdle->ioc = 1;
+		bdle->addrl = htole32((uint32_t)addr);
+		bdle->addrh = htole32((uint32_t)(addr >> 32));
+		bdle->len = htole32(blksz);
+		bdle->ioc = htole32(1);
 		addr += blksz;
 	}
+
+	bus_dmamap_sync(sc->streams[ss].bdl.dma_tag,
+	    sc->streams[ss].bdl.dma_map, BUS_DMASYNC_PREWRITE);
 
 	off = ss << 5;
 	HDAC_WRITE_4(&sc->mem, off + HDAC_SDCBL, blksz * blkcnt);
@@ -1976,6 +1987,9 @@ hdac_stream_stop(device_t dev, device_t child, int dir, int stream)
 	ss = hdac_find_stream(sc, dir, stream);
 	KASSERT(ss >= 0,
 	    ("Stop for not allocated stream (%d/%d)\n", dir, stream));
+
+	bus_dmamap_sync(sc->streams[ss].bdl.dma_tag,
+	    sc->streams[ss].bdl.dma_map, BUS_DMASYNC_POSTWRITE);
 
 	off = ss << 5;
 	ctl = HDAC_READ_1(&sc->mem, off + HDAC_SDCTL0);

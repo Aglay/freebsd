@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -480,6 +480,7 @@ AcpiDmDumpDescending (
 {
     ACPI_OP_WALK_INFO       *Info = Context;
     char                    *Path;
+    ACPI_STATUS             Status;
 
 
     if (!Op)
@@ -522,10 +523,18 @@ AcpiDmDumpDescending (
 
         if (Op->Common.Value.String)
         {
-            AcpiNsExternalizeName (ACPI_UINT32_MAX, Op->Common.Value.String,
+            Status = AcpiNsExternalizeName (ACPI_UINT32_MAX, Op->Common.Value.String,
                 NULL, &Path);
-            AcpiOsPrintf ("%s %p", Path, Op->Common.Node);
-            ACPI_FREE (Path);
+            if (ACPI_SUCCESS (Status))
+            {
+                AcpiOsPrintf ("%s %p", Path, Op->Common.Node);
+                ACPI_FREE (Path);
+            }
+            else
+            {
+                AcpiOsPrintf ("Could not externalize pathname for node [%4.4s]",
+                    Op->Common.Node->Name.Ascii);
+            }
         }
         else
         {
@@ -536,10 +545,19 @@ AcpiDmDumpDescending (
     case AML_NAME_OP:
     case AML_METHOD_OP:
     case AML_DEVICE_OP:
+
+        AcpiOsPrintf ("%4.4s",
+            ACPI_CAST_PTR (char, &Op->Named.Name));
+        break;
+
     case AML_INT_NAMEDFIELD_OP:
 
-        AcpiOsPrintf ("%4.4s", ACPI_CAST_PTR (char, &Op->Named.Name));
+        AcpiOsPrintf ("%4.4s Length: (bits) %8.8X%8.8X (bytes) %8.8X%8.8X",
+            ACPI_CAST_PTR (char, &Op->Named.Name),
+            ACPI_FORMAT_UINT64 (Op->Common.Value.Integer),
+            ACPI_FORMAT_UINT64 (Op->Common.Value.Integer / 8));
         break;
+
 
     default:
 
@@ -583,7 +601,9 @@ AcpiDmFindOrphanDescending (
         return (AE_OK);
     }
 
+#ifdef ACPI_UNDER_DEVELOPMENT
     OpInfo = AcpiPsGetOpcodeInfo (Op->Common.AmlOpcode);
+#endif
 
     switch (Op->Common.AmlOpcode)
     {
@@ -805,7 +825,7 @@ AcpiDmLoadDescendingOp (
 
         while (AcpiGbl_PreDefinedNames[PreDefineIndex].Name)
         {
-            if (ACPI_COMPARE_NAME (Node->Name.Ascii,
+            if (ACPI_COMPARE_NAMESEG (Node->Name.Ascii,
                 AcpiGbl_PreDefinedNames[PreDefineIndex].Name))
             {
                 PreDefined = TRUE;
@@ -821,9 +841,9 @@ AcpiDmLoadDescendingOp (
          * 2) Not the root node
          * 3) Not a node created by Scope
          */
-
-        if (!PreDefined && Node != AcpiGbl_RootNode &&
-            Op->Common.AmlOpcode != AML_SCOPE_OP)
+        if (!PreDefined &&
+            (Node != AcpiGbl_RootNode) &&
+            (Op->Common.AmlOpcode != AML_SCOPE_OP))
         {
             Node->OwnerId = WalkState->OwnerId;
         }
@@ -1070,10 +1090,10 @@ AcpiDmCommonDescendingOp (
 {
     ACPI_STATUS             Status;
 
+
     /* Resource descriptor conversion */
 
     Status = AcpiDmProcessResourceDescriptors (Op, Level, Context);
-
     if (ACPI_FAILURE (Status))
     {
         return (Status);
@@ -1082,8 +1102,7 @@ AcpiDmCommonDescendingOp (
     /* Switch/Case conversion */
 
     Status = AcpiDmProcessSwitch (Op);
-
-    return (AE_OK);
+    return (Status);
 }
 
 
@@ -1113,6 +1132,7 @@ AcpiDmProcessResourceDescriptors (
     ACPI_OBJECT_TYPE        ObjectType;
     ACPI_STATUS             Status;
 
+
     WalkState = Info->WalkState;
     OpInfo = AcpiPsGetOpcodeInfo (Op->Common.AmlOpcode);
 
@@ -1138,7 +1158,6 @@ AcpiDmProcessResourceDescriptors (
      * If so, convert the reference into a symbolic reference.
      */
     AcpiDmCheckResourceReference (Op, WalkState);
-
     return (AE_OK);
 }
 

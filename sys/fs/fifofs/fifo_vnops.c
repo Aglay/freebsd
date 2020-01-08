@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1990, 1993, 1995
  *	The Regents of the University of California.
  * Copyright (c) 2005 Robert N. M. Watson
@@ -86,7 +88,7 @@ struct vop_vector fifo_specops = {
 	.vop_mkdir =		VOP_PANIC,
 	.vop_mknod =		VOP_PANIC,
 	.vop_open =		fifo_open,
-	.vop_pathconf =		vop_stdpathconf,
+	.vop_pathconf =		VOP_PANIC,
 	.vop_print =		fifo_print,
 	.vop_read =		VOP_PANIC,
 	.vop_readdir =		VOP_PANIC,
@@ -100,6 +102,7 @@ struct vop_vector fifo_specops = {
 	.vop_symlink =		VOP_PANIC,
 	.vop_write =		VOP_PANIC,
 };
+VFS_VOP_VECTOR_REGISTER(fifo_specops);
 
 /*
  * Dispose of fifo resources.
@@ -172,7 +175,7 @@ fifo_open(ap)
 			if (fip->fi_writers > 0)
 				wakeup(&fip->fi_writers);
 		}
-		fp->f_seqcount = fpipe->pipe_wgen - fip->fi_writers;
+		fp->f_pipegen = fpipe->pipe_wgen - fip->fi_writers;
 	}
 	if (ap->a_mode & FWRITE) {
 		if ((ap->a_mode & O_NONBLOCK) && fip->fi_readers == 0) {
@@ -192,7 +195,7 @@ fifo_open(ap)
 	if ((ap->a_mode & O_NONBLOCK) == 0) {
 		if ((ap->a_mode & FREAD) && fip->fi_writers == 0) {
 			gen = fip->fi_wgen;
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 			stops_deferred = sigdeferstop(SIGDEFERSTOP_OFF);
 			error = msleep(&fip->fi_readers, PIPE_MTX(fpipe),
 			    PDROP | PCATCH | PSOCK, "fifoor", 0);
@@ -219,7 +222,7 @@ fifo_open(ap)
 		}
 		if ((ap->a_mode & FWRITE) && fip->fi_readers == 0) {
 			gen = fip->fi_rgen;
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 			stops_deferred = sigdeferstop(SIGDEFERSTOP_OFF);
 			error = msleep(&fip->fi_writers, PIPE_MTX(fpipe),
 			    PDROP | PCATCH | PSOCK, "fifoow", 0);

@@ -2,7 +2,7 @@
  * Copyright (c) 2010 Isilon Systems, Inc.
  * Copyright (c) 2010 iX Systems, Inc.
  * Copyright (c) 2010 Panasas, Inc.
- * Copyright (c) 2013-2016 Mellanox Technologies, Ltd.
+ * Copyright (c) 2013-2018 Mellanox Technologies, Ltd.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,6 +42,7 @@
 #include <linux/wait.h>
 #include <linux/semaphore.h>
 #include <linux/spinlock.h>
+#include <linux/dcache.h>
 
 struct module;
 struct kiocb;
@@ -53,9 +54,12 @@ struct pipe_inode_info;
 struct vm_area_struct;
 struct poll_table_struct;
 struct files_struct;
+struct pfs_node;
+struct linux_cdev;
 
 #define	inode	vnode
 #define	i_cdev	v_rdev
+#define	i_private v_data
 
 #define	S_IRUGO	(S_IRUSR | S_IRGRP | S_IROTH)
 #define	S_IWUGO	(S_IWUSR | S_IWGRP | S_IWOTH)
@@ -63,16 +67,23 @@ struct files_struct;
 
 typedef struct files_struct *fl_owner_t;
 
-struct dentry {
-	struct inode	*d_inode;
-};
-
 struct file_operations;
+
+struct linux_file_wait_queue {
+	struct wait_queue wq;
+	struct wait_queue_head *wqh;
+	atomic_t state;
+#define	LINUX_FWQ_STATE_INIT 0
+#define	LINUX_FWQ_STATE_NOT_READY 1
+#define	LINUX_FWQ_STATE_QUEUED 2
+#define	LINUX_FWQ_STATE_READY 3
+#define	LINUX_FWQ_STATE_MAX 4
+};
 
 struct linux_file {
 	struct file	*_file;
 	const struct file_operations	*f_op;
-	void 		*private_data;
+	void		*private_data;
 	int		f_flags;
 	int		f_mode;	/* Just starting mode. */
 	struct dentry	*f_dentry;
@@ -94,6 +105,10 @@ struct linux_file {
 #define	LINUX_KQ_FLAG_NEED_WRITE (1 << 3)
 	/* protects f_selinfo.si_note */
 	spinlock_t	f_kqlock;
+	struct linux_file_wait_queue f_wait_queue;
+
+	/* pointer to associated character device, if any */
+	struct linux_cdev *f_cdev;
 };
 
 #define	file		linux_file
@@ -114,24 +129,25 @@ do {									\
 		pgsigio(*(queue), (sig), 0);				\
 } while (0)
 
-typedef int (*filldir_t)(void *, const char *, int, loff_t, u64, unsigned);
+typedef int (*filldir_t)(void *, const char *, int, off_t, u64, unsigned);
 
 struct file_operations {
 	struct module *owner;
-	ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
-	ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
-	unsigned int (*poll) (struct file *, struct poll_table_struct *);
-	long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
-	int (*mmap)(struct file *, struct vm_area_struct *);
+	ssize_t (*read)(struct linux_file *, char __user *, size_t, off_t *);
+	ssize_t (*write)(struct linux_file *, const char __user *, size_t, off_t *);
+	unsigned int (*poll) (struct linux_file *, struct poll_table_struct *);
+	long (*unlocked_ioctl)(struct linux_file *, unsigned int, unsigned long);
+	long (*compat_ioctl)(struct linux_file *, unsigned int, unsigned long);
+	int (*mmap)(struct linux_file *, struct vm_area_struct *);
 	int (*open)(struct inode *, struct file *);
-	int (*release)(struct inode *, struct file *);
-	int (*fasync)(int, struct file *, int);
+	int (*release)(struct inode *, struct linux_file *);
+	int (*fasync)(int, struct linux_file *, int);
 
 /* Although not supported in FreeBSD, to align with Linux code
- * we are adding llseek() only when it is mapped to no_llseek which returns 
+ * we are adding llseek() only when it is mapped to no_llseek which returns
  * an illegal seek error
  */
-	loff_t (*llseek)(struct file *, loff_t, int);
+	off_t (*llseek)(struct linux_file *, off_t, int);
 #if 0
 	/* We do not support these methods.  Don't permit them to compile. */
 	loff_t (*llseek)(struct file *, loff_t, int);
@@ -142,7 +158,6 @@ struct file_operations {
 	int (*readdir)(struct file *, void *, filldir_t);
 	int (*ioctl)(struct inode *, struct file *, unsigned int,
 	    unsigned long);
-	long (*compat_ioctl)(struct file *, unsigned int, unsigned long);
 	int (*flush)(struct file *, fl_owner_t id);
 	int (*fsync)(struct file *, struct dentry *, int datasync);
 	int (*aio_fsync)(struct kiocb *, int datasync);
@@ -229,12 +244,8 @@ nonseekable_open(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static inline dev_t
-iminor(struct inode *inode)
-{
-
-	return (minor(dev2unit(inode->v_rdev)));
-}
+extern unsigned int linux_iminor(struct inode *);
+#define	iminor(...) linux_iminor(__VA_ARGS__)
 
 static inline struct linux_file *
 get_file(struct linux_file *f)
@@ -263,7 +274,7 @@ iput(struct inode *inode)
 	vrele(inode);
 }
 
-static inline loff_t 
+static inline loff_t
 no_llseek(struct file *file, loff_t offset, int whence)
 {
 
@@ -276,5 +287,40 @@ noop_llseek(struct linux_file *file, loff_t offset, int whence)
 
 	return (file->_file->f_offset);
 }
+
+static inline struct vnode *
+file_inode(const struct linux_file *file)
+{
+
+	return (file->f_vnode);
+}
+
+static inline int
+call_mmap(struct linux_file *file, struct vm_area_struct *vma)
+{
+
+	return (file->f_op->mmap(file, vma));
+}
+
+/* Shared memory support */
+unsigned long linux_invalidate_mapping_pages(vm_object_t, pgoff_t, pgoff_t);
+struct page *linux_shmem_read_mapping_page_gfp(vm_object_t, int, gfp_t);
+struct linux_file *linux_shmem_file_setup(const char *, loff_t, unsigned long);
+void linux_shmem_truncate_range(vm_object_t, loff_t, loff_t);
+
+#define	invalidate_mapping_pages(...) \
+  linux_invalidate_mapping_pages(__VA_ARGS__)
+
+#define	shmem_read_mapping_page(...) \
+  linux_shmem_read_mapping_page_gfp(__VA_ARGS__, 0)
+
+#define	shmem_read_mapping_page_gfp(...) \
+  linux_shmem_read_mapping_page_gfp(__VA_ARGS__)
+
+#define	shmem_file_setup(...) \
+  linux_shmem_file_setup(__VA_ARGS__)
+
+#define	shmem_truncate_range(...) \
+  linux_shmem_truncate_range(__VA_ARGS__)
 
 #endif /* _LINUX_FS_H_ */

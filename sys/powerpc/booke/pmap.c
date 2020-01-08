@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2007-2009 Semihalf, Rafal Jaworowski <raj@semihalf.com>
  * Copyright (C) 2006 Semihalf, Marian Balakowicz <m8@semihalf.com>
  * All rights reserved.
@@ -57,8 +59,7 @@
   * 0xc000_0000_0000_0000 - 0xcfff_ffff_ffff_ffff      : kernel reserved
   *   0xc000_0000_0000_0000 - endkernel-1              : kernel code & data
   *               endkernel - msgbufp-1                : flat device tree
-  *                 msgbufp - ptbl_bufs-1              : message buffer
-  *               ptbl_bufs - kernel_pdir-1            : kernel page tables
+  *                 msgbufp - kernel_pdir-1            : message buffer
   *             kernel_pdir - kernel_pp2d-1            : kernel page directory
   *             kernel_pp2d - .                        : kernel pointers to page directory
   *      pmap_zero_copy_min - crashdumpmap-1           : reserved for page zero/copy
@@ -75,6 +76,7 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_ddb.h"
 #include "opt_kstack_pages.h"
 
 #include <sys/param.h>
@@ -105,6 +107,8 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_param.h>
 #include <vm/vm_map.h>
 #include <vm/vm_pager.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_pagequeue.h>
 #include <vm/uma.h>
 
 #include <machine/_inttypes.h>
@@ -118,6 +122,8 @@ __FBSDID("$FreeBSD$");
 #include <machine/mmuvar.h>
 #include <machine/pmap.h>
 #include <machine/pte.h>
+
+#include <ddb/ddb.h>
 
 #include "mmu_if.h"
 
@@ -155,16 +161,18 @@ static int availmem_regions_sz;
 static struct mem_region *physmem_regions;
 static int physmem_regions_sz;
 
+#ifndef __powerpc64__
 /* Reserved KVA space and mutex for mmu_booke_zero_page. */
 static vm_offset_t zero_page_va;
 static struct mtx zero_page_mutex;
-
-static struct mtx tlbivax_mutex;
 
 /* Reserved KVA space and mutex for mmu_booke_copy_page. */
 static vm_offset_t copy_page_src_va;
 static vm_offset_t copy_page_dst_va;
 static struct mtx copy_page_mutex;
+#endif
+
+static struct mtx tlbivax_mutex;
 
 /**************************************************************************/
 /* PMAP */
@@ -178,6 +186,7 @@ unsigned int kernel_ptbls;	/* Number of KVA ptbls. */
 #ifdef __powerpc64__
 unsigned int kernel_pdirs;
 #endif
+static uma_zone_t ptbl_root_zone;
 
 /*
  * If user pmap is processed with mmu_booke_remove and the resident count
@@ -212,25 +221,27 @@ uint32_t tlb1_entries;
 
 #define TLB1_ENTRIES (tlb1_entries)
 
-static vm_offset_t tlb1_map_base = VM_MAXUSER_ADDRESS + PAGE_SIZE;
+static vm_offset_t tlb1_map_base = (vm_offset_t)VM_MAXUSER_ADDRESS + PAGE_SIZE;
 
 static tlbtid_t tid_alloc(struct pmap *);
 static void tid_flush(tlbtid_t tid);
 
+#ifdef DDB
 #ifdef __powerpc64__
 static void tlb_print_entry(int, uint32_t, uint64_t, uint32_t, uint32_t);
 #else
 static void tlb_print_entry(int, uint32_t, uint32_t, uint32_t, uint32_t);
 #endif
+#endif
 
 static void tlb1_read_entry(tlb_entry_t *, unsigned int);
 static void tlb1_write_entry(tlb_entry_t *, unsigned int);
 static int tlb1_iomapped(int, vm_paddr_t, vm_size_t, vm_offset_t *);
-static vm_size_t tlb1_mapin_region(vm_offset_t, vm_paddr_t, vm_size_t);
+static vm_size_t tlb1_mapin_region(vm_offset_t, vm_paddr_t, vm_size_t, int);
 
 static vm_size_t tsize2size(unsigned int);
 static unsigned int size2tsize(vm_size_t);
-static unsigned int ilog2(unsigned int);
+static unsigned long ilog2(unsigned long);
 
 static void set_mas4_defaults(void);
 
@@ -253,18 +264,20 @@ static int pv_entry_count = 0, pv_entry_max = 0, pv_entry_high_water = 0;
 #define PMAP_SHPGPERPROC	200
 #endif
 
+#ifdef __powerpc64__
+#define PMAP_ROOT_SIZE	(sizeof(pte_t***) * PP2D_NENTRIES)
+static pte_t *ptbl_alloc(mmu_t, pmap_t, pte_t **,
+			 unsigned int, boolean_t);
+static void ptbl_free(mmu_t, pmap_t, pte_t **, unsigned int, vm_page_t);
+static void ptbl_hold(mmu_t, pmap_t, pte_t **, unsigned int);
+static int ptbl_unhold(mmu_t, pmap_t, vm_offset_t);
+#else
+#define PMAP_ROOT_SIZE	(sizeof(pte_t**) * PDIR_NENTRIES)
 static void ptbl_init(void);
 static struct ptbl_buf *ptbl_buf_alloc(void);
 static void ptbl_buf_free(struct ptbl_buf *);
 static void ptbl_free_pmap_ptbl(pmap_t, pte_t *);
 
-#ifdef __powerpc64__
-static pte_t *ptbl_alloc(mmu_t, pmap_t, pte_t **,
-			 unsigned int, boolean_t);
-static void ptbl_free(mmu_t, pmap_t, pte_t **, unsigned int);
-static void ptbl_hold(mmu_t, pmap_t, pte_t **, unsigned int);
-static int ptbl_unhold(mmu_t, pmap_t, vm_offset_t);
-#else
 static pte_t *ptbl_alloc(mmu_t, pmap_t, unsigned int, boolean_t);
 static void ptbl_free(mmu_t, pmap_t, unsigned int);
 static void ptbl_hold(mmu_t, pmap_t, unsigned int);
@@ -284,17 +297,14 @@ static void pv_remove(pmap_t, vm_offset_t, vm_page_t);
 
 static void booke_pmap_init_qpages(void);
 
-/* Number of kva ptbl buffers, each covering one ptbl (PTBL_PAGES). */
-#ifdef __powerpc64__
-#define PTBL_BUFS               (16UL * 16 * 16)
-#else
-#define PTBL_BUFS		(128 * 16)
-#endif
-
 struct ptbl_buf {
 	TAILQ_ENTRY(ptbl_buf) link;	/* list link */
 	vm_offset_t kva;		/* va of mapping */
 };
+
+#ifndef __powerpc64__
+/* Number of kva ptbl buffers, each covering one ptbl (PTBL_PAGES). */
+#define PTBL_BUFS		(128 * 16)
 
 /* ptbl free list and a lock used for access synchronization. */
 static TAILQ_HEAD(, ptbl_buf) ptbl_buf_freelist;
@@ -305,6 +315,7 @@ static vm_offset_t ptbl_buf_pool_vabase;
 
 /* Pointer to ptbl_buf structures. */
 static struct ptbl_buf *ptbl_bufs;
+#endif
 
 #ifdef SMP
 extern tlb_entry_t __boot_tlb1[];
@@ -378,6 +389,12 @@ static vm_offset_t	mmu_booke_quick_enter_page(mmu_t mmu, vm_page_t m);
 static void		mmu_booke_quick_remove_page(mmu_t mmu, vm_offset_t addr);
 static int		mmu_booke_change_attr(mmu_t mmu, vm_offset_t addr,
     vm_size_t sz, vm_memattr_t mode);
+static int		mmu_booke_map_user_ptr(mmu_t mmu, pmap_t pm,
+    volatile const void *uaddr, void **kaddr, size_t ulen, size_t *klen);
+static int		mmu_booke_decode_kernel_ptr(mmu_t mmu, vm_offset_t addr,
+    int *is_user, vm_offset_t *decoded_addr);
+static void		mmu_booke_page_array_startup(mmu_t , long);
+
 
 static mmu_method_t mmu_booke_methods[] = {
 	/* pmap dispatcher interface */
@@ -418,6 +435,7 @@ static mmu_method_t mmu_booke_methods[] = {
 	MMUMETHOD(mmu_deactivate,	mmu_booke_deactivate),
 	MMUMETHOD(mmu_quick_enter_page, mmu_booke_quick_enter_page),
 	MMUMETHOD(mmu_quick_remove_page, mmu_booke_quick_remove_page),
+	MMUMETHOD(mmu_page_array_startup,	mmu_booke_page_array_startup),
 
 	/* Internal interfaces */
 	MMUMETHOD(mmu_bootstrap,	mmu_booke_bootstrap),
@@ -430,6 +448,8 @@ static mmu_method_t mmu_booke_methods[] = {
 	MMUMETHOD(mmu_kremove,		mmu_booke_kremove),
 	MMUMETHOD(mmu_unmapdev,		mmu_booke_unmapdev),
 	MMUMETHOD(mmu_change_attr,	mmu_booke_change_attr),
+	MMUMETHOD(mmu_map_user_ptr,	mmu_booke_map_user_ptr),
+	MMUMETHOD(mmu_decode_kernel_ptr, mmu_booke_decode_kernel_ptr),
 
 	/* dumpsys() support */
 	MMUMETHOD(mmu_dumpsys_map,	mmu_booke_dumpsys_map),
@@ -492,12 +512,12 @@ tlb_miss_lock(void)
 		if (pc != pcpup) {
 
 			CTR3(KTR_PMAP, "%s: tlb miss LOCK of CPU=%d, "
-			    "tlb_lock=%p", __func__, pc->pc_cpuid, pc->pc_booke_tlb_lock);
+			    "tlb_lock=%p", __func__, pc->pc_cpuid, pc->pc_booke.tlb_lock);
 
 			KASSERT((pc->pc_cpuid != PCPU_GET(cpuid)),
 			    ("tlb_miss_lock: tried to lock self"));
 
-			tlb_lock(pc->pc_booke_tlb_lock);
+			tlb_lock(pc->pc_booke.tlb_lock);
 
 			CTR1(KTR_PMAP, "%s: locked", __func__);
 		}
@@ -519,7 +539,7 @@ tlb_miss_unlock(void)
 			CTR2(KTR_PMAP, "%s: tlb miss UNLOCK of CPU=%d",
 			    __func__, pc->pc_cpuid);
 
-			tlb_unlock(pc->pc_booke_tlb_lock);
+			tlb_unlock(pc->pc_booke.tlb_lock);
 
 			CTR1(KTR_PMAP, "%s: unlocked", __func__);
 		}
@@ -558,61 +578,6 @@ tlb1_get_tlbconf(void)
 static void
 ptbl_init(void)
 {
-	int		i;
-
-	mtx_init(&ptbl_buf_freelist_lock, "ptbl bufs lock", NULL, MTX_DEF);
-	TAILQ_INIT(&ptbl_buf_freelist);
-
-	for (i = 0; i < PTBL_BUFS; i++) {
-		ptbl_bufs[i].kva = ptbl_buf_pool_vabase +
-		    i * MAX(PTBL_PAGES,PDIR_PAGES) * PAGE_SIZE;
-		TAILQ_INSERT_TAIL(&ptbl_buf_freelist, &ptbl_bufs[i], link);
-	}
-}
-
-/* Get an sf_buf from the freelist. */
-static struct ptbl_buf *
-ptbl_buf_alloc(void)
-{
-	struct ptbl_buf *buf;
-
-	mtx_lock(&ptbl_buf_freelist_lock);
-	buf = TAILQ_FIRST(&ptbl_buf_freelist);
-	if (buf != NULL)
-		TAILQ_REMOVE(&ptbl_buf_freelist, buf, link);
-	mtx_unlock(&ptbl_buf_freelist_lock);
-
-	return (buf);
-}
-
-/* Return ptbl buff to free pool. */
-static void
-ptbl_buf_free(struct ptbl_buf *buf)
-{
-	mtx_lock(&ptbl_buf_freelist_lock);
-	TAILQ_INSERT_TAIL(&ptbl_buf_freelist, buf, link);
-	mtx_unlock(&ptbl_buf_freelist_lock);
-}
-
-/*
- * Search the list of allocated ptbl bufs and find on list of allocated ptbls
- */
-static void
-ptbl_free_pmap_ptbl(pmap_t pmap, pte_t * ptbl)
-{
-	struct ptbl_buf *pbuf;
-
-	TAILQ_FOREACH(pbuf, &pmap->pm_ptbl_list, link) {
-		if (pbuf->kva == (vm_offset_t) ptbl) {
-			/* Remove from pmap ptbl buf list. */
-			TAILQ_REMOVE(&pmap->pm_ptbl_list, pbuf, link);
-
-			/* Free corresponding ptbl buf. */
-			ptbl_buf_free(pbuf);
-
-			break;
-		}
-	}
 }
 
 /* Get a pointer to a PTE in a page table. */
@@ -632,34 +597,38 @@ pte_find(mmu_t mmu, pmap_t pmap, vm_offset_t va)
 }
 
 /*
- * Search the list of allocated pdir bufs and find on list of allocated pdirs
+ * allocate a page of pointers to page directories, do not preallocate the
+ * page tables
  */
-static void
-ptbl_free_pmap_pdir(mmu_t mmu, pmap_t pmap, pte_t ** pdir)
+static pte_t  **
+pdir_alloc(mmu_t mmu, pmap_t pmap, unsigned int pp2d_idx, bool nosleep)
 {
-	struct ptbl_buf *pbuf;
+	vm_page_t	m;
+	pte_t          **pdir;
+	int		req;
 
-	TAILQ_FOREACH(pbuf, &pmap->pm_pdir_list, link) {
-		if (pbuf->kva == (vm_offset_t) pdir) {
-			/* Remove from pmap ptbl buf list. */
-			TAILQ_REMOVE(&pmap->pm_pdir_list, pbuf, link);
-
-			/* Free corresponding pdir buf. */
-			ptbl_buf_free(pbuf);
-
-			break;
+	req = VM_ALLOC_NOOBJ | VM_ALLOC_WIRED;
+	while ((m = vm_page_alloc(NULL, pp2d_idx, req)) == NULL) {
+		PMAP_UNLOCK(pmap);
+		if (nosleep) {
+			return (NULL);
 		}
+		vm_wait(NULL);
+		PMAP_LOCK(pmap);
 	}
+
+	/* Zero whole ptbl. */
+	pdir = (pte_t **)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
+	mmu_booke_zero_page(mmu, m);
+
+	return (pdir);
 }
+
 /* Free pdir pages and invalidate pdir entry. */
 static void
-pdir_free(mmu_t mmu, pmap_t pmap, unsigned int pp2d_idx)
+pdir_free(mmu_t mmu, pmap_t pmap, unsigned int pp2d_idx, vm_page_t m)
 {
 	pte_t         **pdir;
-	vm_paddr_t	pa;
-	vm_offset_t	va;
-	vm_page_t	m;
-	int		i;
 
 	pdir = pmap->pm_pp2d[pp2d_idx];
 
@@ -667,16 +636,8 @@ pdir_free(mmu_t mmu, pmap_t pmap, unsigned int pp2d_idx)
 
 	pmap->pm_pp2d[pp2d_idx] = NULL;
 
-	for (i = 0; i < PDIR_PAGES; i++) {
-		va = ((vm_offset_t) pdir + (i * PAGE_SIZE));
-		pa = pte_vatopa(mmu, kernel_pmap, va);
-		m = PHYS_TO_VM_PAGE(pa);
-		vm_page_free_zero(m);
-		atomic_subtract_int(&vm_cnt.v_wire_count, 1);
-		pmap_kremove(va);
-	}
-
-	ptbl_free_pmap_pdir(mmu, pmap, pdir);
+	vm_wire_sub(1);
+	vm_page_free_zero(m);
 }
 
 /*
@@ -691,31 +652,22 @@ pdir_unhold(mmu_t mmu, pmap_t pmap, u_int pp2d_idx)
 	pte_t         **pdir;
 	vm_paddr_t	pa;
 	vm_page_t	m;
-	int		i;
 
 	KASSERT((pmap != kernel_pmap),
 		("pdir_unhold: unholding kernel pdir!"));
 
 	pdir = pmap->pm_pp2d[pp2d_idx];
 
-	KASSERT(((vm_offset_t) pdir >= VM_MIN_KERNEL_ADDRESS),
-	    ("pdir_unhold: non kva pdir"));
-
 	/* decrement hold count */
-	for (i = 0; i < PDIR_PAGES; i++) {
-		pa = pte_vatopa(mmu, kernel_pmap,
-		    (vm_offset_t) pdir + (i * PAGE_SIZE));
-		m = PHYS_TO_VM_PAGE(pa);
-		m->wire_count--;
-	}
+	pa = DMAP_TO_PHYS((vm_offset_t) pdir);
+	m = PHYS_TO_VM_PAGE(pa);
 
 	/*
-	 * Free pdir pages if there are no dir entries in this pdir.
-	 * wire_count has the same value for all ptbl pages, so check the
-	 * last page.
+	 * Free pdir page if there are no dir entries in this pdir.
 	 */
-	if (m->wire_count == 0) {
-		pdir_free(mmu, pmap, pp2d_idx);
+	m->ref_count--;
+	if (m->ref_count == 0) {
+		pdir_free(mmu, pmap, pp2d_idx, m);
 		return (1);
 	}
 	return (0);
@@ -728,21 +680,15 @@ pdir_unhold(mmu_t mmu, pmap_t pmap, u_int pp2d_idx)
 static void
 pdir_hold(mmu_t mmu, pmap_t pmap, pte_t ** pdir)
 {
-	vm_paddr_t	pa;
 	vm_page_t	m;
-	int		i;
 
 	KASSERT((pmap != kernel_pmap),
 		("pdir_hold: holding kernel pdir!"));
 
 	KASSERT((pdir != NULL), ("pdir_hold: null pdir"));
 
-	for (i = 0; i < PDIR_PAGES; i++) {
-		pa = pte_vatopa(mmu, kernel_pmap,
-				(vm_offset_t) pdir + (i * PAGE_SIZE));
-		m = PHYS_TO_VM_PAGE(pa);
-		m->wire_count++;
-	}
+	m = PHYS_TO_VM_PAGE(DMAP_TO_PHYS((vm_offset_t)pdir));
+	m->ref_count++;
 }
 
 /* Allocate page table. */
@@ -750,63 +696,37 @@ static pte_t   *
 ptbl_alloc(mmu_t mmu, pmap_t pmap, pte_t ** pdir, unsigned int pdir_idx,
     boolean_t nosleep)
 {
-	vm_page_t	mtbl  [PTBL_PAGES];
 	vm_page_t	m;
-	struct ptbl_buf *pbuf;
-	unsigned int	pidx;
 	pte_t          *ptbl;
-	int		i, j;
 	int		req;
 
 	KASSERT((pdir[pdir_idx] == NULL),
 		("%s: valid ptbl entry exists!", __func__));
 
-	pbuf = ptbl_buf_alloc();
-	if (pbuf == NULL)
-		panic("%s: couldn't alloc kernel virtual memory", __func__);
-
-	ptbl = (pte_t *) pbuf->kva;
-
-	for (i = 0; i < PTBL_PAGES; i++) {
-		pidx = (PTBL_PAGES * pdir_idx) + i;
-		req = VM_ALLOC_NOOBJ | VM_ALLOC_WIRED;
-		while ((m = vm_page_alloc(NULL, pidx, req)) == NULL) {
-			PMAP_UNLOCK(pmap);
-			rw_wunlock(&pvh_global_lock);
-			if (nosleep) {
-				ptbl_free_pmap_ptbl(pmap, ptbl);
-				for (j = 0; j < i; j++)
-					vm_page_free(mtbl[j]);
-				atomic_subtract_int(&vm_cnt.v_wire_count, i);
-				return (NULL);
-			}
-			VM_WAIT;
-			rw_wlock(&pvh_global_lock);
-			PMAP_LOCK(pmap);
+	req = VM_ALLOC_NOOBJ | VM_ALLOC_WIRED;
+	while ((m = vm_page_alloc(NULL, pdir_idx, req)) == NULL) {
+		PMAP_UNLOCK(pmap);
+		rw_wunlock(&pvh_global_lock);
+		if (nosleep) {
+			return (NULL);
 		}
-		mtbl[i] = m;
+		vm_wait(NULL);
+		rw_wlock(&pvh_global_lock);
+		PMAP_LOCK(pmap);
 	}
 
-	/* Mapin allocated pages into kernel_pmap. */
-	mmu_booke_qenter(mmu, (vm_offset_t) ptbl, mtbl, PTBL_PAGES);
 	/* Zero whole ptbl. */
-	bzero((caddr_t) ptbl, PTBL_PAGES * PAGE_SIZE);
-
-	/* Add pbuf to the pmap ptbl bufs list. */
-	TAILQ_INSERT_TAIL(&pmap->pm_ptbl_list, pbuf, link);
+	ptbl = (pte_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
+	mmu_booke_zero_page(mmu, m);
 
 	return (ptbl);
 }
 
 /* Free ptbl pages and invalidate pdir entry. */
 static void
-ptbl_free(mmu_t mmu, pmap_t pmap, pte_t ** pdir, unsigned int pdir_idx)
+ptbl_free(mmu_t mmu, pmap_t pmap, pte_t ** pdir, unsigned int pdir_idx, vm_page_t m)
 {
 	pte_t          *ptbl;
-	vm_paddr_t	pa;
-	vm_offset_t	va;
-	vm_page_t	m;
-	int		i;
 
 	ptbl = pdir[pdir_idx];
 
@@ -814,16 +734,8 @@ ptbl_free(mmu_t mmu, pmap_t pmap, pte_t ** pdir, unsigned int pdir_idx)
 
 	pdir[pdir_idx] = NULL;
 
-	for (i = 0; i < PTBL_PAGES; i++) {
-		va = ((vm_offset_t) ptbl + (i * PAGE_SIZE));
-		pa = pte_vatopa(mmu, kernel_pmap, va);
-		m = PHYS_TO_VM_PAGE(pa);
-		vm_page_free_zero(m);
-		atomic_subtract_int(&vm_cnt.v_wire_count, 1);
-		pmap_kremove(va);
-	}
-
-	ptbl_free_pmap_ptbl(pmap, ptbl);
+	vm_wire_sub(1);
+	vm_page_free_zero(m);
 }
 
 /*
@@ -836,12 +748,10 @@ static int
 ptbl_unhold(mmu_t mmu, pmap_t pmap, vm_offset_t va)
 {
 	pte_t          *ptbl;
-	vm_paddr_t	pa;
 	vm_page_t	m;
 	u_int		pp2d_idx;
 	pte_t         **pdir;
 	u_int		pdir_idx;
-	int		i;
 
 	pp2d_idx = PP2D_IDX(va);
 	pdir_idx = PDIR_IDX(va);
@@ -852,31 +762,17 @@ ptbl_unhold(mmu_t mmu, pmap_t pmap, vm_offset_t va)
 	pdir = pmap->pm_pp2d[pp2d_idx];
 	ptbl = pdir[pdir_idx];
 
-	KASSERT(((vm_offset_t) ptbl >= VM_MIN_KERNEL_ADDRESS),
-	    ("ptbl_unhold: non kva ptbl"));
-
 	/* decrement hold count */
-	for (i = 0; i < PTBL_PAGES; i++) {
-		pa = pte_vatopa(mmu, kernel_pmap,
-		    (vm_offset_t) ptbl + (i * PAGE_SIZE));
-		m = PHYS_TO_VM_PAGE(pa);
-		m->wire_count--;
-	}
+	m = PHYS_TO_VM_PAGE(DMAP_TO_PHYS((vm_offset_t) ptbl));
 
 	/*
 	 * Free ptbl pages if there are no pte entries in this ptbl.
-	 * wire_count has the same value for all ptbl pages, so check the
+	 * ref_count has the same value for all ptbl pages, so check the
 	 * last page.
 	 */
-	if (m->wire_count == 0) {
-		/* A pair of indirect entries might point to this ptbl page */
-#if 0
-		tlb_flush_entry(pmap, va & ~((2UL * PAGE_SIZE_1M) - 1),
-				TLB_SIZE_1M, MAS6_SIND);
-		tlb_flush_entry(pmap, (va & ~((2UL * PAGE_SIZE_1M) - 1)) | PAGE_SIZE_1M,
-				TLB_SIZE_1M, MAS6_SIND);
-#endif
-		ptbl_free(mmu, pmap, pdir, pdir_idx);
+	m->ref_count--;
+	if (m->ref_count == 0) {
+		ptbl_free(mmu, pmap, pdir, pdir_idx, m);
 		pdir_unhold(mmu, pmap, pp2d_idx);
 		return (1);
 	}
@@ -890,10 +786,8 @@ ptbl_unhold(mmu_t mmu, pmap_t pmap, vm_offset_t va)
 static void
 ptbl_hold(mmu_t mmu, pmap_t pmap, pte_t ** pdir, unsigned int pdir_idx)
 {
-	vm_paddr_t	pa;
 	pte_t          *ptbl;
 	vm_page_t	m;
-	int		i;
 
 	KASSERT((pmap != kernel_pmap),
 		("ptbl_hold: holding kernel ptbl!"));
@@ -902,12 +796,8 @@ ptbl_hold(mmu_t mmu, pmap_t pmap, pte_t ** pdir, unsigned int pdir_idx)
 
 	KASSERT((ptbl != NULL), ("ptbl_hold: null ptbl"));
 
-	for (i = 0; i < PTBL_PAGES; i++) {
-		pa = pte_vatopa(mmu, kernel_pmap,
-				(vm_offset_t) ptbl + (i * PAGE_SIZE));
-		m = PHYS_TO_VM_PAGE(pa);
-		m->wire_count++;
-	}
+	m = PHYS_TO_VM_PAGE(DMAP_TO_PHYS((vm_offset_t) ptbl));
+	m->ref_count++;
 }
 #else
 
@@ -1021,10 +911,10 @@ ptbl_alloc(mmu_t mmu, pmap_t pmap, unsigned int pdir_idx, boolean_t nosleep)
 				ptbl_free_pmap_ptbl(pmap, ptbl);
 				for (j = 0; j < i; j++)
 					vm_page_free(mtbl[j]);
-				atomic_subtract_int(&vm_cnt.v_wire_count, i);
+				vm_wire_sub(i);
 				return (NULL);
 			}
-			VM_WAIT;
+			vm_wait(NULL);
 			rw_wlock(&pvh_global_lock);
 			PMAP_LOCK(pmap);
 		}
@@ -1082,7 +972,7 @@ ptbl_free(mmu_t mmu, pmap_t pmap, unsigned int pdir_idx)
 		pa = pte_vatopa(mmu, kernel_pmap, va);
 		m = PHYS_TO_VM_PAGE(pa);
 		vm_page_free_zero(m);
-		atomic_subtract_int(&vm_cnt.v_wire_count, 1);
+		vm_wire_sub(1);
 		mmu_booke_kremove(mmu, va);
 	}
 
@@ -1122,15 +1012,15 @@ ptbl_unhold(mmu_t mmu, pmap_t pmap, unsigned int pdir_idx)
 		pa = pte_vatopa(mmu, kernel_pmap,
 		    (vm_offset_t)ptbl + (i * PAGE_SIZE));
 		m = PHYS_TO_VM_PAGE(pa);
-		m->wire_count--;
+		m->ref_count--;
 	}
 
 	/*
 	 * Free ptbl pages if there are no pte etries in this ptbl.
-	 * wire_count has the same value for all ptbl pages, so check the last
+	 * ref_count has the same value for all ptbl pages, so check the last
 	 * page.
 	 */
-	if (m->wire_count == 0) {
+	if (m->ref_count == 0) {
 		ptbl_free(mmu, pmap, pdir_idx);
 
 		//debugf("ptbl_unhold: e (freed ptbl)\n");
@@ -1168,7 +1058,7 @@ ptbl_hold(mmu_t mmu, pmap_t pmap, unsigned int pdir_idx)
 		pa = pte_vatopa(mmu, kernel_pmap,
 		    (vm_offset_t)ptbl + (i * PAGE_SIZE));
 		m = PHYS_TO_VM_PAGE(pa);
-		m->wire_count++;
+		m->ref_count++;
 	}
 }
 #endif
@@ -1181,7 +1071,7 @@ pv_alloc(void)
 
 	pv_entry_count++;
 	if (pv_entry_count > pv_entry_high_water)
-		pagedaemon_wakeup();
+		pagedaemon_wakeup(0); /* XXX powerpc NUMA */
 	pv = uma_zalloc(pvzone, M_NOWAIT);
 
 	return (pv);
@@ -1289,6 +1179,10 @@ pte_remove(mmu_t mmu, pmap_t pmap, vm_offset_t va, u_int8_t flags)
 
 		/* Remove pv_entry from pv_list. */
 		pv_remove(pmap, va, m);
+	} else if (pmap == kernel_pmap && m && m->md.pv_tracked) {
+		pv_remove(pmap, va, m);
+		if (TAILQ_EMPTY(&m->md.pv_list))
+			m->md.pv_tracked = false;
 	}
 	mtx_lock_spin(&tlbivax_mutex);
 	tlb_miss_lock();
@@ -1308,51 +1202,6 @@ pte_remove(mmu_t mmu, pmap_t pmap, vm_offset_t va, u_int8_t flags)
 }
 
 /*
- * allocate a page of pointers to page directories, do not preallocate the
- * page tables
- */
-static pte_t  **
-pdir_alloc(mmu_t mmu, pmap_t pmap, unsigned int pp2d_idx, bool nosleep)
-{
-	vm_page_t	mtbl  [PDIR_PAGES];
-	vm_page_t	m;
-	struct ptbl_buf *pbuf;
-	pte_t         **pdir;
-	unsigned int	pidx;
-	int		i;
-	int		req;
-
-	pbuf = ptbl_buf_alloc();
-
-	if (pbuf == NULL)
-		panic("%s: couldn't alloc kernel virtual memory", __func__);
-
-	/* Allocate pdir pages, this will sleep! */
-	for (i = 0; i < PDIR_PAGES; i++) {
-		pidx = (PDIR_PAGES * pp2d_idx) + i;
-		req = VM_ALLOC_NOOBJ | VM_ALLOC_WIRED;
-		while ((m = vm_page_alloc(NULL, pidx, req)) == NULL) {
-			PMAP_UNLOCK(pmap);
-			VM_WAIT;
-			PMAP_LOCK(pmap);
-		}
-		mtbl[i] = m;
-	}
-
-	/* Mapin allocated pages into kernel_pmap. */
-	pdir = (pte_t **) pbuf->kva;
-	pmap_qenter((vm_offset_t) pdir, mtbl, PDIR_PAGES);
-
-	/* Zero whole pdir. */
-	bzero((caddr_t) pdir, PDIR_PAGES * PAGE_SIZE);
-
-	/* Add pdir to the pmap pdir bufs list. */
-	TAILQ_INSERT_TAIL(&pmap->pm_pdir_list, pbuf, link);
-
-	return pdir;
-}
-
-/*
  * Insert PTE for a given page and virtual address.
  */
 static int
@@ -1362,7 +1211,7 @@ pte_enter(mmu_t mmu, pmap_t pmap, vm_page_t m, vm_offset_t va, uint32_t flags,
 	unsigned int	pp2d_idx = PP2D_IDX(va);
 	unsigned int	pdir_idx = PDIR_IDX(va);
 	unsigned int	ptbl_idx = PTBL_IDX(va);
-	pte_t          *ptbl, *pte;
+	pte_t          *ptbl, *pte, pte_tmp;
 	pte_t         **pdir;
 
 	/* Get the page directory pointer. */
@@ -1380,12 +1229,13 @@ pte_enter(mmu_t mmu, pmap_t pmap, vm_page_t m, vm_offset_t va, uint32_t flags,
 			KASSERT(nosleep, ("nosleep and NULL ptbl"));
 			return (ENOMEM);
 		}
+		pte = &ptbl[ptbl_idx];
 	} else {
 		/*
 		 * Check if there is valid mapping for requested va, if there
 		 * is, remove it.
 		 */
-		pte = &pdir[pdir_idx][ptbl_idx];
+		pte = &ptbl[ptbl_idx];
 		if (PTE_ISVALID(pte)) {
 			pte_remove(mmu, pmap, va, PTBL_HOLD);
 		} else {
@@ -1417,14 +1267,16 @@ pte_enter(mmu_t mmu, pmap_t pmap, vm_page_t m, vm_offset_t va, uint32_t flags,
 		pv_insert(pmap, va, m);
 	}
 
+	pmap->pm_stats.resident_count++;
+
+	pte_tmp = PTE_RPN_FROM_PA(VM_PAGE_TO_PHYS(m));
+	pte_tmp |= (PTE_VALID | flags);
+
 	mtx_lock_spin(&tlbivax_mutex);
 	tlb_miss_lock();
 
 	tlb0_flush_entry(va);
-	pmap->pm_stats.resident_count++;
-	pte = &pdir[pdir_idx][ptbl_idx];
-	*pte = PTE_RPN_FROM_PA(VM_PAGE_TO_PHYS(m));
-	*pte |= (PTE_VALID | flags);
+	*pte = pte_tmp;
 
 	tlb_miss_unlock();
 	mtx_unlock_spin(&tlbivax_mutex);
@@ -1462,8 +1314,8 @@ kernel_pte_alloc(vm_offset_t data_end, vm_offset_t addr, vm_offset_t pdir)
 		for (j = PDIR_IDX(va + (i * PAGE_SIZE * PDIR_NENTRIES * PTBL_NENTRIES));
 		    j < PDIR_NENTRIES; j++) {
 			kernel_pmap->pm_pp2d[i + PP2D_IDX(va)][j] =
-			    (pte_t *)(pdir + (kernel_pdirs * PAGE_SIZE * PDIR_PAGES) +
-			     (((i * PDIR_NENTRIES) + j) * PAGE_SIZE * PTBL_PAGES));
+			    (pte_t *)(pdir + (kernel_pdirs * PAGE_SIZE) +
+			     (((i * PDIR_NENTRIES) + j) * PAGE_SIZE));
 		}
 	}
 
@@ -1523,7 +1375,7 @@ pte_remove(mmu_t mmu, pmap_t pmap, vm_offset_t va, uint8_t flags)
 			vm_page_aflag_set(m, PGA_REFERENCED);
 
 		pv_remove(pmap, va, m);
-	} else if (m->md.pv_tracked) {
+	} else if (pmap == kernel_pmap && m && m->md.pv_tracked) {
 		/*
 		 * Always pv_insert()/pv_remove() on MPC85XX, in case DPAA is
 		 * used.  This is needed by the NCSW support code for fast
@@ -1563,7 +1415,7 @@ pte_enter(mmu_t mmu, pmap_t pmap, vm_page_t m, vm_offset_t va, uint32_t flags,
 {
 	unsigned int pdir_idx = PDIR_IDX(va);
 	unsigned int ptbl_idx = PTBL_IDX(va);
-	pte_t *ptbl, *pte;
+	pte_t *ptbl, *pte, pte_tmp;
 
 	CTR4(KTR_PMAP, "%s: su = %d pmap = %p va = %p", __func__,
 	    pmap == kernel_pmap, pmap, va);
@@ -1578,6 +1430,8 @@ pte_enter(mmu_t mmu, pmap_t pmap, vm_page_t m, vm_offset_t va, uint32_t flags,
 			KASSERT(nosleep, ("nosleep and NULL ptbl"));
 			return (ENOMEM);
 		}
+		pmap->pm_pdir[pdir_idx] = ptbl;
+		pte = &ptbl[ptbl_idx];
 	} else {
 		/*
 		 * Check if there is valid mapping for requested
@@ -1609,20 +1463,14 @@ pte_enter(mmu_t mmu, pmap_t pmap, vm_page_t m, vm_offset_t va, uint32_t flags,
 
 	pmap->pm_stats.resident_count++;
 	
+	pte_tmp = PTE_RPN_FROM_PA(VM_PAGE_TO_PHYS(m));
+	pte_tmp |= (PTE_VALID | flags | PTE_PS_4KB); /* 4KB pages only */
+
 	mtx_lock_spin(&tlbivax_mutex);
 	tlb_miss_lock();
 
 	tlb0_flush_entry(va);
-	if (pmap->pm_pdir[pdir_idx] == NULL) {
-		/*
-		 * If we just allocated a new page table, hook it in
-		 * the pdir.
-		 */
-		pmap->pm_pdir[pdir_idx] = ptbl;
-	}
-	pte = &(pmap->pm_pdir[pdir_idx][ptbl_idx]);
-	*pte = PTE_RPN_FROM_PA(VM_PAGE_TO_PHYS(m));
-	*pte |= (PTE_VALID | flags | PTE_PS_4KB); /* 4KB pages only */
+	*pte = pte_tmp;
 
 	tlb_miss_unlock();
 	mtx_unlock_spin(&tlbivax_mutex);
@@ -1705,11 +1553,16 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	vm_offset_t kernel_pdir, kstack0;
 	vm_paddr_t kstack0_phys;
 	void *dpcpu;
+	vm_offset_t kernel_ptbl_root;
 
 	debugf("mmu_booke_bootstrap: entered\n");
 
 	/* Set interesting system properties */
+#ifdef __powerpc64__
+	hw_direct_map = 1;
+#else
 	hw_direct_map = 0;
+#endif
 #if defined(COMPAT_FREEBSD32) || !defined(__powerpc64__)
 	elf32_nxstack = 1;
 #endif
@@ -1725,16 +1578,8 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	 * Note that kernel end does not necessarily relate to kernsize.
 	 * kernsize is the size of the kernel that is actually mapped.
 	 */
-	kernstart = trunc_page(start);
 	data_start = round_page(kernelend);
 	data_end = data_start;
-
-	/*
-	 * Addresses of preloaded modules (like file systems) use
-	 * physical addresses. Make sure we relocate those into
-	 * virtual addresses.
-	 */
-	preload_addr_relocate = kernstart - kernload;
 
 	/* Allocate the dynamic per-cpu area. */
 	dpcpu = (void *)data_end;
@@ -1748,6 +1593,10 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 
 	data_end = round_page(data_end);
 
+#ifdef __powerpc64__
+	kernel_ptbl_root = data_end;
+	data_end += PP2D_NENTRIES * sizeof(pte_t**);
+#else
 	/* Allocate space for ptbl_bufs. */
 	ptbl_bufs = (struct ptbl_buf *)data_end;
 	data_end += sizeof(struct ptbl_buf) * PTBL_BUFS;
@@ -1755,6 +1604,9 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	    (uintptr_t)ptbl_bufs, data_end);
 
 	data_end = round_page(data_end);
+	kernel_ptbl_root = data_end;
+	data_end += PDIR_NENTRIES * sizeof(pte_t*);
+#endif
 
 	/* Allocate PTE tables for kernel KVA. */
 	kernel_pdir = data_end;
@@ -1769,10 +1621,38 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	debugf(" kernel pdir at 0x%"PRI0ptrX" end = 0x%"PRI0ptrX"\n",
 	    kernel_pdir, data_end);
 
+	/* Retrieve phys/avail mem regions */
+	mem_regions(&physmem_regions, &physmem_regions_sz,
+	    &availmem_regions, &availmem_regions_sz);
+
+	if (PHYS_AVAIL_ENTRIES < availmem_regions_sz)
+		panic("mmu_booke_bootstrap: phys_avail too small");
+
+	data_end = round_page(data_end);
+	vm_page_array = (vm_page_t)data_end;
+	/*
+	 * Get a rough idea (upper bound) on the size of the page array.  The
+	 * vm_page_array will not handle any more pages than we have in the
+	 * avail_regions array, and most likely much less.
+	 */
+	sz = 0;
+	for (mp = availmem_regions; mp->mr_size; mp++) {
+		sz += mp->mr_size;
+	}
+	sz = (round_page(sz) / (PAGE_SIZE + sizeof(struct vm_page)));
+	data_end += round_page(sz * sizeof(struct vm_page));
+
+	/* Pre-round up to 1MB.  This wastes some space, but saves TLB entries */
+	data_end = roundup2(data_end, 1 << 20);
+
 	debugf(" data_end: 0x%"PRI0ptrX"\n", data_end);
+	debugf(" kernstart: %#zx\n", kernstart);
+	debugf(" kernsize: %#zx\n", kernsize);
+
 	if (data_end - kernstart > kernsize) {
 		kernsize += tlb1_mapin_region(kernstart + kernsize,
-		    kernload + kernsize, (data_end - kernstart) - kernsize);
+		    kernload + kernsize, (data_end - kernstart) - kernsize,
+		    _TLB_ENTRY_MEM);
 	}
 	data_end = kernstart + kernsize;
 	debugf(" updated data_end: 0x%"PRI0ptrX"\n", data_end);
@@ -1783,12 +1663,12 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	 * all range up to the currently calculated 'data_end' is covered.
 	 */
 	dpcpu_init(dpcpu, 0);
-	memset((void *)ptbl_bufs, 0, sizeof(struct ptbl_buf) * PTBL_SIZE);
 #ifdef __powerpc64__
 	memset((void *)kernel_pdir, 0,
 	    kernel_pdirs * PDIR_PAGES * PAGE_SIZE +
 	    kernel_ptbls * PTBL_PAGES * PAGE_SIZE);
 #else
+	memset((void *)ptbl_bufs, 0, sizeof(struct ptbl_buf) * PTBL_SIZE);
 	memset((void *)kernel_pdir, 0, kernel_ptbls * PTBL_PAGES * PAGE_SIZE);
 #endif
 
@@ -1798,6 +1678,7 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	virtual_avail = round_page(data_end);
 	virtual_end = VM_MAX_KERNEL_ADDRESS;
 
+#ifndef __powerpc64__
 	/* Allocate KVA space for page zero/copy operations. */
 	zero_page_va = virtual_avail;
 	virtual_avail += PAGE_SIZE;
@@ -1805,9 +1686,9 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	virtual_avail += PAGE_SIZE;
 	copy_page_dst_va = virtual_avail;
 	virtual_avail += PAGE_SIZE;
-	debugf("zero_page_va = 0x%08x\n", zero_page_va);
-	debugf("copy_page_src_va = 0x%08x\n", copy_page_src_va);
-	debugf("copy_page_dst_va = 0x%08x\n", copy_page_dst_va);
+	debugf("zero_page_va = 0x%"PRI0ptrX"\n", zero_page_va);
+	debugf("copy_page_src_va = 0x%"PRI0ptrX"\n", copy_page_src_va);
+	debugf("copy_page_dst_va = 0x%"PRI0ptrX"\n", copy_page_dst_va);
 
 	/* Initialize page zero/copy mutexes. */
 	mtx_init(&zero_page_mutex, "mmu_booke_zero_page", NULL, MTX_DEF);
@@ -1816,18 +1697,16 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	/* Allocate KVA space for ptbl bufs. */
 	ptbl_buf_pool_vabase = virtual_avail;
 	virtual_avail += PTBL_BUFS * PTBL_PAGES * PAGE_SIZE;
-	debugf("ptbl_buf_pool_vabase = 0x%08x end = 0x%08x\n",
+	debugf("ptbl_buf_pool_vabase = 0x%"PRI0ptrX" end = 0x%"PRI0ptrX"\n",
 	    ptbl_buf_pool_vabase, virtual_avail);
+#endif
 
 	/* Calculate corresponding physical addresses for the kernel region. */
 	phys_kernelend = kernload + kernsize;
 	debugf("kernel image and allocated data:\n");
-	debugf(" kernload    = 0x%09llx\n", (uint64_t)kernload);
-	debugf(" kernstart   = 0x%08x\n", kernstart);
-	debugf(" kernsize    = 0x%08x\n", kernsize);
-
-	if (sizeof(phys_avail) / sizeof(phys_avail[0]) < availmem_regions_sz)
-		panic("mmu_booke_bootstrap: phys_avail too small");
+	debugf(" kernload    = 0x%09jx\n", (uintmax_t)kernload);
+	debugf(" kernstart   = 0x%"PRI0ptrX"\n", kernstart);
+	debugf(" kernsize    = 0x%"PRI0ptrX"\n", kernsize);
 
 	/*
 	 * Remove kernel physical address range from avail regions list. Page
@@ -1835,9 +1714,6 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	 * to us.  Also, sort the entries for ascending addresses.
 	 */
 
-	/* Retrieve phys/avail mem regions */
-	mem_regions(&physmem_regions, &physmem_regions_sz,
-	    &availmem_regions, &availmem_regions_sz);
 	sz = 0;
 	cnt = availmem_regions_sz;
 	debugf("processing avail regions:\n");
@@ -1934,6 +1810,8 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 				    hwphyssz - physsz;
 				physsz = hwphyssz;
 				phys_avail_count++;
+				dump_avail[j] = phys_avail[j];
+				dump_avail[j + 1] = phys_avail[j + 1];
 			}
 			break;
 		}
@@ -1943,6 +1821,8 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 		    availmem_regions[i].mr_size;
 		phys_avail_count++;
 		physsz += availmem_regions[i].mr_size;
+		dump_avail[j] = phys_avail[j];
+		dump_avail[j + 1] = phys_avail[j + 1];
 	}
 	physmem = btoc(physsz);
 
@@ -1956,12 +1836,24 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	debugf("physsz = 0x%09jx physmem = %jd (0x%09jx)\n",
 	    (uintmax_t)physsz, (uintmax_t)physmem, (uintmax_t)physmem);
 
+#ifdef __powerpc64__
+	/*
+	 * Map the physical memory contiguously in TLB1.
+	 * Round so it fits into a single mapping.
+	 */
+	tlb1_mapin_region(DMAP_BASE_ADDRESS, 0,
+	    phys_avail[i + 1], _TLB_ENTRY_MEM);
+#endif
+
 	/*******************************************************/
 	/* Initialize (statically allocated) kernel pmap. */
 	/*******************************************************/
 	PMAP_LOCK_INIT(kernel_pmap);
-#ifndef __powerpc64__
+#ifdef __powerpc64__
+	kernel_pmap->pm_pp2d = (pte_t ***)kernel_ptbl_root;
+#else
 	kptbl_min = VM_MIN_KERNEL_ADDRESS / PDIR_SIZE;
+	kernel_pmap->pm_pdir = (pte_t **)kernel_ptbl_root;
 #endif
 
 	debugf("kernel_pmap = 0x%"PRI0ptrX"\n", (uintptr_t)kernel_pmap);
@@ -1990,9 +1882,9 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 	thread0.td_kstack = kstack0;
 	thread0.td_kstack_pages = kstack_pages;
 
-	debugf("kstack_sz = 0x%08x\n", kstack0_sz);
-	debugf("kstack0_phys at 0x%09llx - 0x%09llx\n",
-	    kstack0_phys, kstack0_phys + kstack0_sz);
+	debugf("kstack_sz = 0x%08jx\n", (uintmax_t)kstack0_sz);
+	debugf("kstack0_phys at 0x%09jx - 0x%09jx\n",
+	    (uintmax_t)kstack0_phys, (uintmax_t)kstack0_phys + kstack0_sz);
 	debugf("kstack0 at 0x%"PRI0ptrX" - 0x%"PRI0ptrX"\n",
 	    kstack0, kstack0 + kstack0_sz);
 	
@@ -2012,7 +1904,7 @@ mmu_booke_bootstrap(mmu_t mmu, vm_offset_t start, vm_offset_t kernelend)
 }
 
 #ifdef SMP
- void
+void
 tlb1_ap_prep(void)
 {
 	tlb_entry_t *e, tmp;
@@ -2089,18 +1981,29 @@ static vm_paddr_t
 mmu_booke_kextract(mmu_t mmu, vm_offset_t va)
 {
 	tlb_entry_t e;
+	vm_paddr_t p = 0;
 	int i;
 
-	/* Check TLB1 mappings */
-	for (i = 0; i < TLB1_ENTRIES; i++) {
-		tlb1_read_entry(&e, i);
-		if (!(e.mas1 & MAS1_VALID))
-			continue;
-		if (va >= e.virt && va < e.virt + e.size)
-			return (e.phys + (va - e.virt));
+#ifdef __powerpc64__
+	if (va >= DMAP_BASE_ADDRESS && va <= DMAP_MAX_ADDRESS)
+		return (DMAP_TO_PHYS(va));
+#endif
+
+	if (va >= VM_MIN_KERNEL_ADDRESS && va <= VM_MAX_KERNEL_ADDRESS)
+		p = pte_vatopa(mmu, kernel_pmap, va);
+	
+	if (p == 0) {
+		/* Check TLB1 mappings */
+		for (i = 0; i < TLB1_ENTRIES; i++) {
+			tlb1_read_entry(&e, i);
+			if (!(e.mas1 & MAS1_VALID))
+				continue;
+			if (va >= e.virt && va < e.virt + e.size)
+				return (e.phys + (va - e.virt));
+		}
 	}
 
-	return (pte_vatopa(mmu, kernel_pmap, va));
+	return (p);
 }
 
 /*
@@ -2131,6 +2034,10 @@ mmu_booke_init(mmu_t mmu)
 
 	/* Pre-fill pvzone with initial number of pv entries. */
 	uma_prealloc(pvzone, PV_ENTRY_ZONE_MIN);
+
+	/* Create a UMA zone for page table roots. */
+	ptbl_root_zone = uma_zcreate("pmap root", PMAP_ROOT_SIZE,
+	    NULL, NULL, NULL, NULL, UMA_ALIGN_CACHE, UMA_ZONE_VM);
 
 	/* Initialize ptbl allocation. */
 	ptbl_init();
@@ -2229,7 +2136,7 @@ mmu_booke_kremove(mmu_t mmu, vm_offset_t va)
 {
 	pte_t *pte;
 
-	CTR2(KTR_PMAP,"%s: s (va = 0x%08x)\n", __func__, va);
+	CTR2(KTR_PMAP,"%s: s (va = 0x%"PRI0ptrX")\n", __func__, va);
 
 	KASSERT(((va >= VM_MIN_KERNEL_ADDRESS) &&
 	    (va <= VM_MAX_KERNEL_ADDRESS)),
@@ -2253,6 +2160,45 @@ mmu_booke_kremove(mmu_t mmu, vm_offset_t va)
 
 	tlb_miss_unlock();
 	mtx_unlock_spin(&tlbivax_mutex);
+}
+
+/*
+ * Provide a kernel pointer corresponding to a given userland pointer.
+ * The returned pointer is valid until the next time this function is
+ * called in this thread. This is used internally in copyin/copyout.
+ */
+int
+mmu_booke_map_user_ptr(mmu_t mmu, pmap_t pm, volatile const void *uaddr,
+    void **kaddr, size_t ulen, size_t *klen)
+{
+
+	if (trunc_page((uintptr_t)uaddr + ulen) > VM_MAXUSER_ADDRESS)
+		return (EFAULT);
+
+	*kaddr = (void *)(uintptr_t)uaddr;
+	if (klen)
+		*klen = ulen;
+
+	return (0);
+}
+
+/*
+ * Figure out where a given kernel pointer (usually in a fault) points
+ * to from the VM's perspective, potentially remapping into userland's
+ * address space.
+ */
+static int
+mmu_booke_decode_kernel_ptr(mmu_t mmu, vm_offset_t addr, int *is_user,
+    vm_offset_t *decoded_addr)
+{
+
+	if (trunc_page(addr) <= VM_MAXUSER_ADDRESS)
+		*is_user = 1;
+	else
+		*is_user = 0;
+
+	*decoded_addr = addr;
+	return (0);
 }
 
 /*
@@ -2286,12 +2232,13 @@ mmu_booke_pinit(mmu_t mmu, pmap_t pmap)
 	CPU_ZERO(&kernel_pmap->pm_active);
 	bzero(&pmap->pm_stats, sizeof(pmap->pm_stats));
 #ifdef __powerpc64__
-	bzero(&pmap->pm_pp2d, sizeof(pte_t **) * PP2D_NENTRIES);
-	TAILQ_INIT(&pmap->pm_pdir_list);
+	pmap->pm_pp2d = uma_zalloc(ptbl_root_zone, M_WAITOK);
+	bzero(pmap->pm_pp2d, sizeof(pte_t **) * PP2D_NENTRIES);
 #else
-	bzero(&pmap->pm_pdir, sizeof(pte_t *) * PDIR_NENTRIES);
-#endif
+	pmap->pm_pdir = uma_zalloc(ptbl_root_zone, M_WAITOK);
+	bzero(pmap->pm_pdir, sizeof(pte_t *) * PDIR_NENTRIES);
 	TAILQ_INIT(&pmap->pm_ptbl_list);
+#endif
 }
 
 /*
@@ -2306,6 +2253,11 @@ mmu_booke_release(mmu_t mmu, pmap_t pmap)
 	KASSERT(pmap->pm_stats.resident_count == 0,
 	    ("pmap_release: pmap resident count %ld != 0",
 	    pmap->pm_stats.resident_count));
+#ifdef __powerpc64__
+	uma_zfree(ptbl_root_zone, pmap->pm_pp2d);
+#else
+	uma_zfree(ptbl_root_zone, pmap->pm_pdir);
+#endif
 }
 
 /*
@@ -2353,8 +2305,12 @@ mmu_booke_enter_locked(mmu_t mmu, pmap_t pmap, vm_offset_t va, vm_page_t m,
 		KASSERT((va <= VM_MAXUSER_ADDRESS),
 		    ("mmu_booke_enter_locked: user pmap, non user va"));
 	}
-	if ((m->oflags & VPO_UNMANAGED) == 0 && !vm_page_xbusied(m))
-		VM_OBJECT_ASSERT_LOCKED(m->object);
+	if ((m->oflags & VPO_UNMANAGED) == 0) {
+		if ((pmap_flags & PMAP_ENTER_QUICK_LOCKED) == 0)
+			VM_PAGE_OBJECT_BUSY_ASSERT(m);
+		else
+			VM_OBJECT_ASSERT_LOCKED(m->object);
+	}
 
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
 
@@ -2522,7 +2478,7 @@ mmu_booke_enter_object(mmu_t mmu, pmap_t pmap, vm_offset_t start,
 	while (m != NULL && (diff = m->pindex - m_start->pindex) < psize) {
 		mmu_booke_enter_locked(mmu, pmap, start + ptoa(diff), m,
 		    prot & (VM_PROT_READ | VM_PROT_EXECUTE),
-		    PMAP_ENTER_NOSLEEP, 0);
+		    PMAP_ENTER_NOSLEEP | PMAP_ENTER_QUICK_LOCKED, 0);
 		m = TAILQ_NEXT(m, listq);
 	}
 	rw_wunlock(&pvh_global_lock);
@@ -2537,8 +2493,8 @@ mmu_booke_enter_quick(mmu_t mmu, pmap_t pmap, vm_offset_t va, vm_page_t m,
 	rw_wlock(&pvh_global_lock);
 	PMAP_LOCK(pmap);
 	mmu_booke_enter_locked(mmu, pmap, va, m,
-	    prot & (VM_PROT_READ | VM_PROT_EXECUTE), PMAP_ENTER_NOSLEEP,
-	    0);
+	    prot & (VM_PROT_READ | VM_PROT_EXECUTE), PMAP_ENTER_NOSLEEP |
+	    PMAP_ENTER_QUICK_LOCKED, 0);
 	rw_wunlock(&pvh_global_lock);
 	PMAP_UNLOCK(pmap);
 }
@@ -2621,8 +2577,11 @@ mmu_booke_map(mmu_t mmu, vm_offset_t *virt, vm_paddr_t pa_start,
 	vm_offset_t sva = *virt;
 	vm_offset_t va = sva;
 
-	//debugf("mmu_booke_map: s (sva = 0x%08x pa_start = 0x%08x pa_end = 0x%08x)\n",
-	//		sva, pa_start, pa_end);
+#ifdef __powerpc64__
+	/* XXX: Handle memory not starting at 0x0. */
+	if (pa_end < ctob(Maxmem))
+		return (PHYS_TO_DMAP(pa_start));
+#endif
 
 	while (pa_start < pa_end) {
 		mmu_booke_kenter(mmu, va, pa_start);
@@ -2631,7 +2590,6 @@ mmu_booke_map(mmu_t mmu, vm_offset_t *virt, vm_paddr_t pa_start,
 	}
 	*virt = va;
 
-	//debugf("mmu_booke_map: e (va = 0x%08x)\n", va);
 	return (sva);
 }
 
@@ -2647,7 +2605,7 @@ mmu_booke_activate(mmu_t mmu, struct thread *td)
 
 	pmap = &td->td_proc->p_vmspace->vm_pmap;
 
-	CTR5(KTR_PMAP, "%s: s (td = %p, proc = '%s', id = %d, pmap = 0x%08x)",
+	CTR5(KTR_PMAP, "%s: s (td = %p, proc = '%s', id = %d, pmap = 0x%"PRI0ptrX")",
 	    __func__, td, td->td_proc->p_comm, td->td_proc->p_pid, pmap);
 
 	KASSERT((pmap != kernel_pmap), ("mmu_booke_activate: kernel_pmap!"));
@@ -2683,7 +2641,7 @@ mmu_booke_deactivate(mmu_t mmu, struct thread *td)
 
 	pmap = &td->td_proc->p_vmspace->vm_pmap;
 	
-	CTR5(KTR_PMAP, "%s: td=%p, proc = '%s', id = %d, pmap = 0x%08x",
+	CTR5(KTR_PMAP, "%s: td=%p, proc = '%s', id = %d, pmap = 0x%"PRI0ptrX,
 	    __func__, td, td->td_proc->p_comm, td->td_proc->p_pid, pmap);
 
 	td->td_pcb->pcb_cpu.booke.dbcr0 = mfspr(SPR_DBCR0);
@@ -2760,15 +2718,10 @@ mmu_booke_remove_write(mmu_t mmu, vm_page_t m)
 
 	KASSERT((m->oflags & VPO_UNMANAGED) == 0,
 	    ("mmu_booke_remove_write: page %p is not managed", m));
+	vm_page_assert_busied(m);
 
-	/*
-	 * If the page is not exclusive busied, then PGA_WRITEABLE cannot be
-	 * set by another thread while the object is locked.  Thus,
-	 * if PGA_WRITEABLE is clear, no page table entries need updating.
-	 */
-	VM_OBJECT_ASSERT_WLOCKED(m->object);
-	if (!vm_page_xbusied(m) && (m->aflags & PGA_WRITEABLE) == 0)
-		return;
+	if (!pmap_page_is_write_mapped(m))
+	        return;
 	rw_wlock(&pvh_global_lock);
 	TAILQ_FOREACH(pv, &m->md.pv_list, pv_link) {
 		PMAP_LOCK(pv->pv_pmap);
@@ -2800,18 +2753,20 @@ static void
 mmu_booke_sync_icache(mmu_t mmu, pmap_t pm, vm_offset_t va, vm_size_t sz)
 {
 	pte_t *pte;
+	vm_paddr_t pa = 0;
+	int sync_sz, valid;
+#ifndef __powerpc64__
 	pmap_t pmap;
 	vm_page_t m;
 	vm_offset_t addr;
-	vm_paddr_t pa = 0;
-	int active, valid;
+	int active;
+#endif
  
-	va = trunc_page(va);
-	sz = round_page(sz);
-
+#ifndef __powerpc64__
 	rw_wlock(&pvh_global_lock);
 	pmap = PCPU_GET(curpmap);
 	active = (pm == kernel_pmap || pm == pmap) ? 1 : 0;
+#endif
 	while (sz > 0) {
 		PMAP_LOCK(pm);
 		pte = pte_find(mmu, pm, va);
@@ -2819,24 +2774,34 @@ mmu_booke_sync_icache(mmu_t mmu, pmap_t pm, vm_offset_t va, vm_size_t sz)
 		if (valid)
 			pa = PTE_PA(pte);
 		PMAP_UNLOCK(pm);
+		sync_sz = PAGE_SIZE - (va & PAGE_MASK);
+		sync_sz = min(sync_sz, sz);
 		if (valid) {
+#ifdef __powerpc64__
+			pa += (va & PAGE_MASK);
+			__syncicache((void *)PHYS_TO_DMAP(pa), sync_sz);
+#else
 			if (!active) {
 				/* Create a mapping in the active pmap. */
 				addr = 0;
 				m = PHYS_TO_VM_PAGE(pa);
 				PMAP_LOCK(pmap);
 				pte_enter(mmu, pmap, m, addr,
-				    PTE_SR | PTE_VALID | PTE_UR, FALSE);
-				__syncicache((void *)addr, PAGE_SIZE);
+				    PTE_SR | PTE_VALID, FALSE);
+				addr += (va & PAGE_MASK);
+				__syncicache((void *)addr, sync_sz);
 				pte_remove(mmu, pmap, addr, PTBL_UNHOLD);
 				PMAP_UNLOCK(pmap);
 			} else
-				__syncicache((void *)va, PAGE_SIZE);
+				__syncicache((void *)va, sync_sz);
+#endif
 		}
-		va += PAGE_SIZE;
-		sz -= PAGE_SIZE;
+		va += sync_sz;
+		sz -= sync_sz;
 	}
+#ifndef __powerpc64__
 	rw_wunlock(&pvh_global_lock);
+#endif
 }
 
 /*
@@ -2851,12 +2816,9 @@ mmu_booke_extract_and_hold(mmu_t mmu, pmap_t pmap, vm_offset_t va,
 	pte_t *pte;
 	vm_page_t m;
 	uint32_t pte_wbit;
-	vm_paddr_t pa;
-	
+
 	m = NULL;
-	pa = 0;	
 	PMAP_LOCK(pmap);
-retry:
 	pte = pte_find(mmu, pmap, va);
 	if ((pte != NULL) && PTE_ISVALID(pte)) {
 		if (pmap == kernel_pmap)
@@ -2864,15 +2826,12 @@ retry:
 		else
 			pte_wbit = PTE_UW;
 
-		if ((*pte & pte_wbit) || ((prot & VM_PROT_WRITE) == 0)) {
-			if (vm_page_pa_tryrelock(pmap, PTE_PA(pte), &pa))
-				goto retry;
+		if ((*pte & pte_wbit) != 0 || (prot & VM_PROT_WRITE) == 0) {
 			m = PHYS_TO_VM_PAGE(PTE_PA(pte));
-			vm_page_hold(m);
+			if (!vm_page_wire_mapped(m))
+				m = NULL;
 		}
 	}
-
-	PA_UNLOCK_COND(pa);
 	PMAP_UNLOCK(pmap);
 	return (m);
 }
@@ -2884,6 +2843,7 @@ static void
 mmu_booke_page_init(mmu_t mmu, vm_page_t m)
 {
 
+	m->md.pv_tracked = 0;
 	TAILQ_INIT(&m->md.pv_list);
 }
 
@@ -2901,6 +2861,10 @@ mmu_booke_zero_page_area(mmu_t mmu, vm_page_t m, int off, int size)
 
 	/* XXX KASSERT off and size are within a single page? */
 
+#ifdef __powerpc64__
+	va = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
+	bzero((caddr_t)va + off, size);
+#else
 	mtx_lock(&zero_page_mutex);
 	va = zero_page_va;
 
@@ -2909,6 +2873,7 @@ mmu_booke_zero_page_area(mmu_t mmu, vm_page_t m, int off, int size)
 	mmu_booke_kremove(mmu, va);
 
 	mtx_unlock(&zero_page_mutex);
+#endif
 }
 
 /*
@@ -2919,15 +2884,24 @@ mmu_booke_zero_page(mmu_t mmu, vm_page_t m)
 {
 	vm_offset_t off, va;
 
-	mtx_lock(&zero_page_mutex);
-	va = zero_page_va;
+#ifdef __powerpc64__
+	va = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
 
-	mmu_booke_kenter(mmu, va, VM_PAGE_TO_PHYS(m));
 	for (off = 0; off < PAGE_SIZE; off += cacheline_size)
 		__asm __volatile("dcbz 0,%0" :: "r"(va + off));
+#else
+	va = zero_page_va;
+	mtx_lock(&zero_page_mutex);
+
+	mmu_booke_kenter(mmu, va, VM_PAGE_TO_PHYS(m));
+
+	for (off = 0; off < PAGE_SIZE; off += cacheline_size)
+		__asm __volatile("dcbz 0,%0" :: "r"(va + off));
+
 	mmu_booke_kremove(mmu, va);
 
 	mtx_unlock(&zero_page_mutex);
+#endif
 }
 
 /*
@@ -2940,16 +2914,24 @@ mmu_booke_copy_page(mmu_t mmu, vm_page_t sm, vm_page_t dm)
 {
 	vm_offset_t sva, dva;
 
+#ifdef __powerpc64__
+	sva = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(sm));
+	dva = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(dm));
+	memcpy((caddr_t)dva, (caddr_t)sva, PAGE_SIZE);
+#else
 	sva = copy_page_src_va;
 	dva = copy_page_dst_va;
 
 	mtx_lock(&copy_page_mutex);
 	mmu_booke_kenter(mmu, sva, VM_PAGE_TO_PHYS(sm));
 	mmu_booke_kenter(mmu, dva, VM_PAGE_TO_PHYS(dm));
+
 	memcpy((caddr_t)dva, (caddr_t)sva, PAGE_SIZE);
+
 	mmu_booke_kremove(mmu, dva);
 	mmu_booke_kremove(mmu, sva);
 	mtx_unlock(&copy_page_mutex);
+#endif
 }
 
 static inline void
@@ -2960,6 +2942,26 @@ mmu_booke_copy_pages(mmu_t mmu, vm_page_t *ma, vm_offset_t a_offset,
 	vm_offset_t a_pg_offset, b_pg_offset;
 	int cnt;
 
+#ifdef __powerpc64__
+	vm_page_t pa, pb;
+
+	while (xfersize > 0) {
+		a_pg_offset = a_offset & PAGE_MASK;
+		pa = ma[a_offset >> PAGE_SHIFT];
+		b_pg_offset = b_offset & PAGE_MASK;
+		pb = mb[b_offset >> PAGE_SHIFT];
+		cnt = min(xfersize, PAGE_SIZE - a_pg_offset);
+		cnt = min(cnt, PAGE_SIZE - b_pg_offset);
+		a_cp = (caddr_t)((uintptr_t)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(pa)) +
+		    a_pg_offset);
+		b_cp = (caddr_t)((uintptr_t)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(pb)) +
+		    b_pg_offset);
+		bcopy(a_cp, b_cp, cnt);
+		a_offset += cnt;
+		b_offset += cnt;
+		xfersize -= cnt;
+	}
+#else
 	mtx_lock(&copy_page_mutex);
 	while (xfersize > 0) {
 		a_pg_offset = a_offset & PAGE_MASK;
@@ -2980,11 +2982,15 @@ mmu_booke_copy_pages(mmu_t mmu, vm_page_t *ma, vm_offset_t a_offset,
 		xfersize -= cnt;
 	}
 	mtx_unlock(&copy_page_mutex);
+#endif
 }
 
 static vm_offset_t
 mmu_booke_quick_enter_page(mmu_t mmu, vm_page_t m)
 {
+#ifdef __powerpc64__
+	return (PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m)));
+#else
 	vm_paddr_t paddr;
 	vm_offset_t qaddr;
 	uint32_t flags;
@@ -3018,11 +3024,13 @@ mmu_booke_quick_enter_page(mmu_t mmu, vm_page_t m)
 		__syncicache((void *)qaddr, PAGE_SIZE);
 
 	return (qaddr);
+#endif
 }
 
 static void
 mmu_booke_quick_remove_page(mmu_t mmu, vm_offset_t addr)
 {
+#ifndef __powerpc64__
 	pte_t *pte;
 
 	pte = pte_find(mmu, kernel_pmap, addr);
@@ -3034,6 +3042,7 @@ mmu_booke_quick_remove_page(mmu_t mmu, vm_offset_t addr)
 
 	*pte = 0;
 	critical_exit();
+#endif
 }
 
 /*
@@ -3052,13 +3061,11 @@ mmu_booke_is_modified(mmu_t mmu, vm_page_t m)
 	rv = FALSE;
 
 	/*
-	 * If the page is not exclusive busied, then PGA_WRITEABLE cannot be
-	 * concurrently set while the object is locked.  Thus, if PGA_WRITEABLE
-	 * is clear, no PTEs can be modified.
+	 * If the page is not busied then this check is racy.
 	 */
-	VM_OBJECT_ASSERT_WLOCKED(m->object);
-	if (!vm_page_xbusied(m) && (m->aflags & PGA_WRITEABLE) == 0)
-		return (rv);
+	if (!pmap_page_is_write_mapped(m))
+		return (FALSE);
+
 	rw_wlock(&pvh_global_lock);
 	TAILQ_FOREACH(pv, &m->md.pv_list, pv_link) {
 		PMAP_LOCK(pv->pv_pmap);
@@ -3127,17 +3134,11 @@ mmu_booke_clear_modify(mmu_t mmu, vm_page_t m)
 
 	KASSERT((m->oflags & VPO_UNMANAGED) == 0,
 	    ("mmu_booke_clear_modify: page %p is not managed", m));
-	VM_OBJECT_ASSERT_WLOCKED(m->object);
-	KASSERT(!vm_page_xbusied(m),
-	    ("mmu_booke_clear_modify: page %p is exclusive busied", m));
+	vm_page_assert_busied(m);
 
-	/*
-	 * If the page is not PG_AWRITEABLE, then no PTEs can be modified.
-	 * If the object containing the page is locked and the page is not
-	 * exclusive busied, then PG_AWRITEABLE cannot be concurrently set.
-	 */
-	if ((m->aflags & PGA_WRITEABLE) == 0)
-		return;
+	if (!pmap_page_is_write_mapped(m))
+	        return;
+
 	rw_wlock(&pvh_global_lock);
 	TAILQ_FOREACH(pv, &m->md.pv_list, pv_link) {
 		PMAP_LOCK(pv->pv_pmap);
@@ -3457,29 +3458,56 @@ mmu_booke_mapdev(mmu_t mmu, vm_paddr_t pa, vm_size_t size)
 	return (mmu_booke_mapdev_attr(mmu, pa, size, VM_MEMATTR_DEFAULT));
 }
 
+static int
+tlb1_find_pa(vm_paddr_t pa, tlb_entry_t *e)
+{
+	int i;
+
+	for (i = 0; i < TLB1_ENTRIES; i++) {
+		tlb1_read_entry(e, i);
+		if ((e->mas1 & MAS1_VALID) == 0)
+			return (i);
+	}
+	return (-1);
+}
+
 static void *
 mmu_booke_mapdev_attr(mmu_t mmu, vm_paddr_t pa, vm_size_t size, vm_memattr_t ma)
 {
 	tlb_entry_t e;
+	vm_paddr_t tmppa;
 	void *res;
 	uintptr_t va, tmpva;
 	vm_size_t sz;
 	int i;
+	int wimge;
 
 	/*
-	 * Check if this is premapped in TLB1. Note: this should probably also
-	 * check whether a sequence of TLB1 entries exist that match the
-	 * requirement, but now only checks the easy case.
+	 * Check if this is premapped in TLB1.
 	 */
-	if (ma == VM_MEMATTR_DEFAULT) {
-		for (i = 0; i < TLB1_ENTRIES; i++) {
-			tlb1_read_entry(&e, i);
-			if (!(e.mas1 & MAS1_VALID))
-				continue;
-			if (pa >= e.phys &&
-			    (pa + size) <= (e.phys + e.size))
-				return (void *)(e.virt +
-				    (vm_offset_t)(pa - e.phys));
+	sz = size;
+	tmppa = pa;
+	va = ~0;
+	wimge = tlb_calc_wimg(pa, ma);
+	for (i = 0; i < TLB1_ENTRIES; i++) {
+		tlb1_read_entry(&e, i);
+		if (!(e.mas1 & MAS1_VALID))
+			continue;
+		if (wimge != (e.mas2 & (MAS2_WIMGE_MASK & ~_TLB_ENTRY_SHARED)))
+			continue;
+		if (tmppa >= e.phys && tmppa < e.phys + e.size) {
+			va = e.virt + (pa - e.phys);
+			tmppa = e.phys + e.size;
+			sz -= MIN(sz, e.size);
+			while (sz > 0 && (i = tlb1_find_pa(tmppa, &e)) != -1) {
+				if (wimge != (e.mas2 & (MAS2_WIMGE_MASK & ~_TLB_ENTRY_SHARED)))
+					break;
+				sz -= MIN(sz, e.size);
+				tmppa = e.phys + e.size;
+			}
+			if (sz != 0)
+				break;
+			return ((void *)va);
 		}
 	}
 
@@ -3494,10 +3522,19 @@ mmu_booke_mapdev_attr(mmu_t mmu, vm_paddr_t pa, vm_size_t size, vm_memattr_t ma)
 	 * With a sparse mapdev, align to the largest starting region.  This
 	 * could feasibly be optimized for a 'best-fit' alignment, but that
 	 * calculation could be very costly.
+	 * Align to the smaller of:
+	 * - first set bit in overlap of (pa & size mask)
+	 * - largest size envelope
+	 *
+	 * It's possible the device mapping may start at a PA that's not larger
+	 * than the size mask, so we need to offset in to maximize the TLB entry
+	 * range and minimize the number of used TLB entries.
 	 */
 	do {
 	    tmpva = tlb1_map_base;
-	    va = roundup(tlb1_map_base, 1 << flsl(size));
+	    sz = ffsl((~((1 << flsl(size-1)) - 1)) & pa);
+	    sz = sz ? min(roundup(sz + 3, 4), flsl(size) - 1) : flsl(size) - 1;
+	    va = roundup(tlb1_map_base, 1 << sz) | (((1 << sz) - 1) & pa);
 #ifdef __powerpc64__
 	} while (!atomic_cmpset_long(&tlb1_map_base, tmpva, va + size));
 #else
@@ -3512,22 +3549,8 @@ mmu_booke_mapdev_attr(mmu_t mmu, vm_paddr_t pa, vm_size_t size, vm_memattr_t ma)
 #endif
 	res = (void *)va;
 
-	do {
-		sz = 1 << (ilog2(size) & ~1);
-		if (va % sz != 0) {
-			do {
-				sz >>= 2;
-			} while (va % sz != 0);
-		}
-		if (bootverbose)
-			printf("Wiring VA=%lx to PA=%jx (size=%lx)\n",
-			    va, (uintmax_t)pa, sz);
-		tlb1_set_entry(va, pa, sz,
-		    _TLB_ENTRY_SHARED | tlb_calc_wimg(pa, ma));
-		size -= sz;
-		pa += sz;
-		va += sz;
-	} while (size > 0);
+	if (tlb1_mapin_region(va, pa, size, tlb_calc_wimg(pa, ma)) != size)
+		return (NULL);
 
 	return (res);
 }
@@ -3573,7 +3596,7 @@ mmu_booke_object_init_pt(mmu_t mmu, pmap_t pmap, vm_offset_t addr,
  */
 static int
 mmu_booke_mincore(mmu_t mmu, pmap_t pmap, vm_offset_t addr,
-    vm_paddr_t *locked_pa)
+    vm_paddr_t *pap)
 {
 
 	/* XXX: this should be implemented at some point */
@@ -3588,6 +3611,23 @@ mmu_booke_change_attr(mmu_t mmu, vm_offset_t addr, vm_size_t sz,
 	pte_t *pte;
 	int i, j;
 	tlb_entry_t e;
+
+	addr = trunc_page(addr);
+
+	/* Only allow changes to mapped kernel addresses.  This includes:
+	 * - KVA
+	 * - DMAP (powerpc64)
+	 * - Device mappings
+	 */
+	if (addr <= VM_MAXUSER_ADDRESS ||
+#ifdef __powerpc64__
+	    (addr >= tlb1_map_base && addr < DMAP_BASE_ADDRESS) ||
+	    (addr > DMAP_MAX_ADDRESS && addr < VM_MIN_KERNEL_ADDRESS) ||
+#else
+	    (addr >= tlb1_map_base && addr < VM_MIN_KERNEL_ADDRESS) ||
+#endif
+	    (addr > VM_MAX_KERNEL_ADDRESS))
+		return (EINVAL);
 
 	/* Check TLB1 mappings */
 	for (i = 0; i < TLB1_ENTRIES; i++) {
@@ -3641,6 +3681,12 @@ mmu_booke_change_attr(mmu_t mmu, vm_offset_t addr, vm_size_t sz,
 	return (0);
 }
 
+static void
+mmu_booke_page_array_startup(mmu_t mmu, long pages)
+{
+	vm_page_array_size = pages;
+}
+
 /**************************************************************************/
 /* TID handling */
 /**************************************************************************/
@@ -3661,10 +3707,10 @@ tid_alloc(pmap_t pmap)
 
 	thiscpu = PCPU_GET(cpuid);
 
-	tid = PCPU_GET(tid_next);
+	tid = PCPU_GET(booke.tid_next);
 	if (tid > TID_MAX)
 		tid = TID_MIN;
-	PCPU_SET(tid_next, tid + 1);
+	PCPU_SET(booke.tid_next, tid + 1);
 
 	/* If we are stealing TID then clear the relevant pmap's field */
 	if (tidbusy[thiscpu][tid] != NULL) {
@@ -3682,7 +3728,7 @@ tid_alloc(pmap_t pmap)
 	__asm __volatile("msync; isync");
 
 	CTR3(KTR_PMAP, "%s: e (%02d next = %02d)", __func__, tid,
-	    PCPU_GET(tid_next));
+	    PCPU_GET(booke.tid_next));
 
 	return (tid);
 }
@@ -3690,45 +3736,6 @@ tid_alloc(pmap_t pmap)
 /**************************************************************************/
 /* TLB0 handling */
 /**************************************************************************/
-
-static void
-#ifdef __powerpc64__
-tlb_print_entry(int i, uint32_t mas1, uint64_t mas2, uint32_t mas3,
-#else
-tlb_print_entry(int i, uint32_t mas1, uint32_t mas2, uint32_t mas3,
-#endif
-    uint32_t mas7)
-{
-	int as;
-	char desc[3];
-	tlbtid_t tid;
-	vm_size_t size;
-	unsigned int tsize;
-
-	desc[2] = '\0';
-	if (mas1 & MAS1_VALID)
-		desc[0] = 'V';
-	else
-		desc[0] = ' ';
-
-	if (mas1 & MAS1_IPROT)
-		desc[1] = 'P';
-	else
-		desc[1] = ' ';
-
-	as = (mas1 & MAS1_TS_MASK) ? 1 : 0;
-	tid = MAS1_GETTID(mas1);
-
-	tsize = (mas1 & MAS1_TSIZE_MASK) >> MAS1_TSIZE_SHIFT;
-	size = 0;
-	if (tsize)
-		size = tsize2size(tsize);
-
-	debugf("%3d: (%s) [AS=%d] "
-	    "sz = 0x%08x tsz = %d tid = %d mas1 = 0x%08x "
-	    "mas2(va) = 0x%"PRI0ptrX" mas3(pa) = 0x%08x mas7 = 0x%08x\n",
-	    i, desc, as, size, tsize, tid, mas1, mas2, mas3, mas7);
-}
 
 /* Convert TLB0 va and way number to tlb0[] table index. */
 static inline unsigned int
@@ -3759,40 +3766,6 @@ tlb0_flush_entry(vm_offset_t va)
 	CTR1(KTR_PMAP, "%s: e", __func__);
 }
 
-/* Print out contents of the MAS registers for each TLB0 entry */
-void
-tlb0_print_tlbentries(void)
-{
-	uint32_t mas0, mas1, mas3, mas7;
-#ifdef __powerpc64__
-	uint64_t mas2;
-#else
-	uint32_t mas2;
-#endif
-	int entryidx, way, idx;
-
-	debugf("TLB0 entries:\n");
-	for (way = 0; way < TLB0_WAYS; way ++)
-		for (entryidx = 0; entryidx < TLB0_ENTRIES_PER_WAY; entryidx++) {
-
-			mas0 = MAS0_TLBSEL(0) | MAS0_ESEL(way);
-			mtspr(SPR_MAS0, mas0);
-			__asm __volatile("isync");
-
-			mas2 = entryidx << MAS2_TLB0_ENTRY_IDX_SHIFT;
-			mtspr(SPR_MAS2, mas2);
-
-			__asm __volatile("isync; tlbre");
-
-			mas1 = mfspr(SPR_MAS1);
-			mas2 = mfspr(SPR_MAS2);
-			mas3 = mfspr(SPR_MAS3);
-			mas7 = mfspr(SPR_MAS7);
-
-			idx = tlb0_tableidx(mas2, way);
-			tlb_print_entry(idx, mas1, mas2, mas3, mas7);
-		}
-}
 
 /**************************************************************************/
 /* TLB1 handling */
@@ -3839,7 +3812,7 @@ tlb1_read_entry(tlb_entry_t *entry, unsigned int slot)
 		entry->mas7 = 0;
 		break;
 	}
-	mtmsr(msr);
+	__asm __volatile("wrtee %0" :: "r"(msr));
 
 	entry->virt = entry->mas2 & MAS2_EPN_MASK;
 	entry->phys = ((vm_paddr_t)(entry->mas7 & MAS7_RPN) << 32) |
@@ -3848,63 +3821,111 @@ tlb1_read_entry(tlb_entry_t *entry, unsigned int slot)
 	    tsize2size((entry->mas1 & MAS1_TSIZE_MASK) >> MAS1_TSIZE_SHIFT);
 }
 
+struct tlbwrite_args {
+	tlb_entry_t *e;
+	unsigned int idx;
+};
+
+static uint32_t
+tlb1_find_free(void)
+{
+	tlb_entry_t e;
+	int i;
+
+	for (i = 0; i < TLB1_ENTRIES; i++) {
+		tlb1_read_entry(&e, i);
+		if ((e.mas1 & MAS1_VALID) == 0)
+			return (i);
+	}
+	return (-1);
+}
+
+static void
+tlb1_write_entry_int(void *arg)
+{
+	struct tlbwrite_args *args = arg;
+	uint32_t idx, mas0;
+
+	idx = args->idx;
+	if (idx == -1) {
+		idx = tlb1_find_free();
+		if (idx == -1)
+			panic("No free TLB1 entries!\n");
+	}
+	/* Select entry */
+	mas0 = MAS0_TLBSEL(1) | MAS0_ESEL(idx);
+
+	mtspr(SPR_MAS0, mas0);
+	mtspr(SPR_MAS1, args->e->mas1);
+	mtspr(SPR_MAS2, args->e->mas2);
+	mtspr(SPR_MAS3, args->e->mas3);
+	switch ((mfpvr() >> 16) & 0xFFFF) {
+	case FSL_E500mc:
+	case FSL_E5500:
+	case FSL_E6500:
+		mtspr(SPR_MAS8, 0);
+		/* FALLTHROUGH */
+	case FSL_E500v2:
+		mtspr(SPR_MAS7, args->e->mas7);
+		break;
+	default:
+		break;
+	}
+
+	__asm __volatile("isync; tlbwe; isync; msync");
+
+}
+
+static void
+tlb1_write_entry_sync(void *arg)
+{
+	/* Empty synchronization point for smp_rendezvous(). */
+}
+
 /*
  * Write given entry to TLB1 hardware.
  */
 static void
 tlb1_write_entry(tlb_entry_t *e, unsigned int idx)
 {
-	register_t msr;
-	uint32_t mas0;
+	struct tlbwrite_args args;
 
-	//debugf("tlb1_write_entry: s\n");
+	args.e = e;
+	args.idx = idx;
 
-	/* Select entry */
-	mas0 = MAS0_TLBSEL(1) | MAS0_ESEL(idx);
-	//debugf("tlb1_write_entry: mas0 = 0x%08x\n", mas0);
+#ifdef SMP
+	if ((e->mas2 & _TLB_ENTRY_SHARED) && smp_started) {
+		mb();
+		smp_rendezvous(tlb1_write_entry_sync,
+		    tlb1_write_entry_int,
+		    tlb1_write_entry_sync, &args);
+	} else
+#endif
+	{
+		register_t msr;
 
-	msr = mfmsr();
-	__asm __volatile("wrteei 0");
-
-	mtspr(SPR_MAS0, mas0);
-	__asm __volatile("isync");
-	mtspr(SPR_MAS1, e->mas1);
-	__asm __volatile("isync");
-	mtspr(SPR_MAS2, e->mas2);
-	__asm __volatile("isync");
-	mtspr(SPR_MAS3, e->mas3);
-	__asm __volatile("isync");
-	switch ((mfpvr() >> 16) & 0xFFFF) {
-	case FSL_E500mc:
-	case FSL_E5500:
-	case FSL_E6500:
-		mtspr(SPR_MAS8, 0);
-		__asm __volatile("isync");
-		/* FALLTHROUGH */
-	case FSL_E500v2:
-		mtspr(SPR_MAS7, e->mas7);
-		__asm __volatile("isync");
-		break;
-	default:
-		break;
+		msr = mfmsr();
+		__asm __volatile("wrteei 0");
+		tlb1_write_entry_int(&args);
+		__asm __volatile("wrtee %0" :: "r"(msr));
 	}
-
-	__asm __volatile("tlbwe; isync; msync");
-	mtmsr(msr);
-
-	//debugf("tlb1_write_entry: e\n");
 }
 
 /*
  * Return the largest uint value log such that 2^log <= num.
  */
-static unsigned int
-ilog2(unsigned int num)
+static unsigned long
+ilog2(unsigned long num)
 {
-	int lz;
+	long lz;
 
+#ifdef __powerpc64__
+	__asm ("cntlzd %0, %1" : "=r" (lz) : "r" (num));
+	return (63 - lz);
+#else
 	__asm ("cntlzw %0, %1" : "=r" (lz) : "r" (num));
 	return (31 - lz);
+#endif
 }
 
 /*
@@ -3946,20 +3967,15 @@ tlb1_set_entry(vm_offset_t va, vm_paddr_t pa, vm_size_t size,
 	uint32_t ts, tid;
 	int tsize, index;
 
+	/* First try to update an existing entry. */
 	for (index = 0; index < TLB1_ENTRIES; index++) {
 		tlb1_read_entry(&e, index);
-		if ((e.mas1 & MAS1_VALID) == 0)
-			break;
 		/* Check if we're just updating the flags, and update them. */
 		if (e.phys == pa && e.virt == va && e.size == size) {
 			e.mas2 = (va & MAS2_EPN_MASK) | flags;
 			tlb1_write_entry(&e, index);
 			return (0);
 		}
-	}
-	if (index >= TLB1_ENTRIES) {
-		printf("tlb1_set_entry: TLB1 full!\n");
-		return (-1);
 	}
 
 	/* Convert size to TSIZE */
@@ -3980,78 +3996,55 @@ tlb1_set_entry(vm_offset_t va, vm_paddr_t pa, vm_size_t size,
 	e.mas3 = (pa & MAS3_RPN) | MAS3_SR | MAS3_SW | MAS3_SX;
 	e.mas7 = (pa >> 32) & MAS7_RPN;
 
-	tlb1_write_entry(&e, index);
+	tlb1_write_entry(&e, -1);
 
-	/*
-	 * XXX in general TLB1 updates should be propagated between CPUs,
-	 * since current design assumes to have the same TLB1 set-up on all
-	 * cores.
-	 */
 	return (0);
 }
 
 /*
- * Map in contiguous RAM region into the TLB1 using maximum of
- * KERNEL_REGION_MAX_TLB_ENTRIES entries.
- *
- * If necessary round up last entry size and return total size
- * used by all allocated entries.
+ * Map in contiguous RAM region into the TLB1.
  */
-vm_size_t
-tlb1_mapin_region(vm_offset_t va, vm_paddr_t pa, vm_size_t size)
+static vm_size_t
+tlb1_mapin_region(vm_offset_t va, vm_paddr_t pa, vm_size_t size, int wimge)
 {
-	vm_size_t pgs[KERNEL_REGION_MAX_TLB_ENTRIES];
-	vm_size_t mapped, pgsz, base, mask;
-	int idx, nents;
-
-	/* Round up to the next 1M */
-	size = roundup2(size, 1 << 20);
+	vm_offset_t base;
+	vm_size_t mapped, sz, ssize;
 
 	mapped = 0;
-	idx = 0;
 	base = va;
-	pgsz = 64*1024*1024;
-	while (mapped < size) {
-		while (mapped < size && idx < KERNEL_REGION_MAX_TLB_ENTRIES) {
-			while (pgsz > (size - mapped))
-				pgsz >>= 2;
-			pgs[idx++] = pgsz;
-			mapped += pgsz;
+	ssize = size;
+
+	while (size > 0) {
+		sz = 1UL << (ilog2(size) & ~1);
+		/* Align size to PA */
+		if (pa % sz != 0) {
+			do {
+				sz >>= 2;
+			} while (pa % sz != 0);
 		}
-
-		/* We under-map. Correct for this. */
-		if (mapped < size) {
-			while (pgs[idx - 1] == pgsz) {
-				idx--;
-				mapped -= pgsz;
-			}
-			/* XXX We may increase beyond out starting point. */
-			pgsz <<= 2;
-			pgs[idx++] = pgsz;
-			mapped += pgsz;
+		/* Now align from there to VA */
+		if (va % sz != 0) {
+			do {
+				sz >>= 2;
+			} while (va % sz != 0);
 		}
-	}
-
-	nents = idx;
-	mask = pgs[0] - 1;
-	/* Align address to the boundary */
-	if (va & mask) {
-		va = (va + mask) & ~mask;
-		pa = (pa + mask) & ~mask;
-	}
-
-	for (idx = 0; idx < nents; idx++) {
-		pgsz = pgs[idx];
-		debugf("%u: %llx -> %x, size=%x\n", idx, pa, va, pgsz);
-		tlb1_set_entry(va, pa, pgsz,
-		    _TLB_ENTRY_SHARED | _TLB_ENTRY_MEM);
-		pa += pgsz;
-		va += pgsz;
+		/* Now align from there to VA */
+		if (bootverbose)
+			printf("Wiring VA=%p to PA=%jx (size=%lx)\n",
+			    (void *)va, (uintmax_t)pa, (long)sz);
+		if (tlb1_set_entry(va, pa, sz,
+		    _TLB_ENTRY_SHARED | wimge) < 0)
+			return (mapped);
+		size -= sz;
+		pa += sz;
+		va += sz;
 	}
 
 	mapped = (va - base);
-	printf("mapped size 0x%"PRI0ptrX" (wasted space 0x%"PRIxPTR")\n",
-	    mapped, mapped - size);
+	if (bootverbose)
+		printf("mapped size 0x%"PRIxPTR" (wasted space 0x%"PRIxPTR")\n",
+		    mapped, mapped - ssize);
+
 	return (mapped);
 }
 
@@ -4062,7 +4055,8 @@ tlb1_mapin_region(vm_offset_t va, vm_paddr_t pa, vm_size_t size)
 void
 tlb1_init()
 {
-	uint32_t mas0, mas1, mas2, mas3, mas7;
+	vm_offset_t mas2;
+	uint32_t mas0, mas1, mas3, mas7;
 	uint32_t tsz;
 
 	tlb1_get_tlbconf();
@@ -4081,6 +4075,7 @@ tlb1_init()
 
 	tsz = (mas1 & MAS1_TSIZE_MASK) >> MAS1_TSIZE_SHIFT;
 	kernsize += (tsz > 0) ? tsize2size(tsz) : 0;
+	kernstart = trunc_page(mas2);
 
 	/* Setup TLB miss defaults */
 	set_mas4_defaults();
@@ -4164,10 +4159,10 @@ pmap_track_page(pmap_t pmap, vm_offset_t va)
 
 	va = trunc_page(va);
 	pa = pmap_kextract(va);
+	page = PHYS_TO_VM_PAGE(pa);
 
 	rw_wlock(&pvh_global_lock);
 	PMAP_LOCK(pmap);
-	page = PHYS_TO_VM_PAGE(pa);
 
 	TAILQ_FOREACH(pve, &page->md.pv_list, pv_link) {
 		if ((pmap == pve->pv_pmap) && (va == pve->pv_va)) {
@@ -4201,36 +4196,6 @@ set_mas4_defaults(void)
 	__asm __volatile("isync");
 }
 
-/*
- * Print out contents of the MAS registers for each TLB1 entry
- */
-void
-tlb1_print_tlbentries(void)
-{
-	uint32_t mas0, mas1, mas3, mas7;
-#ifdef __powerpc64__
-	uint64_t mas2;
-#else
-	uint32_t mas2;
-#endif
-	int i;
-
-	debugf("TLB1 entries:\n");
-	for (i = 0; i < TLB1_ENTRIES; i++) {
-
-		mas0 = MAS0_TLBSEL(1) | MAS0_ESEL(i);
-		mtspr(SPR_MAS0, mas0);
-
-		__asm __volatile("isync; tlbre");
-
-		mas1 = mfspr(SPR_MAS1);
-		mas2 = mfspr(SPR_MAS2);
-		mas3 = mfspr(SPR_MAS3);
-		mas7 = mfspr(SPR_MAS7);
-
-		tlb_print_entry(i, mas1, mas2, mas3, mas7);
-	}
-}
 
 /*
  * Return 0 if the physical IO range is encompassed by one of the
@@ -4302,12 +4267,26 @@ tid_flush(tlbtid_t tid)
 	msr = mfmsr();
 	__asm __volatile("wrteei 0");
 
+	/*
+	 * Newer (e500mc and later) have tlbilx, which doesn't broadcast, so use
+	 * it for PID invalidation.
+	 */
+	switch ((mfpvr() >> 16) & 0xffff) {
+	case FSL_E500mc:
+	case FSL_E5500:
+	case FSL_E6500:
+		mtspr(SPR_MAS6, tid << MAS6_SPID0_SHIFT);
+		/* tlbilxpid */
+		__asm __volatile("isync; .long 0x7c200024; isync; msync");
+		__asm __volatile("wrtee %0" :: "r"(msr));
+		return;
+	}
+
 	for (way = 0; way < TLB0_WAYS; way++)
 		for (entry = 0; entry < TLB0_ENTRIES_PER_WAY; entry++) {
 
 			mas0 = MAS0_TLBSEL(0) | MAS0_ESEL(way);
 			mtspr(SPR_MAS0, mas0);
-			__asm __volatile("isync");
 
 			mas2 = entry << MAS2_TLB0_ENTRY_IDX_SHIFT;
 			mtspr(SPR_MAS2, mas2);
@@ -4324,5 +4303,109 @@ tid_flush(tlbtid_t tid)
 			mtspr(SPR_MAS1, mas1);
 			__asm __volatile("isync; tlbwe; isync; msync");
 		}
-	mtmsr(msr);
+	__asm __volatile("wrtee %0" :: "r"(msr));
 }
+
+#ifdef DDB
+/* Print out contents of the MAS registers for each TLB0 entry */
+static void
+#ifdef __powerpc64__
+tlb_print_entry(int i, uint32_t mas1, uint64_t mas2, uint32_t mas3,
+#else
+tlb_print_entry(int i, uint32_t mas1, uint32_t mas2, uint32_t mas3,
+#endif
+    uint32_t mas7)
+{
+	int as;
+	char desc[3];
+	tlbtid_t tid;
+	vm_size_t size;
+	unsigned int tsize;
+
+	desc[2] = '\0';
+	if (mas1 & MAS1_VALID)
+		desc[0] = 'V';
+	else
+		desc[0] = ' ';
+
+	if (mas1 & MAS1_IPROT)
+		desc[1] = 'P';
+	else
+		desc[1] = ' ';
+
+	as = (mas1 & MAS1_TS_MASK) ? 1 : 0;
+	tid = MAS1_GETTID(mas1);
+
+	tsize = (mas1 & MAS1_TSIZE_MASK) >> MAS1_TSIZE_SHIFT;
+	size = 0;
+	if (tsize)
+		size = tsize2size(tsize);
+
+	printf("%3d: (%s) [AS=%d] "
+	    "sz = 0x%jx tsz = %d tid = %d mas1 = 0x%08x "
+	    "mas2(va) = 0x%"PRI0ptrX" mas3(pa) = 0x%08x mas7 = 0x%08x\n",
+	    i, desc, as, (uintmax_t)size, tsize, tid, mas1, mas2, mas3, mas7);
+}
+
+DB_SHOW_COMMAND(tlb0, tlb0_print_tlbentries)
+{
+	uint32_t mas0, mas1, mas3, mas7;
+#ifdef __powerpc64__
+	uint64_t mas2;
+#else
+	uint32_t mas2;
+#endif
+	int entryidx, way, idx;
+
+	printf("TLB0 entries:\n");
+	for (way = 0; way < TLB0_WAYS; way ++)
+		for (entryidx = 0; entryidx < TLB0_ENTRIES_PER_WAY; entryidx++) {
+
+			mas0 = MAS0_TLBSEL(0) | MAS0_ESEL(way);
+			mtspr(SPR_MAS0, mas0);
+
+			mas2 = entryidx << MAS2_TLB0_ENTRY_IDX_SHIFT;
+			mtspr(SPR_MAS2, mas2);
+
+			__asm __volatile("isync; tlbre");
+
+			mas1 = mfspr(SPR_MAS1);
+			mas2 = mfspr(SPR_MAS2);
+			mas3 = mfspr(SPR_MAS3);
+			mas7 = mfspr(SPR_MAS7);
+
+			idx = tlb0_tableidx(mas2, way);
+			tlb_print_entry(idx, mas1, mas2, mas3, mas7);
+		}
+}
+
+/*
+ * Print out contents of the MAS registers for each TLB1 entry
+ */
+DB_SHOW_COMMAND(tlb1, tlb1_print_tlbentries)
+{
+	uint32_t mas0, mas1, mas3, mas7;
+#ifdef __powerpc64__
+	uint64_t mas2;
+#else
+	uint32_t mas2;
+#endif
+	int i;
+
+	printf("TLB1 entries:\n");
+	for (i = 0; i < TLB1_ENTRIES; i++) {
+
+		mas0 = MAS0_TLBSEL(1) | MAS0_ESEL(i);
+		mtspr(SPR_MAS0, mas0);
+
+		__asm __volatile("isync; tlbre");
+
+		mas1 = mfspr(SPR_MAS1);
+		mas2 = mfspr(SPR_MAS2);
+		mas3 = mfspr(SPR_MAS3);
+		mas7 = mfspr(SPR_MAS7);
+
+		tlb_print_entry(i, mas1, mas2, mas3, mas7);
+	}
+}
+#endif

@@ -1,6 +1,8 @@
 /*	$KAME: rthdr.c,v 1.19 2003/06/06 10:48:51 itojun Exp $	*/
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
  * All rights reserved.
  * 
@@ -280,7 +282,7 @@ inet6_rth_space(int type, int segments)
 			return (((segments * 2) + 1) << 3);
 		/* FALLTHROUGH */
 	default:
-		return (0);	/* type not suppported */
+		return (0);	/* type not supported */
 	}
 }
 

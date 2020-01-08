@@ -32,6 +32,7 @@
 #include <string.h>
 #include <zlib.h>
 #include <libgen.h>
+#include <sys/assfail.h>
 #include <sys/spa.h>
 #include <sys/stat.h>
 #include <sys/processor.h>
@@ -40,6 +41,7 @@
 #include <sys/zmod.h>
 #include <sys/utsname.h>
 #include <sys/systeminfo.h>
+#include <libzfs.h>
 
 /*
  * Emulation of kernel services in userland.
@@ -318,6 +320,18 @@ cv_wait(kcondvar_t *cv, kmutex_t *mp)
 	int ret = cond_wait(cv, &mp->m_lock);
 	VERIFY(ret == 0 || ret == EINTR);
 	mp->m_owner = curthread;
+}
+
+/*
+ * NB: this emulates FreeBSD cv_wait_sig(9), not the illumos one.
+ * Meanings of the return code are different.
+ * NB: this does not actually catch any signals.
+ */
+int
+cv_wait_sig(kcondvar_t *cv, kmutex_t *mp)
+{
+	cv_wait(cv, mp);
+	return (0);
 }
 
 clock_t
@@ -735,11 +749,10 @@ static char ce_suffix[CE_IGNORE][2] = { "", "\n", "\n", "" };
 void
 vpanic(const char *fmt, va_list adx)
 {
-	(void) fprintf(stderr, "error: ");
-	(void) vfprintf(stderr, fmt, adx);
-	(void) fprintf(stderr, "\n");
-
-	abort();	/* think of it as a "user-level crash dump" */
+	char buf[512];
+	(void) vsnprintf(buf, 512, fmt, adx);
+	assfail(buf, NULL, 0);
+	abort(); /* necessary to make vpanic meet noreturn requirements */
 }
 
 void
@@ -977,8 +990,8 @@ kernel_init(int mode)
 	dprintf("physmem = %llu pages (%.2f GB)\n", physmem,
 	    (double)physmem * sysconf(_SC_PAGE_SIZE) / (1ULL << 30));
 
-	(void) snprintf(hw_serial, sizeof (hw_serial), "%lu",
-	    (mode & FWRITE) ? (unsigned long)gethostid() : 0);
+	(void) snprintf(hw_serial, sizeof (hw_serial), "%ld",
+	    (mode & FWRITE) ? get_system_hostid() : 0);
 
 	VERIFY((random_fd = open("/dev/random", O_RDONLY)) != -1);
 	VERIFY((urandom_fd = open("/dev/urandom", O_RDONLY)) != -1);
@@ -1006,6 +1019,16 @@ kernel_fini(void)
 
 	random_fd = -1;
 	urandom_fd = -1;
+}
+
+/* ARGSUSED */
+uint32_t
+zone_get_hostid(void *zonep)
+{
+	/*
+	 * We're emulating the system's hostid in userland.
+	 */
+	return (strtoul(hw_serial, NULL, 10));
 }
 
 int

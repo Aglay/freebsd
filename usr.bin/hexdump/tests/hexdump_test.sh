@@ -1,6 +1,7 @@
 #
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
 # Copyright (c) 2017 Kyle Evans <kevans@FreeBSD.org>
-# All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -134,7 +135,6 @@ s_flag_head()
 }
 s_flag_body()
 {
-	atf_expect_fail "-s option is currently broken due to capsicum (PR 219173)"
 	atf_check -o file:"$(atf_get_srcdir)/d_hexdump_sflag_a.out" \
 	    hexdump -bs 4 "$(atf_get_srcdir)/d_hexdump_a.in"
 
@@ -148,7 +148,6 @@ v_flag_head()
 }
 v_flag_body()
 {
-	atf_expect_fail "-s option is currently broken due to capsicum (PR 219173)"
 	for i in $(seq 0 7); do
 		atf_check -o match:"^\*$" \
 		    hexdump -s ${i} "$(atf_get_srcdir)/d_hexdump_c.in"
@@ -177,6 +176,19 @@ x_flag_body()
 	    hexdump -x "$(atf_get_srcdir)/d_hexdump_c.in"
 }
 
+atf_test_case no_conv_err
+no_conv_err()
+{
+	atf_set "descr" "Verify missing conversion char error handling"
+}
+no_conv_err_body()
+{
+	atf_check -s exit:1 -e ignore \
+	    hexdump -e '"%"'
+	atf_check -s exit:1 -e ignore \
+	    hexdump -e '4/2 "%"'
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case b_flag
@@ -189,4 +201,5 @@ atf_init_test_cases()
 	atf_add_test_case s_flag
 	atf_add_test_case v_flag
 	atf_add_test_case x_flag
+	atf_add_test_case no_conv_err
 }

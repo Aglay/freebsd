@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 Luigi Rizzo, Riccardo Panicucci, Universita` di Pisa
  * All rights reserved
  *
@@ -48,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 
 #include <net/if.h>	/* IFNAMSIZ, struct ifaddr, ifq head, lock.h mutex.h */
+#include <net/if_var.h>	/* NET_EPOCH_... */
 #include <net/netisr.h>
 #include <net/vnet.h>
 
@@ -237,27 +240,10 @@ SYSEND
 static void	dummynet_send(struct mbuf *);
 
 /*
- * Packets processed by dummynet have an mbuf tag associated with
- * them that carries their dummynet state.
- * Outside dummynet, only the 'rule' field is relevant, and it must
- * be at the beginning of the structure.
- */
-struct dn_pkt_tag {
-	struct ipfw_rule_ref rule;	/* matching rule	*/
-
-	/* second part, dummynet specific */
-	int dn_dir;		/* action when packet comes out.*/
-				/* see ip_fw_private.h		*/
-	uint64_t output_time;	/* when the pkt is due for delivery*/
-	struct ifnet *ifp;	/* interface, for ip_output	*/
-	struct _ip6dn_args ip6opt;	/* XXX ipv6 options	*/
-};
-
-/*
  * Return the mbuf tag holding the dummynet state (it should
  * be the first one on the list).
  */
-static struct dn_pkt_tag *
+struct dn_pkt_tag *
 dn_tag_get(struct mbuf *m)
 {
 	struct m_tag *mtag = m_tag_first(m);
@@ -448,7 +434,7 @@ int
 ecn_mark(struct mbuf* m)
 {
 	struct ip *ip;
-	ip = mtod(m, struct ip *);
+	ip = (struct ip *)mtodo(m, dn_tag_get(m)->iphdr_off);
 
 	switch (ip->ip_v) {
 	case IPVERSION:
@@ -472,7 +458,7 @@ ecn_mark(struct mbuf* m)
 #ifdef INET6
 	case (IPV6_VERSION >> 4):
 	{
-		struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
+		struct ip6_hdr *ip6 = (struct ip6_hdr *)ip;
 		u_int32_t flowlabel;
 
 		flowlabel = ntohl(ip6->ip6_flow);
@@ -756,6 +742,8 @@ dummynet_send(struct mbuf *m)
 {
 	struct mbuf *n;
 
+	NET_EPOCH_ASSERT();
+
 	for (; m != NULL; m = n) {
 		struct ifnet *ifp = NULL;	/* gcc 3.4.6 complains */
         	struct m_tag *tag;
@@ -824,7 +812,7 @@ dummynet_send(struct mbuf *m)
 			ether_demux(m->m_pkthdr.rcvif, m);
 			break;
 
-		case DIR_OUT | PROTO_LAYER2: /* N_TO_ETH_OUT: */
+		case DIR_OUT | PROTO_LAYER2: /* DN_TO_ETH_OUT: */
 			ether_output_frame(ifp, m);
 			break;
 
@@ -856,9 +844,10 @@ tag_mbuf(struct mbuf *m, int dir, struct ip_fw_args *fwa)
 	dt->rule = fwa->rule;
 	dt->rule.info &= IPFW_ONEPASS;	/* only keep this info */
 	dt->dn_dir = dir;
-	dt->ifp = fwa->oif;
+	dt->ifp = fwa->flags & IPFW_ARGS_OUT ? fwa->ifp : NULL;
 	/* dt->output tame is updated as we move through */
 	dt->output_time = dn_cfg.curr_time;
+	dt->iphdr_off = (dir & PROTO_LAYER2) ? ETHER_HDR_LEN : 0;
 	return 0;
 }
 
@@ -868,22 +857,27 @@ tag_mbuf(struct mbuf *m, int dir, struct ip_fw_args *fwa)
  * We use the argument to locate the flowset fs and the sched_set sch
  * associated to it. The we apply flow_mask and sched_mask to
  * determine the queue and scheduler instances.
- *
- * dir		where shall we send the packet after dummynet.
- * *m0		the mbuf with the packet
- * ifp		the 'ifp' parameter from the caller.
- *		NULL in ip_input, destination interface in ip_output,
  */
 int
-dummynet_io(struct mbuf **m0, int dir, struct ip_fw_args *fwa)
+dummynet_io(struct mbuf **m0, struct ip_fw_args *fwa)
 {
 	struct mbuf *m = *m0;
 	struct dn_fsk *fs = NULL;
 	struct dn_sch_inst *si;
 	struct dn_queue *q = NULL;	/* default */
+	int fs_id, dir;
 
-	int fs_id = (fwa->rule.info & IPFW_INFO_MASK) +
+	fs_id = (fwa->rule.info & IPFW_INFO_MASK) +
 		((fwa->rule.info & IPFW_IS_PIPE) ? 2*DN_MAX_ID : 0);
+	/* XXXGL: convert args to dir */
+	if (fwa->flags & IPFW_ARGS_IN)
+		dir = DIR_IN;
+	else
+		dir = DIR_OUT;
+	if (fwa->flags & IPFW_ARGS_ETHER)
+		dir |= PROTO_LAYER2;
+	else if (fwa->flags & IPFW_ARGS_IP6)
+		dir |= PROTO_IPV6;
 	DN_BH_WLOCK();
 	io_pkt++;
 	/* we could actually tag outside the lock, but who cares... */

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 Doug Rabson
  * All rights reserved.
  *
@@ -55,6 +57,22 @@
 #define	wmb()	__asm __volatile("sfence;" : : : "memory")
 #define	rmb()	__asm __volatile("lfence;" : : : "memory")
 
+#ifdef _KERNEL
+/*
+ * OFFSETOF_MONITORBUF == __pcpu_offset(pc_monitorbuf).
+ *
+ * The open-coded number is used instead of the symbolic expression to
+ * avoid a dependency on sys/pcpu.h in machine/atomic.h consumers.
+ * An assertion in amd64/vm_machdep.c ensures that the value is correct.
+ */
+#define	OFFSETOF_MONITORBUF	0x100
+#endif
+
+#if defined(KCSAN) && !defined(KCSAN_RUNTIME)
+#include <sys/_cscan_atomic.h>
+#else
+#include <sys/atomic_common.h>
+
 /*
  * Various simple operations on memory, each of which is atomic in the
  * presence of interrupts and multiple processors.
@@ -92,7 +110,7 @@
  * Kernel modules call real functions which are built into the kernel.
  * This allows kernel modules to be portable between UP and SMP systems.
  */
-#if defined(KLD_MODULE) || !defined(__GNUCLIKE_ASM)
+#if !defined(__GNUCLIKE_ASM)
 #define	ATOMIC_ASM(NAME, TYPE, OP, CONS, V)			\
 void atomic_##NAME##_##TYPE(volatile u_##TYPE *p, u_##TYPE v);	\
 void atomic_##NAME##_barr_##TYPE(volatile u_##TYPE *p, u_##TYPE v)
@@ -128,7 +146,7 @@ void		atomic_store_rel_##TYPE(volatile u_##TYPE *p, u_##TYPE v)
  * For userland, always use lock prefixes so that the binaries will run
  * on both SMP and !SMP systems.
  */
-#if defined(SMP) || !defined(_KERNEL)
+#if defined(SMP) || !defined(_KERNEL) || defined(KLD_MODULE)
 #define	MPLOCKED	"lock ; "
 #else
 #define	MPLOCKED
@@ -341,16 +359,7 @@ atomic_testandclear_long(volatile u_long *p, u_int v)
 
 #if defined(_KERNEL)
 
-/*
- * OFFSETOF_MONITORBUF == __pcpu_offset(pc_monitorbuf).
- *
- * The open-coded number is used instead of the symbolic expression to
- * avoid a dependency on sys/pcpu.h in machine/atomic.h consumers.
- * An assertion in amd64/vm_machdep.c ensures that the value is correct.
- */
-#define	OFFSETOF_MONITORBUF	0x100
-
-#if defined(SMP)
+#if defined(SMP) || defined(KLD_MODULE)
 static __inline void
 __storeload_barrier(void)
 {
@@ -442,10 +451,10 @@ ATOMIC_ASM(clear,    int,   "andl %1,%0",  "ir", ~v);
 ATOMIC_ASM(add,	     int,   "addl %1,%0",  "ir",  v);
 ATOMIC_ASM(subtract, int,   "subl %1,%0",  "ir",  v);
 
-ATOMIC_ASM(set,	     long,  "orq %1,%0",   "ir",  v);
-ATOMIC_ASM(clear,    long,  "andq %1,%0",  "ir", ~v);
-ATOMIC_ASM(add,	     long,  "addq %1,%0",  "ir",  v);
-ATOMIC_ASM(subtract, long,  "subq %1,%0",  "ir",  v);
+ATOMIC_ASM(set,	     long,  "orq %1,%0",   "er",  v);
+ATOMIC_ASM(clear,    long,  "andq %1,%0",  "er", ~v);
+ATOMIC_ASM(add,	     long,  "addq %1,%0",  "er",  v);
+ATOMIC_ASM(subtract, long,  "subq %1,%0",  "er",  v);
 
 #define	ATOMIC_LOADSTORE(TYPE)					\
 	ATOMIC_LOAD(TYPE);					\
@@ -674,5 +683,7 @@ u_long	atomic_swap_long(volatile u_long *p, u_long v);
 #define	atomic_readandclear_ptr	atomic_readandclear_long
 
 #endif /* !WANT_FUNCTIONS */
+
+#endif /* KCSAN && !KCSAN_RUNTIME */
 
 #endif /* !_MACHINE_ATOMIC_H_ */

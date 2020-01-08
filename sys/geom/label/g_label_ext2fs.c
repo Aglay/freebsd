@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Stanislav Sedov
  * All rights reserved.
  *
@@ -33,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/label/g_label.h>
 
 #define EXT2FS_SB_OFFSET	1024

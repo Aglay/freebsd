@@ -1,5 +1,7 @@
 %{
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * APM (Advanced Power Management) Event Dispatcher
  *
  * Copyright (c) 1999 Mitsuru IWASAKI <iwasaki@FreeBSD.org>
@@ -42,6 +44,7 @@ int first_time;
 %}
 
 /* We don't need it, avoid the warning. */
+%option noyywrap
 %option nounput
 %option noinput
 

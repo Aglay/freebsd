@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2001 David E. O'Brien
  * Copyright (c) 1990 The Regents of the University of California.
  * All rights reserved.
@@ -80,7 +82,7 @@
 #endif /* SMP || KLD_MODULE */
 
 #ifndef MAXMEMDOM
-#define	MAXMEMDOM	1
+#define	MAXMEMDOM	8
 #endif
 
 #define	ALIGNBYTES	_ALIGNBYTES
@@ -101,7 +103,7 @@
 #define	CACHE_LINE_SIZE		(1 << CACHE_LINE_SHIFT)
 
 #define	PAGE_SHIFT	12
-#define	PAGE_SIZE	(1L << PAGE_SHIFT)	/* Page size */
+#define	PAGE_SIZE	(1 << PAGE_SHIFT)	/* Page size */
 #define	PAGE_MASK	(PAGE_SIZE - 1)
 #define	NPTEPG		(PAGE_SIZE/(sizeof (pt_entry_t)))
 

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006 Ruslan Ermilov <ru@FreeBSD.org>
  * All rights reserved.
  *
@@ -41,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/time.h>
 #include <vm/uma.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/cache/g_cache.h>
 
 FEATURE(geom_cache, "GEOM cache module");
@@ -1014,3 +1017,4 @@ g_cache_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 }
 
 DECLARE_GEOM_CLASS(g_cache_class, g_cache);
+MODULE_VERSION(geom_cache, 0);

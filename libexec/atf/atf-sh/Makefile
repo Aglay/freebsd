@@ -65,6 +65,9 @@ CFLAGS+=	-DATF_PKGDATADIR='"${SHAREDIR}/atf"'
 CFLAGS+=	-DATF_SHELL='"/bin/sh"'
 CFLAGS+=	-I${ATF}
 
+# Silence warnings about usage of deprecated std::auto_ptr
+CXXWARNFLAGS+=	-Wno-deprecated-declarations
+
 LIBADD=		atf_cxx
 
 FILESGROUPS=	SUBR
@@ -72,9 +75,8 @@ FILESGROUPS=	SUBR
 SUBRDIR=	${SHAREDIR}/atf
 SUBR=		libatf-sh.subr
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include "../../../lib/atf/common.mk"
 .include <bsd.prog.mk>

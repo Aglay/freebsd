@@ -82,19 +82,13 @@ extern int32_t thiszone;	/* seconds offset from gmt to local time */
 extern const char istr[];
 
 #if !defined(HAVE_SNPRINTF)
-int snprintf (char *str, size_t sz, const char *format, ...)
-#ifdef __ATTRIBUTE___FORMAT_OK
-     __attribute__((format (printf, 3, 4)))
-#endif /* __ATTRIBUTE___FORMAT_OK */
-     ;
+int snprintf (char *str, size_t sz, FORMAT_STRING(const char *format), ...)
+     PRINTFLIKE(3, 4);
 #endif /* !defined(HAVE_SNPRINTF) */
 
 #if !defined(HAVE_VSNPRINTF)
-int vsnprintf (char *str, size_t sz, const char *format, va_list ap)
-#ifdef __ATTRIBUTE___FORMAT_OK
-     __attribute__((format (printf, 3, 0)))
-#endif /* __ATTRIBUTE___FORMAT_OK */
-     ;
+int vsnprintf (char *str, size_t sz, FORMAT_STRING(const char *format),
+     va_list ap) PRINTFLIKE(3, 0);
 #endif /* !defined(HAVE_VSNPRINTF) */
 
 #ifndef HAVE_STRLCAT
@@ -520,6 +514,7 @@ extern void hsrp_print(netdissect_options *, const u_char *, u_int);
 extern void http_print(netdissect_options *, const u_char *, u_int);
 extern void icmp6_print(netdissect_options *, const u_char *, u_int, const u_char *, int);
 extern void icmp_print(netdissect_options *, const u_char *, u_int, const u_char *, int);
+extern u_int ieee802_11_radio_print(netdissect_options *, const u_char *, u_int, u_int);
 extern void igmp_print(netdissect_options *, const u_char *, u_int);
 extern void igrp_print(netdissect_options *, const u_char *, u_int);
 extern void ip6_print(netdissect_options *, const u_char *, u_int);
@@ -531,7 +526,7 @@ extern void ipx_netbios_print(netdissect_options *, const u_char *, u_int);
 extern void ipx_print(netdissect_options *, const u_char *, u_int);
 extern void isakmp_print(netdissect_options *, const u_char *, u_int, const u_char *);
 extern void isakmp_rfc3948_print(netdissect_options *, const u_char *, u_int, const u_char *);
-extern void isoclns_print(netdissect_options *, const u_char *, u_int, u_int);
+extern void isoclns_print(netdissect_options *, const u_char *, u_int);
 extern void krb_print(netdissect_options *, const u_char *);
 extern void l2tp_print(netdissect_options *, const u_char *, u_int);
 extern void lane_print(netdissect_options *, const u_char *, u_int, u_int);
@@ -647,7 +642,6 @@ extern int nextproto6_cksum(netdissect_options *, const struct ip6_hdr *, const 
 extern int mask2plen(uint32_t);
 extern int mask62plen(const u_char *);
 
-extern const char *dnname_string(netdissect_options *, u_short);
 extern const char *dnnum_string(netdissect_options *, u_short);
 
 extern char *smb_errstr(int, int);

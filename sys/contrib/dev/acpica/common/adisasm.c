@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -408,6 +408,8 @@ Cleanup:
         ACPI_FREE (Table);
     }
 
+    AcDeleteTableList (ListHead);
+
     if (File)
     {
         fclose (File);
@@ -455,9 +457,9 @@ AdDisassembleOneTable (
      * (.xxx) file produced from the converter in case if
      * it fails to get deleted.
      */
-    if (Gbl_CaptureComments)
+    if (AcpiGbl_CaptureComments)
     {
-        strncpy (Table->Signature, AcpiGbl_TableSig, 4);
+        strncpy (Table->Signature, AcpiGbl_TableSig, ACPI_NAMESEG_SIZE);
     }
 #endif
 
@@ -574,11 +576,11 @@ AdDisassembleOneTable (
                 DisasmFilename, CmGetFileSize (File));
         }
 
-        if (Gbl_MapfileFlag)
+        if (AslGbl_MapfileFlag)
         {
             fprintf (stderr, "%14s %s - %u bytes\n",
-                Gbl_Files[ASL_FILE_MAP_OUTPUT].ShortDescription,
-                Gbl_Files[ASL_FILE_MAP_OUTPUT].Filename,
+                AslGbl_FileDescs[ASL_FILE_MAP_OUTPUT].ShortDescription,
+                AslGbl_Files[ASL_FILE_MAP_OUTPUT].Filename,
                 FlGetFileSize (ASL_FILE_MAP_OUTPUT));
         }
     }
@@ -744,10 +746,10 @@ AdDoExternalFileList (
             {
                 ExternalFileList = ExternalFileList->Next;
                 GlobalStatus = AE_TYPE;
-                Status = AE_OK;
                 continue;
             }
 
+            AcDeleteTableList (ExternalListHead);
             return (Status);
         }
 
@@ -761,6 +763,7 @@ AdDoExternalFileList (
             {
                 AcpiOsPrintf ("Could not parse external ACPI tables, %s\n",
                     AcpiFormatException (Status));
+                AcDeleteTableList (ExternalListHead);
                 return (Status);
             }
 
@@ -779,6 +782,8 @@ AdDoExternalFileList (
 
         ExternalFileList = ExternalFileList->Next;
     }
+
+    AcDeleteTableList (ExternalListHead);
 
     if (ACPI_FAILURE (GlobalStatus))
     {

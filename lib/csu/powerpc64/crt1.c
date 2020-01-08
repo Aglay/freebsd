@@ -1,5 +1,7 @@
 /* LINTLIBRARY */
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright 2001 David E. O'Brien.
  * All rights reserved.
  * Copyright 1996-1998 John D. Polstra.
@@ -19,7 +21,7 @@
  * 3. All advertising materials mentioning features or use of this software
  *    must display the following acknowledgement:
  *          This product includes software developed for the
- *          FreeBSD Project.  See http://www.freebsd.org/ for
+ *          FreeBSD Project.  See https://www.freebsd.org/ for
  *          information about FreeBSD.
  *          This product includes software developed for the
  *          NetBSD Project.  See http://www.netbsd.org/ for
@@ -43,6 +45,11 @@
 __FBSDID("$FreeBSD$");
 
 #include <stdlib.h>
+#include <stdint.h>
+#include <sys/elf.h>
+
+static uint32_t cpu_features;
+static uint32_t cpu_features2;
 
 #include "libc_private.h"
 #include "crtbrand.c"
@@ -63,6 +70,30 @@ extern int etext;
 
 struct ps_strings *__ps_strings;
 
+static void
+init_cpu_features(char **env)
+{
+	const Elf_Auxinfo *aux;
+
+	/* Find the auxiliary vector on the stack. */
+	while (*env++ != 0)	/* Skip over environment, and NULL terminator */
+		;
+	aux = (const Elf_Auxinfo *)env;
+
+	/* Digest the auxiliary vector. */
+	for (;  aux->a_type != AT_NULL; aux++) {
+		switch (aux->a_type) {
+		case AT_HWCAP:
+			cpu_features = (uint32_t)aux->a_un.a_val;
+			break;
+		case AT_HWCAP2:
+			cpu_features2 = (uint32_t)aux->a_un.a_val;
+			break;
+		}
+	}
+}
+
+
 /* The entry function. */
 /*
  * First 5 arguments are specified by the PowerPC SVR4 ABI.
@@ -82,8 +113,11 @@ _start(int argc, char **argv, char **env,
 
 	if (&_DYNAMIC != NULL)
 		atexit(cleanup);
-	else
+	else {
+		init_cpu_features(env);
+		process_irelocs();
 		_init_tls();
+	}
 
 #ifdef GCRT
 	atexit(_mcleanup);

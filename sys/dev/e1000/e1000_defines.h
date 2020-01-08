@@ -1,4 +1,5 @@
 /******************************************************************************
+  SPDX-License-Identifier: BSD-3-Clause
 
   Copyright (c) 2001-2015, Intel Corporation 
   All rights reserved.
@@ -1204,10 +1205,6 @@
 #define PCIE_LINK_SPEED_2500		0x01
 #define PCIE_LINK_SPEED_5000		0x02
 #define PCIE_DEVICE_CONTROL2_16ms	0x0005
-
-#ifndef ETH_ADDR_LEN
-#define ETH_ADDR_LEN			6
-#endif
 
 #define PHY_REVISION_MASK		0xFFFFFFF0
 #define MAX_PHY_REG_ADDRESS		0x1F  /* 5 bit address bus (0-0x1F) */

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1980, 1986, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -67,8 +69,6 @@ struct route {
 #define	RT_MAY_LOOP_BIT		3	/* dst may require loop copy */
 #define	RT_HAS_HEADER_BIT	4	/* mbuf already have its header prepended */
 
-#define	RT_CACHING_CONTEXT	0x1	/* XXX: not used anywhere */
-#define	RT_NORTREF		0x2	/* doesn't hold reference on ro_rt */
 #define	RT_L2_ME		(1 << RT_L2_ME_BIT)		/* 0x0004 */
 #define	RT_MAY_LOOP		(1 << RT_MAY_LOOP_BIT)		/* 0x0008 */
 #define	RT_HAS_HEADER		(1 << RT_HAS_HEADER_BIT)	/* 0x0010 */
@@ -145,6 +145,8 @@ struct rtentry {
 	 */
 #define	rt_key(r)	(*((struct sockaddr **)(&(r)->rt_nodes->rn_key)))
 #define	rt_mask(r)	(*((struct sockaddr **)(&(r)->rt_nodes->rn_mask)))
+#define	rt_key_const(r)		(*((const struct sockaddr * const *)(&(r)->rt_nodes->rn_key)))
+#define	rt_mask_const(r)	(*((const struct sockaddr * const *)(&(r)->rt_nodes->rn_mask)))
 	struct	sockaddr *rt_gateway;	/* value */
 	struct	ifnet *rt_ifp;		/* the answer: interface to use */
 	struct	ifaddr *rt_ifa;		/* the answer: interface address to use */
@@ -210,6 +212,7 @@ struct rtentry {
 #define	NHF_DEFAULT		0x0080	/* Default route */
 #define	NHF_BROADCAST		0x0100	/* RTF_BROADCAST */
 #define	NHF_GATEWAY		0x0200	/* RTF_GATEWAY */
+#define	NHF_HOST		0x0400	/* RTF_HOST */
 
 /* Nexthop request flags */
 #define	NHR_IFAIF		0x01	/* Return ifa_ifp interface */
@@ -236,13 +239,14 @@ rt_update_ro_flags(struct route *ro)
 /*
  * Routing statistics.
  */
-struct	rtstat {
-	short	rts_badredirect;	/* bogus redirect calls */
-	short	rts_dynamic;		/* routes created by redirects */
-	short	rts_newgateway;		/* routes modified by redirects */
-	short	rts_unreach;		/* lookups which failed */
-	short	rts_wildcard;		/* lookups satisfied by a wildcard */
+struct rtstat {
+	uint64_t rts_badredirect;	/* bogus redirect calls */
+	uint64_t rts_dynamic;		/* routes created by redirects */
+	uint64_t rts_newgateway;	/* routes modified by redirects */
+	uint64_t rts_unreach;		/* lookups which failed */
+	uint64_t rts_wildcard;		/* lookups satisfied by a wildcard */
 };
+
 /*
  * Structures for routing messages.
  */
@@ -251,6 +255,7 @@ struct rt_msghdr {
 	u_char	rtm_version;	/* future binary compatibility */
 	u_char	rtm_type;	/* message type */
 	u_short	rtm_index;	/* index for associated ifp */
+	u_short _rtm_spare1;
 	int	rtm_flags;	/* flags, incl. kern & message, e.g. DONE */
 	int	rtm_addrs;	/* bitmask identifying sockaddrs in msg */
 	pid_t	rtm_pid;	/* identify sender */
@@ -410,17 +415,17 @@ struct rt_addrinfo {
 } while (0)
 
 #define	RO_RTFREE(_ro) do {					\
-	if ((_ro)->ro_rt) {					\
-		if ((_ro)->ro_flags & RT_NORTREF) {		\
-			(_ro)->ro_flags &= ~RT_NORTREF;		\
-			(_ro)->ro_rt = NULL;			\
-			(_ro)->ro_lle = NULL;			\
-		} else {					\
-			RT_LOCK((_ro)->ro_rt);			\
-			RTFREE_LOCKED((_ro)->ro_rt);		\
-		}						\
-	}							\
+	if ((_ro)->ro_rt)					\
+		RTFREE((_ro)->ro_rt);				\
 } while (0)
+
+#define	RO_INVALIDATE_CACHE(ro) do {					\
+		RO_RTFREE(ro);						\
+		if ((ro)->ro_lle != NULL) {				\
+			LLE_FREE((ro)->ro_lle);				\
+			(ro)->ro_lle = NULL;				\
+		}							\
+	} while (0)
 
 /*
  * Validate a cached route based on a supplied cookie.  If there is an
@@ -430,10 +435,7 @@ struct rt_addrinfo {
 #define RT_VALIDATE(ro, cookiep, fibnum) do {				\
 	rt_gen_t cookie = RT_GEN(fibnum, (ro)->ro_dst.sa_family);	\
 	if (*(cookiep) != cookie) {					\
-		if ((ro)->ro_rt != NULL) {				\
-			RTFREE((ro)->ro_rt);				\
-			(ro)->ro_rt = NULL;				\
-		}							\
+		RO_INVALIDATE_CACHE(ro);				\
 		*(cookiep) = cookie;					\
 	}								\
 } while (0)
@@ -446,10 +448,10 @@ void	 rt_ifannouncemsg(struct ifnet *, int);
 void	 rt_ifmsg(struct ifnet *);
 void	 rt_missmsg(int, struct rt_addrinfo *, int, int);
 void	 rt_missmsg_fib(int, struct rt_addrinfo *, int, int, int);
-void	 rt_newaddrmsg(int, struct ifaddr *, int, struct rtentry *);
-void	 rt_newaddrmsg_fib(int, struct ifaddr *, int, struct rtentry *, int);
+void	 rt_newaddrmsg_fib(int, struct ifaddr *, struct rtentry *, int);
 int	 rt_addrmsg(int, struct ifaddr *, int);
-int	 rt_routemsg(int, struct ifnet *ifp, int, struct rtentry *, int);
+int	 rt_routemsg(int, struct rtentry *, struct ifnet *ifp, int, int);
+int	 rt_routemsg_info(int, struct rt_addrinfo *, int);
 void	 rt_newmaddrmsg(int, struct ifmultiaddr *);
 int	 rt_setgate(struct rtentry *, struct sockaddr *, struct sockaddr *);
 void 	 rt_maskedcopy(struct sockaddr *, struct sockaddr *, struct sockaddr *);
@@ -458,7 +460,8 @@ void	rt_table_destroy(struct rib_head *);
 u_int	rt_tables_get_gen(int table, int fam);
 
 int	rtsock_addrmsg(int, struct ifaddr *, int);
-int	rtsock_routemsg(int, struct ifnet *ifp, int, struct rtentry *, int);
+int	rtsock_routemsg(int, struct rtentry *, struct ifnet *ifp, int, int);
+int	rtsock_routemsg_info(int, struct rt_addrinfo *, int);
 
 /*
  * Note the following locking behavior:
@@ -489,7 +492,6 @@ int	 rtinit(struct ifaddr *, int, int);
  * For now the protocol indepedent versions are the same as the AF_INET ones
  * but this will change.. 
  */
-int	 rt_getifa_fib(struct rt_addrinfo *, u_int fibnum);
 void	 rtalloc_ign_fib(struct route *ro, u_long ignflags, u_int fibnum);
 struct rtentry *rtalloc1_fib(struct sockaddr *, int, u_long, u_int);
 int	 rtioctl_fib(u_long, caddr_t, u_int);

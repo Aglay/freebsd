@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2019  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -50,6 +50,10 @@ extern int jump_sline;
 extern long jump_sline_fraction;
 extern int shift_count;
 extern long shift_count_fraction;
+extern char rscroll_char;
+extern int rscroll_attr;
+extern int mousecap;
+extern int wheel_lines;
 extern int less_is_more;
 #if LOGFILE
 extern char *namelogfile;
@@ -68,6 +72,11 @@ extern int ul_fg_color, ul_bg_color;
 extern int so_fg_color, so_bg_color;
 extern int bl_fg_color, bl_bg_color;
 extern int sgr_mode;
+#if MSDOS_COMPILER==WIN32C
+#ifndef COMMON_LVB_UNDERSCORE
+#define COMMON_LVB_UNDERSCORE 0x8000
+#endif
+#endif
 #endif
 
 
@@ -81,6 +90,7 @@ opt_o(type, s)
 	char *s;
 {
 	PARG parg;
+	char *filename;
 
 	if (secure)
 	{
@@ -106,7 +116,9 @@ opt_o(type, s)
 		s = skipsp(s);
 		if (namelogfile != NULL)
 			free(namelogfile);
-		namelogfile = lglob(s);
+		filename = lglob(s);
+		namelogfile = shell_unquote(filename);
+		free(filename);
 		use_logfile(namelogfile);
 		sync_logfile();
 		break;
@@ -193,7 +205,7 @@ opt_j(type, s)
 }
 
 	public void
-calc_jump_sline()
+calc_jump_sline(VOID_PARAM)
 {
 	if (jump_sline_fraction < 0)
 		return;
@@ -257,7 +269,7 @@ opt_shift(type, s)
 	}
 }
 	public void
-calc_shift_count()
+calc_shift_count(VOID_PARAM)
 {
 	if (shift_count_fraction < 0)
 		return;
@@ -336,6 +348,7 @@ opt__T(type, s)
 	char *s;
 {
 	PARG parg;
+	char *filename;
 
 	switch (type)
 	{
@@ -346,7 +359,9 @@ opt__T(type, s)
 		s = skipsp(s);
 		if (tags != NULL && tags != ztags)
 			free(tags);
-		tags = lglob(s);
+		filename = lglob(s);
+		tags = shell_unquote(filename);
+		free(filename);
 		break;
 	case QUERY:
 		parg.p_string = tags;
@@ -496,33 +511,13 @@ opt__V(type, s)
 		putstr("less ");
 		putstr(version);
 		putstr(" (");
-#if HAVE_GNU_REGEX
-		putstr("GNU ");
-#endif
-#if HAVE_POSIX_REGCOMP
-		putstr("POSIX ");
-#endif
-#if HAVE_PCRE
-		putstr("PCRE ");
-#endif
-#if HAVE_RE_COMP
-		putstr("BSD ");
-#endif
-#if HAVE_REGCMP
-		putstr("V8 ");
-#endif
-#if HAVE_V8_REGCOMP
-		putstr("Spencer V8 ");
-#endif
-#if !HAVE_GNU_REGEX && !HAVE_POSIX_REGCOMP && !HAVE_PCRE && !HAVE_RE_COMP && !HAVE_REGCMP && !HAVE_V8_REGCOMP
-		putstr("no ");
-#endif
-		putstr("regular expressions)\n");
-		putstr("Copyright (C) 1984-2017  Mark Nudelman\n\n");
+		putstr(pattern_lib_name());
+		putstr(" regular expressions)\n");
+		putstr("Copyright (C) 1984-2019  Mark Nudelman\n\n");
 		putstr("less comes with NO WARRANTY, to the extent permitted by law.\n");
 		putstr("For information about the terms of redistribution,\n");
 		putstr("see the file named README in the less distribution.\n");
-		putstr("Homepage: http://www.greenwoodsoftware.com/less\n");
+		putstr("Home page: http://www.greenwoodsoftware.com/less\n");
 		quit(QUIT_OK);
 		break;
 	}
@@ -540,12 +535,27 @@ colordesc(s, fg_color, bg_color)
 {
 	int fg, bg;
 	int err;
-	
+#if MSDOS_COMPILER==WIN32C
+	int ul = 0;
+ 	
+	if (*s == 'u')
+	{
+		ul = COMMON_LVB_UNDERSCORE;
+		++s;
+	}
+#endif
 	fg = getnum(&s, "D", &err);
 	if (err)
 	{
-		error("Missing fg color in -D", NULL_PARG);
-		return;
+#if MSDOS_COMPILER==WIN32C
+		if (ul)
+			fg = nm_fg_color;
+		else
+#endif
+		{
+			error("Missing fg color in -D", NULL_PARG);
+			return;
+		}
 	}
 	if (*s != '.')
 		bg = nm_bg_color;
@@ -559,6 +569,14 @@ colordesc(s, fg_color, bg_color)
 			return;
 		}
 	}
+#if MSDOS_COMPILER==WIN32C
+	if (*s == 'u')
+	{
+		ul = COMMON_LVB_UNDERSCORE;
+		++s;
+	}
+	fg |= ul;
+#endif
 	if (*s != '\0')
 		error("Extra characters at end of -D option", NULL_PARG);
 	*fg_color = fg;
@@ -718,6 +736,40 @@ opt_quote(type, s)
 }
 
 /*
+ * Handler for the --rscroll option.
+ */
+	/*ARGSUSED*/
+	public void
+opt_rscroll(type, s)
+	int type;
+	char *s;
+{
+	PARG p;
+
+	switch (type)
+	{
+	case INIT:
+	case TOGGLE: {
+		char *fmt;
+		int attr = AT_STANDOUT;
+		setfmt(s, &fmt, &attr, "*s>");
+		if (strcmp(fmt, "-") == 0)
+		{
+			rscroll_char = 0;
+		} else
+		{
+			rscroll_char = *fmt ? *fmt : '>';
+			rscroll_attr = attr;
+		}
+		break; }
+	case QUERY: {
+		p.p_string = rscroll_char ? prchar(rscroll_char) : "-";
+		error("rscroll char is %s", &p);
+		break; }
+	}
+}
+
+/*
  * "-?" means display a help message.
  * If from the command line, exit immediately.
  */
@@ -739,10 +791,54 @@ opt_query(type, s)
 }
 
 /*
+ * Handler for the --mouse option.
+ */
+	/*ARGSUSED*/
+	public void
+opt_mousecap(type, s)
+	int type;
+	char *s;
+{
+	switch (type)
+	{
+	case TOGGLE:
+		if (mousecap == OPT_OFF)
+			deinit_mouse();
+		else
+			init_mouse();
+		break;
+	case INIT:
+	case QUERY:
+		break;
+	}
+}
+
+/*
+ * Handler for the --wheel-lines option.
+ */
+	/*ARGSUSED*/
+	public void
+opt_wheel_lines(type, s)
+	int type;
+	char *s;
+{
+	switch (type)
+	{
+	case INIT:
+	case TOGGLE:
+		if (wheel_lines <= 0)
+			wheel_lines = default_wheel_lines();
+		break;
+	case QUERY:
+		break;
+	}
+}
+
+/*
  * Get the "screen window" size.
  */
 	public int
-get_swindow()
+get_swindow(VOID_PARAM)
 {
 	if (swindow > 0)
 		return (swindow);

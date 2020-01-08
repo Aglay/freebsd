@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2011 Konstantin Belousov <kib@FreeBSD.org>.
  * All rights reserved.
  *
@@ -29,6 +31,7 @@
 #define RTLD_PRINTF_H 1
 
 #include <sys/cdefs.h>
+#include <stdarg.h>
 #include <unistd.h>
 
 int rtld_snprintf(char *buf, size_t bufsize, const char *fmt, ...)

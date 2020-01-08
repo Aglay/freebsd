@@ -85,7 +85,7 @@
 #define	PIPEC		(!SECURE)
 
 /*
- * LOGFILE is 1 if you wish to allow the -l option (to create log files).
+ * LOGFILE is 1 if you wish to allow the -o option (to create log files).
  */
 #define	LOGFILE		(!SECURE)
 
@@ -138,7 +138,7 @@
 /*
  * HAVE_ANSI_PROTOS	is 1 if your compiler supports ANSI function prototypes.
  */
-#define HAVE_ANSI_PROTOS 1
+#define HAVE_ANSI_PROTOS	1
 
 /*
  * HAVE_SYS_TYPES_H is 1 if your system has <sys/types.h>.
@@ -169,7 +169,7 @@
 /*
  * Default shell metacharacters and meta-escape character.
  */
-#define	DEF_METACHARS	"; *?\t\n'\"()<>[]|&^`#\\$%=~"
+#define	DEF_METACHARS	"; *?\t\n'\"()<>[]|&^`#\\$%=~{},"
 #define	DEF_METAESCAPE	"\\"
 
 /* 
@@ -265,11 +265,17 @@
 /* PCRE (Perl-compatible regular expression) library */
 /* #undef HAVE_PCRE */
 
+/* PCRE2 (Perl-compatible regular expression) library */
+/* #undef HAVE_PCRE2 */
+
 /* Define to 1 if you have the `popen' function. */
 #define HAVE_POPEN 1
 
 /* POSIX regcomp() and regex.h */
 #define HAVE_POSIX_REGCOMP 1
+
+/* Define to 1 if you have the `realpath' function. */
+#define HAVE_REALPATH 1
 
 /* System V regcmp() */
 /* #undef HAVE_REGCMP */

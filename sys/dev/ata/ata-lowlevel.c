@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 - 2008 Søren Schmidt <sos@FreeBSD.org>
  * All rights reserved.
  *
@@ -235,7 +237,7 @@ begin_finished:
 
 begin_continue:
     callout_reset(&request->callout, request->timeout * hz,
-		  (timeout_t*)ata_timeout, request);
+		  ata_timeout, request);
     return ATA_OP_CONTINUES;
 }
 

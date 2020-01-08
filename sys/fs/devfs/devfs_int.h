@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Poul-Henning Kamp.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -68,6 +70,8 @@ struct cdev_priv {
 	void			*cdp_dtr_cb_arg;
 
 	LIST_HEAD(, cdev_privdata) cdp_fdpriv;
+
+	struct mtx		cdp_threadlock;
 };
 
 #define	cdev2priv(c)	__containerof(c, struct cdev_priv, cdp_c)

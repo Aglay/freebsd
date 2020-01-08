@@ -2,6 +2,8 @@
  * FreeBSD/CAM specific routines for LSI '909 FC  adapters.
  * FreeBSD Version.
  *
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD AND BSD-3-Clause
+ *
  * Copyright (c)  2000, 2001 by Greg Ansley
  *
  * Redistribution and use in source and binary forms, with or without
@@ -111,7 +113,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 
 static void mpt_poll(struct cam_sim *);
-static timeout_t mpt_timeout;
+static callout_func_t mpt_timeout;
 static void mpt_action(struct cam_sim *, union ccb *);
 static int
 mpt_get_spi_settings(struct mpt_softc *, struct ccb_trans_settings *);

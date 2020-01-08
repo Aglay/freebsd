@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -47,6 +49,11 @@ typedef	__off_t		fpos_t;
 #ifndef _SIZE_T_DECLARED
 typedef	__size_t	size_t;
 #define	_SIZE_T_DECLARED
+#endif
+
+#ifndef _RSIZE_T_DEFINED
+#define _RSIZE_T_DEFINED
+typedef size_t rsize_t;
 #endif
 
 #if __POSIX_VISIBLE >= 200809
@@ -262,7 +269,9 @@ long	 ftell(FILE *);
 size_t	 fwrite(const void * __restrict, size_t, size_t, FILE * __restrict);
 int	 getc(FILE *);
 int	 getchar(void);
-char	*gets(char *);
+#if __EXT1_VISIBLE
+char	*gets_s(char *, rsize_t);
+#endif
 void	 perror(const char *);
 int	 printf(const char * __restrict, ...);
 int	 putc(int, FILE *);
@@ -285,14 +294,16 @@ int	 vprintf(const char * __restrict, __va_list);
 int	 vsprintf(char * __restrict, const char * __restrict,
 	    __va_list);
 
-#if __ISO_C_VISIBLE >= 1999
+#if __ISO_C_VISIBLE >= 1999 || __POSIX_VISIBLE >= 199506
 int	 snprintf(char * __restrict, size_t, const char * __restrict,
 	    ...) __printflike(3, 4);
+int	 vsnprintf(char * __restrict, size_t, const char * __restrict,
+	    __va_list) __printflike(3, 0);
+#endif
+#if __ISO_C_VISIBLE >= 1999
 int	 vfscanf(FILE * __restrict, const char * __restrict, __va_list)
 	    __scanflike(2, 0);
 int	 vscanf(const char * __restrict, __va_list) __scanflike(1, 0);
-int	 vsnprintf(char * __restrict, size_t, const char * __restrict,
-	    __va_list) __printflike(3, 0);
 int	 vsscanf(const char * __restrict, const char * __restrict, __va_list)
 	    __scanflike(2, 0);
 #endif

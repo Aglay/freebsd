@@ -50,11 +50,34 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
+#include <dev/ofw/openfirm.h>
+#include <dev/ofw/ofw_pci.h>
+#include <dev/ofw/ofw_bus.h>
+#include <dev/ofw/ofw_bus_subr.h>
+
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcib_private.h>
 
+#include <machine/intr_machdep.h>
+
 #include "pcib_if.h"
+
+DECLARE_CLASS(ofw_pcib_pci_driver);
+
+struct fsl_pcib_softc {
+        /*
+         * This is here so that we can use pci bridge methods, too - the
+         * generic routines only need the dev, secbus and subbus members
+         * filled.
+         *
+         * XXX: This should be extracted from ofw_pcib_pci.c, and shared in a
+         * header.
+         */
+        struct pcib_softc       ops_pcib_sc;
+	phandle_t		ops_node;
+        struct ofw_bus_iinfo    ops_iinfo;
+};
 
 static int
 fsl_pcib_rc_probe(device_t dev)
@@ -69,6 +92,8 @@ fsl_pcib_rc_probe(device_t dev)
 	if (pci_get_subclass(dev) != PCIS_PROCESSOR_POWERPC)
 		return (ENXIO);
 
+	device_set_desc(dev, "MPC85xx Root Complex bridge");
+
 	return (BUS_PROBE_DEFAULT);
 }
 
@@ -79,6 +104,6 @@ static device_method_t fsl_pcib_rc_methods[] = {
 
 static devclass_t fsl_pcib_rc_devclass;
 DEFINE_CLASS_1(pcib, fsl_pcib_rc_driver, fsl_pcib_rc_methods,
-    sizeof(struct pcib_softc), pcib_driver);
-DRIVER_MODULE(rcpcib, pci, fsl_pcib_rc_driver, fsl_pcib_rc_devclass, 0, 0);
-
+    sizeof(struct fsl_pcib_softc), ofw_pcib_pci_driver);
+EARLY_DRIVER_MODULE(rcpcib, pci, fsl_pcib_rc_driver, fsl_pcib_rc_devclass, 0, 0,
+    BUS_PASS_BUS);

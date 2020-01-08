@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -295,12 +295,12 @@ typedef struct acpi_namespace_node
     union acpi_operand_object       *Object;        /* Interpreter object */
     UINT8                           DescriptorType; /* Differentiate object descriptor types */
     UINT8                           Type;           /* ACPI Type associated with this name */
-    UINT8                           Flags;          /* Miscellaneous flags */
-    ACPI_OWNER_ID                   OwnerId;        /* Node creator */
+    UINT16                          Flags;          /* Miscellaneous flags */
     ACPI_NAME_UNION                 Name;           /* ACPI Name, always 4 chars per ACPI spec */
     struct acpi_namespace_node      *Parent;        /* Parent node */
     struct acpi_namespace_node      *Child;         /* First child */
     struct acpi_namespace_node      *Peer;          /* First peer */
+    ACPI_OWNER_ID                   OwnerId;        /* Node creator */
 
     /*
      * The following fields are used by the ASL compiler and disassembler only
@@ -327,6 +327,7 @@ typedef struct acpi_namespace_node
 #define ANOBJ_SUBTREE_HAS_INI           0x10    /* Used to optimize device initialization */
 #define ANOBJ_EVALUATED                 0x20    /* Set on first evaluation of node */
 #define ANOBJ_ALLOCATED_BUFFER          0x40    /* Method AML buffer is dynamic (InstallMethod) */
+#define ANOBJ_NODE_EARLY_INIT           0x80    /* AcpiExec only: Node was create via init file (-fi) */
 
 #define ANOBJ_IS_EXTERNAL               0x08    /* iASL only: This object created via External() */
 #define ANOBJ_METHOD_NO_RETVAL          0x10    /* iASL only: Method has no return value */
@@ -479,7 +480,7 @@ ACPI_STATUS (*ACPI_INTERNAL_METHOD) (
  */
 typedef struct acpi_name_info
 {
-    char                        Name[ACPI_NAME_SIZE];
+    char                        Name[ACPI_NAMESEG_SIZE];
     UINT16                      ArgumentList;
     UINT8                       ExpectedBtypes;
 
@@ -567,7 +568,7 @@ typedef ACPI_STATUS (*ACPI_OBJECT_CONVERTER) (
 
 typedef struct acpi_simple_repair_info
 {
-    char                        Name[ACPI_NAME_SIZE];
+    char                        Name[ACPI_NAMESEG_SIZE];
     UINT32                      UnexpectedBtypes;
     UINT32                      PackageIndex;
     ACPI_OBJECT_CONVERTER       ObjectConverter;
@@ -596,9 +597,9 @@ typedef struct acpi_simple_repair_info
 
 typedef struct acpi_reg_walk_info
 {
-    ACPI_ADR_SPACE_TYPE     SpaceId;
     UINT32                  Function;
     UINT32                  RegRunCount;
+    ACPI_ADR_SPACE_TYPE     SpaceId;
 
 } ACPI_REG_WALK_INFO;
 
@@ -812,7 +813,7 @@ typedef struct acpi_update_state
 typedef struct acpi_pkg_state
 {
     ACPI_STATE_COMMON
-    UINT16                          Index;
+    UINT32                          Index;
     union acpi_operand_object       *SourceObject;
     union acpi_operand_object       *DestObject;
     struct acpi_walk_state          *WalkState;
@@ -833,7 +834,7 @@ typedef struct acpi_control_state
     union acpi_parse_object         *PredicateOp;
     UINT8                           *AmlPredicateStart;     /* Start of if/while predicate */
     UINT8                           *PackageEnd;            /* End of if/while block */
-    UINT32                          LoopCount;              /* While() loop counter */
+    UINT64                          LoopTimeout;            /* While() loop timeout */
 
 } ACPI_CONTROL_STATE;
 
@@ -1104,7 +1105,7 @@ typedef struct acpi_comment_addr_node
 
 /*
  * File node - used for "Include" operator file stack and
- * depdendency tree for the -ca option
+ * dependency tree for the -ca option
  */
 typedef struct acpi_file_node
 {
@@ -1146,7 +1147,7 @@ typedef struct acpi_parse_obj_named
 
 /* This version is used by the iASL compiler only */
 
-#define ACPI_MAX_PARSEOP_NAME   20
+#define ACPI_MAX_PARSEOP_NAME       20
 
 typedef struct acpi_parse_obj_asl
 {
@@ -1190,11 +1191,12 @@ typedef union acpi_parse_object
 
 typedef struct asl_comment_state
 {
-    UINT8                   CommentType;
-    UINT32                  SpacesBefore;
-    ACPI_PARSE_OBJECT       *Latest_Parse_Node;
-    ACPI_PARSE_OBJECT       *ParsingParenBraceNode;
-    BOOLEAN                 CaptureComments;
+    UINT8                           CommentType;
+    UINT32                          SpacesBefore;
+    ACPI_PARSE_OBJECT               *LatestParseOp;
+    ACPI_PARSE_OBJECT               *ParsingParenBraceNode;
+    BOOLEAN                         CaptureComments;
+
 } ASL_COMMENT_STATE;
 
 
@@ -1530,16 +1532,17 @@ typedef struct acpi_db_method_info
     ACPI_OBJECT_TYPE                *Types;
 
     /*
-     * Arguments to be passed to method for the command
-     * Threads -
-     *   the Number of threads, ID of current thread and
-     *   Index of current thread inside all them created.
+     * Arguments to be passed to method for the commands Threads and
+     * Background. Note, ACPI specifies a maximum of 7 arguments (0 - 6).
+     *
+     * For the Threads command, the Number of threads, ID of current
+     * thread and Index of current thread inside all them created.
      */
     char                            InitArgs;
 #ifdef ACPI_DEBUGGER
-    ACPI_OBJECT_TYPE                ArgTypes[4];
+    ACPI_OBJECT_TYPE                ArgTypes[ACPI_METHOD_NUM_ARGS];
 #endif
-    char                            *Arguments[4];
+    char                            *Arguments[ACPI_METHOD_NUM_ARGS];
     char                            NumThreadsStr[11];
     char                            IdOfThreadStr[11];
     char                            IndexOfThreadStr[11];

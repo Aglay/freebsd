@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -34,3 +36,4 @@
 #define	_PATH_EXPORTS		"/etc/exports"
 #define	_PATH_RMOUNTLIST	"/var/db/mountdtab"
 #define _PATH_MOUNTDPID		"/var/run/mountd.pid"
+#define	_PATH_MOUNTDDEBUG	"/var/log/mountd.debug"

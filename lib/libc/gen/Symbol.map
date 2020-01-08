@@ -65,8 +65,6 @@ FBSD_1.0 {
 	pthread_testcancel;
 	alarm;
 	arc4random;
-	arc4random_addrandom;
-	arc4random_stir;
 	__assert;
 	check_utility_compat;
 	clock;
@@ -105,6 +103,7 @@ FBSD_1.0 {
 	sys_errlist;
 	sys_nerr;
 	errno;
+	exect;
 	execl;
 	execle;
 	execlp;
@@ -332,7 +331,6 @@ FBSD_1.1 {
 };
 
 FBSD_1.2 {
-	basename_r;
 	cfmakesane;
 	endutxent;
 	getpagesizes;
@@ -340,6 +338,7 @@ FBSD_1.2 {
 	getutxid;
 	getutxline;
 	getutxuser;
+	pthread_getthreadid_np;
 	pututxline;
 	sem_close;
 	sem_destroy;
@@ -395,9 +394,11 @@ FBSD_1.4 {
 FBSD_1.5 {
 	alphasort;
 	basename;
+	daemonfd;
 	devname;
 	devname_r;
 	dirname;
+	elf_aux_info;
 	fts_children;
 	fts_close;
 	fts_get_clientptr;
@@ -407,6 +408,7 @@ FBSD_1.5 {
 	fts_set;
 	fts_set_clientptr;
 	ftw;
+	getentropy;
 	getmntinfo;
 	glob;
 	globfree;
@@ -416,6 +418,14 @@ FBSD_1.5 {
 	scandir;
 	scandir_b;
 	sem_clockwait_np;
+	setproctitle_fast;
+	timespec_get;
+};
+
+FBSD_1.6 {
+	sigandset;
+	sigisemptyset;
+	sigorset;
 };
 
 FBSDprivate_1.0 {
@@ -506,7 +516,6 @@ FBSDprivate_1.0 {
 	__opendir2;
 	__pause;
 	_pause;
-	__pw_scan;	/* Used by (at least) libutil */
 	__raise;
 	_raise;
 	__sleep;
@@ -540,6 +549,7 @@ FBSDprivate_1.0 {
 	__libc_tcdrain;
 
 	__elf_aux_vector;
+	__pthread_distribute_static_tls;
 	__pthread_map_stacks_exec;
 	__fillcontextx;
 	__fillcontextx2;

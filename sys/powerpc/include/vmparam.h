@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1995, 1996 Wolfgang Solfrank.
  * Copyright (C) 1995, 1996 TooLs GmbH.
  * All rights reserved.
@@ -35,6 +37,10 @@
 #ifndef _MACHINE_VMPARAM_H_
 #define	_MACHINE_VMPARAM_H_
 
+#ifndef LOCORE
+#include <machine/md_var.h>
+#endif
+
 #define	USRSTACK	SHAREDPAGE
 
 #ifndef	MAXTSIZ
@@ -46,7 +52,11 @@
 #endif
 
 #ifndef	MAXDSIZ
+#ifdef __powerpc64__
+#define	MAXDSIZ		(32UL*1024*1024*1024)	/* max data size */
+#else
 #define	MAXDSIZ		(1*1024*1024*1024)	/* max data size */
+#endif
 #endif
 
 #ifndef	DFLSSIZ
@@ -54,56 +64,43 @@
 #endif
 
 #ifndef	MAXSSIZ
+#ifdef __powerpc64__
+#define	MAXSSIZ		(512*1024*1024)		/* max stack size */
+#else
 #define	MAXSSIZ		(64*1024*1024)		/* max stack size */
+#endif
 #endif
 
 #ifdef AIM
-#define	VM_MAXUSER_ADDRESS32	((vm_offset_t)0xfffff000)
+#define	VM_MAXUSER_ADDRESS32	0xfffff000
 #else
-#define	VM_MAXUSER_ADDRESS32	((vm_offset_t)0x7ffff000)
+#define	VM_MAXUSER_ADDRESS32	0x7ffff000
 #endif
 
 /*
  * Would like to have MAX addresses = 0, but this doesn't (currently) work
  */
-#if !defined(LOCORE)
 #ifdef __powerpc64__
-#define	VM_MIN_ADDRESS		(0x0000000000000000UL)
-#ifdef AIM
-#define	VM_MAXUSER_ADDRESS	(0xfffffffffffff000UL)
+#define	VM_MIN_ADDRESS		0x0000000000000000
+#define	VM_MAXUSER_ADDRESS	0x3ffffffffffff000
+#define	VM_MAX_ADDRESS		0xffffffffffffffff
+#define	VM_MIN_KERNEL_ADDRESS		0xe000000000000000
+#define	VM_MAX_KERNEL_ADDRESS		0xe0000007ffffffff
+#define	VM_MAX_SAFE_KERNEL_ADDRESS	VM_MAX_KERNEL_ADDRESS
 #else
-#define	VM_MAXUSER_ADDRESS	(0x7ffffffffffff000UL)
-#endif
-#define	VM_MAX_ADDRESS		(0xffffffffffffffffUL)
-#else
-#define	VM_MIN_ADDRESS		((vm_offset_t)0)
-#define	VM_MAXUSER_ADDRESS	VM_MAXUSER_ADDRESS32
-#define	VM_MAX_ADDRESS		((vm_offset_t)0xffffffff)
-#endif
-#define	SHAREDPAGE		(VM_MAXUSER_ADDRESS - PAGE_SIZE)
-#else /* LOCORE */
-#ifdef BOOKE
 #define	VM_MIN_ADDRESS		0
-#ifdef __powerpc64__
-#define	VM_MAXUSER_ADDRESS	0x7ffffffffffff000
-#else
-#define	VM_MAXUSER_ADDRESS	0x7ffff000
+#define	VM_MAXUSER_ADDRESS	VM_MAXUSER_ADDRESS32
+#define	VM_MAX_ADDRESS		0xffffffff
 #endif
-#endif
-#endif /* LOCORE */
+
+#define	SHAREDPAGE		(VM_MAXUSER_ADDRESS - PAGE_SIZE)
 
 #define	FREEBSD32_SHAREDPAGE	(VM_MAXUSER_ADDRESS32 - PAGE_SIZE)
 #define	FREEBSD32_USRSTACK	FREEBSD32_SHAREDPAGE
 
-#ifdef __powerpc64__
-#define	VM_MIN_KERNEL_ADDRESS		0xc000000000000000UL
-#define	VM_MAX_KERNEL_ADDRESS		0xc0000001c7ffffffUL
-#define	VM_MAX_SAFE_KERNEL_ADDRESS	VM_MAX_KERNEL_ADDRESS
-#endif
+#define	KERNBASE		0x00100100	/* start of kernel virtual */
 
 #ifdef AIM
-#define	KERNBASE		0x00100000UL	/* start of kernel virtual */
-
 #ifndef __powerpc64__
 #define	VM_MIN_KERNEL_ADDRESS	((vm_offset_t)KERNEL_SR << ADDR_SR_SHFT)
 #define	VM_MAX_SAFE_KERNEL_ADDRESS (VM_MIN_KERNEL_ADDRESS + 2*SEGMENT_LENGTH -1)
@@ -118,17 +115,12 @@
 
 #else /* Book-E */
 
+/* Use the direct map for UMA small allocs on powerpc64. */
 #ifdef __powerpc64__
-#ifndef LOCORE
-#define	KERNBASE	0xc000000000000000UL	/* start of kernel virtual */
+#define UMA_MD_SMALL_ALLOC
 #else
-#define	KERNBASE	0xc000000000000000	/* start of kernel virtual */
-#endif
-#else
-#define	KERNBASE		0xc0000000	/* start of kernel virtual */
-
-#define	VM_MIN_KERNEL_ADDRESS	KERNBASE
-#define	VM_MAX_KERNEL_ADDRESS	0xffffefff
+#define	VM_MIN_KERNEL_ADDRESS		0xc0000000
+#define	VM_MAX_KERNEL_ADDRESS		0xffffefff
 #define	VM_MAX_SAFE_KERNEL_ADDRESS	VM_MAX_KERNEL_ADDRESS
 #endif
 
@@ -141,7 +133,15 @@ struct pmap_physseg {
 };
 #endif
 
-#define	VM_PHYSSEG_MAX		16	/* 1? */
+#define	VM_PHYSSEG_MAX		16
+
+#define	PHYS_AVAIL_SZ	256	/* Allows up to 16GB Ram on pSeries with
+				 * logical memory block size of 64MB.
+				 * For more Ram increase the lmb or this value.
+				 */
+
+/* XXX This is non-sensical.  Phys avail should hold contiguous regions. */
+#define	PHYS_AVAIL_ENTRIES	PHYS_AVAIL_SZ
 
 /*
  * The physical address space is densely populated on 32-bit systems,
@@ -226,7 +226,43 @@ struct pmap_physseg {
  */
 #define	SFBUF
 #define	SFBUF_NOMD
-#define	SFBUF_OPTIONAL_DIRECT_MAP	hw_direct_map
-#define	SFBUF_PHYS_DMAP(x)		(x)
- 
+
+/*
+ * We (usually) have a direct map of all physical memory, so provide
+ * a macro to use to get the kernel VA address for a given PA. Check the
+ * value of PMAP_HAS_PMAP before using.
+ */
+#ifndef LOCORE
+#ifdef __powerpc64__
+#define	DMAP_BASE_ADDRESS	0xc000000000000000UL
+#define	DMAP_MAX_ADDRESS	0xcfffffffffffffffUL
+#else
+#define	DMAP_BASE_ADDRESS	0x00000000UL
+#define	DMAP_MAX_ADDRESS	0xbfffffffUL
+#endif
+#endif
+
+#if defined(__powerpc64__) || defined(BOOKE)
+/*
+ * powerpc64 and Book-E will provide their own page array allocators.
+ *
+ * On AIM, this will allocate a single virtual array, with pages from the
+ * correct memory domains.
+ * On Book-E this will let us put the array in TLB1, removing the need for TLB
+ * thrashing.
+ *
+ * VM_MIN_KERNEL_ADDRESS is just a dummy.  It will get set by the MMU driver.
+ */
+#define	PA_MIN_ADDRESS		VM_MIN_KERNEL_ADDRESS
+#define	PMAP_HAS_PAGE_ARRAY	1
+#endif
+
+#define	PMAP_HAS_DMAP	(hw_direct_map)
+#define PHYS_TO_DMAP(x) ({						\
+	KASSERT(hw_direct_map, ("Direct map not provided by PMAP"));	\
+	(x) | DMAP_BASE_ADDRESS; })
+#define DMAP_TO_PHYS(x) ({						\
+	KASSERT(hw_direct_map, ("Direct map not provided by PMAP"));	\
+	(x) &~ DMAP_BASE_ADDRESS; })
+
 #endif /* _MACHINE_VMPARAM_H_ */

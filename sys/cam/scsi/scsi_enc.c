@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000 Matthew Jacob
  * All rights reserved.
  *
@@ -37,9 +39,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
+#include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/sbuf.h>
 #include <sys/sx.h>
+#include <sys/sysent.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
@@ -76,6 +80,17 @@ static enctyp enc_type(struct ccb_getdev *);
 
 SYSCTL_NODE(_kern_cam, OID_AUTO, enc, CTLFLAG_RD, 0,
             "CAM Enclosure Services driver");
+
+#if defined(DEBUG) || defined(ENC_DEBUG)
+int enc_verbose = 1;
+#else
+int enc_verbose = 0;
+#endif
+SYSCTL_INT(_kern_cam_enc, OID_AUTO, verbose, CTLFLAG_RWTUN,
+           &enc_verbose, 0, "Enable verbose logging");
+
+const char *elm_type_names[] = ELM_TYPE_NAMES;
+CTASSERT(nitems(elm_type_names) - 1 == ELMTYP_LAST);
 
 static struct periph_driver encdriver = {
 	enc_init, "ses",
@@ -190,10 +205,7 @@ enc_dtor(struct cam_periph *periph)
 	if (enc->enc_vec.softc_cleanup != NULL)
 		enc->enc_vec.softc_cleanup(enc);
 
-	if (enc->enc_boot_hold_ch.ich_func != NULL) {
-		config_intrhook_disestablish(&enc->enc_boot_hold_ch);
-		enc->enc_boot_hold_ch.ich_func = NULL;
-	}
+	root_mount_rel(&enc->enc_rootmount);
 
 	ENC_FREE(enc);
 }
@@ -228,11 +240,17 @@ enc_async(void *callback_arg, uint32_t code, struct cam_path *path, void *arg)
 				struct enc_softc *softc;
 
 				softc = (struct enc_softc *)periph->softc;
-				if (xpt_path_path_id(periph->path) != path_id
-				 || softc == NULL
-				 || (softc->enc_flags & ENC_FLAG_INITIALIZED)
-				  == 0
-				 || softc->enc_vec.device_found == NULL)
+
+				/* Check this SEP is ready. */
+				if (softc == NULL || (softc->enc_flags &
+				     ENC_FLAG_INITIALIZED) == 0 ||
+				    softc->enc_vec.device_found == NULL)
+					continue;
+
+				/* Check this SEP may manage this device. */
+				if (xpt_path_path_id(periph->path) != path_id &&
+				    (softc->enc_type != ENC_SEMB_SES ||
+				     cgd->protocol != PROTO_ATA))
 					continue;
 
 				softc->enc_vec.device_found(softc);
@@ -265,7 +283,7 @@ enc_open(struct cdev *dev, int flags, int fmt, struct thread *td)
 	int error = 0;
 
 	periph = (struct cam_periph *)dev->si_drv1;
-	if (cam_periph_acquire(periph) != CAM_REQ_CMP)
+	if (cam_periph_acquire(periph) != 0)
 		return (ENXIO);
 
 	cam_periph_lock(periph);
@@ -333,7 +351,7 @@ enc_error(union ccb *ccb, uint32_t cflags, uint32_t sflags)
 	periph = xpt_path_periph(ccb->ccb_h.path);
 	softc = (struct enc_softc *)periph->softc;
 
-	return (cam_periph_error(ccb, cflags, sflags, &softc->saved_ccb));
+	return (cam_periph_error(ccb, cflags, sflags));
 }
 
 static int
@@ -352,6 +370,10 @@ enc_ioctl(struct cdev *dev, u_long cmd, caddr_t arg_addr, int flag,
 	void *addr;
 	int error, i;
 
+#ifdef	COMPAT_FREEBSD32
+	if (SV_PROC_FLAG(td->td_proc, SV_ILP32))
+		return (ENOTTY);
+#endif
 
 	if (arg_addr)
 		addr = *((caddr_t *) arg_addr);
@@ -424,7 +446,7 @@ enc_ioctl(struct cdev *dev, u_long cmd, caddr_t arg_addr, int flag,
 			encioc_element_t kelm;
 			kelm.elm_idx = i;
 			kelm.elm_subenc_id = cache->elm_map[i].subenclosure;
-			kelm.elm_type = cache->elm_map[i].enctype;
+			kelm.elm_type = cache->elm_map[i].elm_type;
 			error = copyout(&kelm, &uelm[i], sizeof(kelm));
 			if (error)
 				break;
@@ -676,14 +698,8 @@ enc_type(struct ccb_getdev *cgd)
 	buflen = min(sizeof(cgd->inq_data),
 	    SID_ADDITIONAL_LENGTH(&cgd->inq_data));
 
-	if ((iqd[0] & 0x1f) == T_ENCLOSURE) {
-		if ((iqd[2] & 0x7) > 2) {
-			return (ENC_SES);
-		} else {
-			return (ENC_SES_SCSI2);
-		}
-		return (ENC_NONE);
-	}
+	if ((iqd[0] & 0x1f) == T_ENCLOSURE)
+		return (ENC_SES);
 
 #ifdef	SES_ENABLE_PASSTHROUGH
 	if ((iqd[6] & 0x40) && (iqd[2] & 0x7) >= 2) {
@@ -816,7 +832,6 @@ enc_daemon(void *arg)
 	cam_periph_lock(enc->periph);
 	while ((enc->enc_flags & ENC_FLAG_SHUTDOWN) == 0) {
 		if (enc->pending_actions == 0) {
-			struct intr_config_hook *hook;
 
 			/*
 			 * Reset callout and msleep, or
@@ -829,11 +844,7 @@ enc_daemon(void *arg)
 			 * We've been through our state machine at least
 			 * once.  Allow the transition to userland.
 			 */
-			hook = &enc->enc_boot_hold_ch;
-			if (hook->ich_func != NULL) {
-				config_intrhook_disestablish(hook);
-				hook->ich_func = NULL;
-			}
+			root_mount_rel(&enc->enc_rootmount);
 
 			callout_reset(&enc->status_updater, 60*hz,
 				      enc_status_updater, enc);
@@ -857,7 +868,7 @@ enc_kproc_init(enc_softc_t *enc)
 
 	callout_init_mtx(&enc->status_updater, cam_periph_mtx(enc->periph), 0);
 
-	if (cam_periph_acquire(enc->periph) != CAM_REQ_CMP)
+	if (cam_periph_acquire(enc->periph) != 0)
 		return (ENXIO);
 
 	result = kproc_create(enc_daemon, enc, &enc->enc_daemon, /*flags*/0,
@@ -871,22 +882,6 @@ enc_kproc_init(enc_softc_t *enc)
 	} else
 		cam_periph_release(enc->periph);
 	return (result);
-}
- 
-/**
- * \brief Interrupt configuration hook callback associated with
- *        enc_boot_hold_ch.
- *
- * Since interrupts are always functional at the time of enclosure
- * configuration, there is nothing to be done when the callback occurs.
- * This hook is only registered to hold up boot processing while initial
- * eclosure processing occurs.
- * 
- * \param arg  The enclosure softc, but currently unused in this callback.
- */
-static void
-enc_nop_confighook_cb(void *arg __unused)
-{
 }
 
 static cam_status
@@ -920,7 +915,6 @@ enc_ctor(struct cam_periph *periph, void *arg)
 
 	switch (enc->enc_type) {
 	case ENC_SES:
-	case ENC_SES_SCSI2:
 	case ENC_SES_PASSTHROUGH:
 	case ENC_SEMB_SES:
 		err = ses_softc_init(enc);
@@ -946,9 +940,7 @@ enc_ctor(struct cam_periph *periph, void *arg)
 	 * present.
 	 */
 	if (enc->enc_vec.poll_status != NULL) {
-		enc->enc_boot_hold_ch.ich_func = enc_nop_confighook_cb;
-		enc->enc_boot_hold_ch.ich_arg = enc;
-		config_intrhook_establish(&enc->enc_boot_hold_ch);
+		root_mount_hold_token(periph->periph_name, &enc->enc_rootmount);
 	}
 
 	/*
@@ -973,7 +965,7 @@ enc_ctor(struct cam_periph *periph, void *arg)
 	 * instance for it.  We'll release this reference once the devfs
 	 * instance has been freed.
 	 */
-	if (cam_periph_acquire(periph) != CAM_REQ_CMP) {
+	if (cam_periph_acquire(periph) != 0) {
 		xpt_print(periph->path, "%s: lost periph during "
 			  "registration!\n", __func__);
 		cam_periph_lock(periph);
@@ -1009,17 +1001,14 @@ enc_ctor(struct cam_periph *periph, void *arg)
 	case ENC_NONE:
 		tname = "No ENC device";
 		break;
-	case ENC_SES_SCSI2:
-		tname = "SCSI-2 ENC Device";
-		break;
 	case ENC_SES:
-		tname = "SCSI-3 ENC Device";
+		tname = "SES Device";
 		break;
         case ENC_SES_PASSTHROUGH:
-		tname = "ENC Passthrough Device";
+		tname = "SES Passthrough Device";
 		break;
         case ENC_SAFT:
-		tname = "SAF-TE Compliant Device";
+		tname = "SAF-TE Device";
 		break;
 	case ENC_SEMB_SES:
 		tname = "SEMB SES Device";

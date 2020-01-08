@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
  *
@@ -87,7 +89,7 @@ pkcs5v2_genkey(uint8_t *key, unsigned keylen, const uint8_t *salt,
 }
 
 #ifndef _KERNEL
-#ifndef _STAND
+#ifndef _STANDALONE
 /*
  * Return the number of microseconds needed for 'interations' iterations.
  */
@@ -95,7 +97,7 @@ static int
 pkcs5v2_probe(int iterations)
 {
 	uint8_t	key[G_ELI_USERKEYLEN], salt[G_ELI_SALTLEN];
-	uint8_t passphrase[] = "passphrase";
+	const char passphrase[] = "passphrase";
 	struct rusage start, end;
 	int usecs;
 
@@ -125,5 +127,5 @@ pkcs5v2_calculate(int usecs)
 	}
 	return (((intmax_t)iterations * (intmax_t)usecs) / v);
 }
-#endif	/* !_STAND */
+#endif	/* !_STANDALONE */
 #endif	/* !_KERNEL */

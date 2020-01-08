@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Isilon Inc http://www.isilon.com/
  * Authors: Doug Rabson <dfr@rabson.org>
  * Developed with Red Inc: Alfred Perlstein <alfred@freebsd.org>
@@ -251,7 +253,7 @@ nlm_advlock_internal(struct vnode *vp, void *id, int op, struct flock *fl,
 	td->td_ucred = vp->v_mount->mnt_cred;
 	crhold(td->td_ucred);
 	if (unlock_vp)
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 
 	host = nlm_find_host_by_name(servername, sa, vers);
 	auth = authunix_create(cred);

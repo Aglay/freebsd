@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2000 Assar Westerlund
  * All rights reserved.
  *
@@ -107,16 +109,6 @@ struct l_cmsghdr {
 #define CMSG_HDRSZ		CMSG_LEN(0)
 #define L_CMSG_HDRSZ		LINUX_CMSG_LEN(0)
 
-/* Supported address families */
-
-#define	LINUX_AF_UNSPEC		0
-#define	LINUX_AF_UNIX		1
-#define	LINUX_AF_INET		2
-#define	LINUX_AF_AX25		3
-#define	LINUX_AF_IPX		4
-#define	LINUX_AF_APPLETALK	5
-#define	LINUX_AF_INET6		10
-
 /* Supported socket types */
 
 #define	LINUX_SOCK_STREAM	1
@@ -150,19 +142,19 @@ struct linux_accept_args {
 int linux_accept(struct thread *td, struct linux_accept_args *args);
 
 /* Operations for socketcall */
-#define	LINUX_SOCKET 		1
+#define	LINUX_SOCKET		1
 #define	LINUX_BIND		2
-#define	LINUX_CONNECT 		3
-#define	LINUX_LISTEN 		4
-#define	LINUX_ACCEPT 		5
+#define	LINUX_CONNECT		3
+#define	LINUX_LISTEN		4
+#define	LINUX_ACCEPT		5
 #define	LINUX_GETSOCKNAME	6
 #define	LINUX_GETPEERNAME	7
 #define	LINUX_SOCKETPAIR	8
 #define	LINUX_SEND		9
 #define	LINUX_RECV		10
-#define	LINUX_SENDTO 		11
-#define	LINUX_RECVFROM 		12
-#define	LINUX_SHUTDOWN 		13
+#define	LINUX_SENDTO		11
+#define	LINUX_RECVFROM		12
+#define	LINUX_SHUTDOWN		13
 #define	LINUX_SETSOCKOPT	14
 #define	LINUX_GETSOCKOPT	15
 #define	LINUX_SENDMSG		16

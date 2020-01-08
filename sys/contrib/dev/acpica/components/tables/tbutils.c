@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -503,7 +503,7 @@ AcpiTbParseRootTable (
             ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL, FALSE, TRUE, &TableIndex);
 
         if (ACPI_SUCCESS (Status) &&
-            ACPI_COMPARE_NAME (
+            ACPI_COMPARE_NAMESEG (
                 &AcpiGbl_RootTableList.Tables[TableIndex].Signature,
                 ACPI_SIG_FADT))
         {
@@ -559,14 +559,19 @@ AcpiTbGetTable (
         }
     }
 
-    TableDesc->ValidationCount++;
-    if (TableDesc->ValidationCount == 0)
+    if (TableDesc->ValidationCount < ACPI_MAX_TABLE_VALIDATIONS)
     {
-        ACPI_ERROR ((AE_INFO,
-            "Table %p, Validation count is zero after increment\n",
-            TableDesc));
-        TableDesc->ValidationCount--;
-        return_ACPI_STATUS (AE_LIMIT);
+        TableDesc->ValidationCount++;
+
+        /*
+         * Detect ValidationCount overflows to ensure that the warning
+         * message will only be printed once.
+         */
+        if (TableDesc->ValidationCount >= ACPI_MAX_TABLE_VALIDATIONS)
+        {
+            ACPI_WARNING((AE_INFO,
+                "Table %p, Validation count overflows\n", TableDesc));
+        }
     }
 
     *OutTable = TableDesc->Pointer;
@@ -597,14 +602,21 @@ AcpiTbPutTable (
     ACPI_FUNCTION_TRACE (AcpiTbPutTable);
 
 
-    if (TableDesc->ValidationCount == 0)
+    if (TableDesc->ValidationCount < ACPI_MAX_TABLE_VALIDATIONS)
     {
-        ACPI_WARNING ((AE_INFO,
-            "Table %p, Validation count is zero before decrement\n",
-            TableDesc));
-        return_VOID;
+        TableDesc->ValidationCount--;
+
+        /*
+         * Detect ValidationCount underflows to ensure that the warning
+         * message will only be printed once.
+         */
+        if (TableDesc->ValidationCount >= ACPI_MAX_TABLE_VALIDATIONS)
+        {
+            ACPI_WARNING ((AE_INFO,
+                "Table %p, Validation count underflows\n", TableDesc));
+            return_VOID;
+        }
     }
-    TableDesc->ValidationCount--;
 
     if (TableDesc->ValidationCount == 0)
     {

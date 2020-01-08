@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991, 1993, 1995
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -61,6 +63,40 @@ __FBSDID("$FreeBSD$");
 #include <ufs/ufs/gjournal.h>
 #endif
 
+int
+ufs_need_inactive(ap)
+	struct vop_need_inactive_args *ap;
+{
+	struct vnode *vp;
+	struct inode *ip;
+#ifdef QUOTA
+	int i;
+#endif
+
+	vp = ap->a_vp;
+	ip = VTOI(vp);
+	if (UFS_RDONLY(ip))
+		return (0);
+	if (ip->i_mode == 0 ||  ip->i_nlink <= 0 ||
+	    (ip->i_effnlink == 0 && DOINGSOFTDEP(vp)) ||
+	    (ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_MODIFIED |
+	    IN_UPDATE)) != 0 ||
+	    (ip->i_effnlink <= 0 && (ip->i_size != 0 || (I_IS_UFS2(ip) &&
+	    ip->i_din2->di_extsize != 0))))
+		return (1);
+#ifdef QUOTA
+	for (i = 0; i < MAXQUOTAS; i++) {
+		if (ip->i_dquot[i] != NULL)
+			return (1);
+	}
+#endif
+	/*
+	 * No need to check ufs_gjournal_close() condition since we
+	 * return 1 if only i_nlink <= 0.
+	 */
+	return (0);
+}
+
 /*
  * Last reference to an inode.  If necessary, write or delete it.
  */
@@ -100,7 +136,7 @@ ufs_inactive(ap)
 	loop:
 		if (vn_start_secondary_write(vp, &mp, V_NOWAIT) != 0) {
 			/* Cannot delete file while file system is suspended */
-			if ((vp->v_iflag & VI_DOOMED) != 0) {
+			if (VN_IS_DOOMED(vp)) {
 				/* Cannot return before file is deleted */
 				(void) vn_start_secondary_write(vp, &mp,
 								V_WAIT);
@@ -177,31 +213,6 @@ out:
 	return (error);
 }
 
-void
-ufs_prepare_reclaim(struct vnode *vp)
-{
-	struct inode *ip;
-#ifdef QUOTA
-	int i;
-#endif
-
-	ip = VTOI(vp);
-
-	vnode_destroy_vobject(vp);
-#ifdef QUOTA
-	for (i = 0; i < MAXQUOTAS; i++) {
-		if (ip->i_dquot[i] != NODQUOT) {
-			dqrele(vp, ip->i_dquot[i]);
-			ip->i_dquot[i] = NODQUOT;
-		}
-	}
-#endif
-#ifdef UFS_DIRHASH
-	if (ip->i_dirhash != NULL)
-		ufsdirhash_free(ip);
-#endif
-}
-
 /*
  * Reclaim an inode so that it can be used for other purposes.
  */
@@ -214,8 +225,20 @@ ufs_reclaim(ap)
 {
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
+#ifdef QUOTA
+	int i;
 
-	ufs_prepare_reclaim(vp);
+	for (i = 0; i < MAXQUOTAS; i++) {
+		if (ip->i_dquot[i] != NODQUOT) {
+			dqrele(vp, ip->i_dquot[i]);
+			ip->i_dquot[i] = NODQUOT;
+		}
+	}
+#endif
+#ifdef UFS_DIRHASH
+	if (ip->i_dirhash != NULL)
+		ufsdirhash_free(ip);
+#endif
 
 	if (ip->i_flag & IN_LAZYMOD)
 		ip->i_flag |= IN_MODIFIED;

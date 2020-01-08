@@ -1,6 +1,8 @@
 /*	$NetBSD: sysarch.h,v 1.5 2003/09/11 09:40:12 kleink Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1996-1997 Mark Brinicombe.
  * All rights reserved.
  *
@@ -63,12 +65,10 @@
 #ifndef LOCORE
 #ifndef __ASSEMBLER__
 
-#include <sys/cdefs.h>
-
 /*
- * Pickup definition of uintptr_t
+ * Pickup definition of various __types.
  */
-#include <sys/stdint.h>
+#include <sys/_types.h>
 
 /*
  * Architecture specific syscalls (arm)
@@ -78,16 +78,22 @@
 #define ARM_DRAIN_WRITEBUF	1
 #define ARM_SET_TP		2
 #define ARM_GET_TP		3
+#define ARM_GET_VFPSTATE	4
 
 struct arm_sync_icache_args {
-	uintptr_t	addr;		/* Virtual start address */
-	size_t		len;		/* Region size */
+	__uintptr_t	addr;		/* Virtual start address */
+	__size_t	len;		/* Region size */
+};
+
+struct arm_get_vfpstate_args {
+	__size_t	mc_vfp_size;
+	void 		*mc_vfp;
 };
 
 #ifndef _KERNEL
 __BEGIN_DECLS
-int	arm_sync_icache (u_int addr, int len);
-int	arm_drain_writebuf (void);
+int	arm_sync_icache(unsigned int, int);
+int	arm_drain_writebuf(void);
 int	sysarch(int, void *);
 __END_DECLS
 #endif

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1990 The Regents of the University of California.
  * All rights reserved.
  *
@@ -62,9 +64,5 @@ struct amd64tss {
 	u_int16_t	tss_rsvd5;
 	u_int16_t	tss_iobase;	/* io bitmap offset */
 };
-
-#ifdef _KERNEL
-extern struct amd64tss common_tss[];
-#endif
 
 #endif /* _MACHINE_TSS_H_ */

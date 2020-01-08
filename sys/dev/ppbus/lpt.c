@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1990 William F. Jolitz, TeleMuse
  * All rights reserved.
  *
@@ -138,7 +140,7 @@ struct lpt_data {
 
 #define	LPT_NAME	"lpt"		/* our official name */
 
-static timeout_t lptout;
+static callout_func_t lptout;
 static int	lpt_port_test(device_t dev, u_char data, u_char mask);
 static int	lpt_detect(device_t dev);
 

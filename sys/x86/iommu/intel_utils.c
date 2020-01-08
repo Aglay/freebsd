@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -64,6 +66,7 @@ __FBSDID("$FreeBSD$");
 #include <x86/include/busdma_impl.h>
 #include <x86/iommu/intel_reg.h>
 #include <x86/iommu/busdma_dmar.h>
+#include <dev/pci/pcireg.h>
 #include <x86/iommu/intel_dmar.h>
 
 u_int
@@ -257,9 +260,12 @@ vm_page_t
 dmar_pgalloc(vm_object_t obj, vm_pindex_t idx, int flags)
 {
 	vm_page_t m;
-	int zeroed;
+	int zeroed, aflags;
 
 	zeroed = (flags & DMAR_PGF_ZERO) != 0 ? VM_ALLOC_ZERO : 0;
+	aflags = zeroed | VM_ALLOC_NOBUSY | VM_ALLOC_SYSTEM | VM_ALLOC_NODUMP |
+	    ((flags & DMAR_PGF_WAITOK) != 0 ? VM_ALLOC_WAITFAIL :
+	    VM_ALLOC_NOWAIT);
 	for (;;) {
 		if ((flags & DMAR_PGF_OBJL) == 0)
 			VM_OBJECT_WLOCK(obj);
@@ -269,8 +275,7 @@ dmar_pgalloc(vm_object_t obj, vm_pindex_t idx, int flags)
 				VM_OBJECT_WUNLOCK(obj);
 			break;
 		}
-		m = vm_page_alloc_contig(obj, idx, VM_ALLOC_NOBUSY |
-		    VM_ALLOC_SYSTEM | VM_ALLOC_NODUMP | zeroed, 1, 0,
+		m = vm_page_alloc_contig(obj, idx, aflags, 1, 0,
 		    dmar_high, PAGE_SIZE, 0, VM_MEMATTR_DEFAULT);
 		if ((flags & DMAR_PGF_OBJL) == 0)
 			VM_OBJECT_WUNLOCK(obj);
@@ -282,11 +287,6 @@ dmar_pgalloc(vm_object_t obj, vm_pindex_t idx, int flags)
 		}
 		if ((flags & DMAR_PGF_WAITOK) == 0)
 			break;
-		if ((flags & DMAR_PGF_OBJL) != 0)
-			VM_OBJECT_WUNLOCK(obj);
-		VM_WAIT;
-		if ((flags & DMAR_PGF_OBJL) != 0)
-			VM_OBJECT_WLOCK(obj);
 	}
 	return (m);
 }
@@ -298,7 +298,7 @@ dmar_pgfree(vm_object_t obj, vm_pindex_t idx, int flags)
 
 	if ((flags & DMAR_PGF_OBJL) == 0)
 		VM_OBJECT_WLOCK(obj);
-	m = vm_page_lookup(obj, idx);
+	m = vm_page_grab(obj, idx, VM_ALLOC_NOCREAT);
 	if (m != NULL) {
 		vm_page_free(m);
 		atomic_subtract_int(&dmar_tbl_pagecnt, 1);
@@ -369,8 +369,7 @@ dmar_flush_transl_to_ram(struct dmar_unit *unit, void *dst, size_t sz)
 	 * If DMAR does not snoop paging structures accesses, flush
 	 * CPU cache to memory.
 	 */
-	pmap_invalidate_cache_range((uintptr_t)dst, (uintptr_t)dst + sz,
-	    TRUE);
+	pmap_force_invalidate_cache_range((uintptr_t)dst, (uintptr_t)dst + sz);
 }
 
 void
@@ -616,7 +615,6 @@ dmar_barrier_exit(struct dmar_unit *dmar, u_int barrier_id)
 	DMAR_UNLOCK(dmar);
 }
 
-int dmar_match_verbose;
 int dmar_batch_coalesce = 100;
 struct timespec dmar_hw_timeout = {
 	.tv_sec = 0,
@@ -660,9 +658,6 @@ static SYSCTL_NODE(_hw, OID_AUTO, dmar, CTLFLAG_RD, NULL, "");
 SYSCTL_INT(_hw_dmar, OID_AUTO, tbl_pagecnt, CTLFLAG_RD,
     &dmar_tbl_pagecnt, 0,
     "Count of pages used for DMAR pagetables");
-SYSCTL_INT(_hw_dmar, OID_AUTO, match_verbose, CTLFLAG_RWTUN,
-    &dmar_match_verbose, 0,
-    "Verbose matching of the PCI devices to DMAR paths");
 SYSCTL_INT(_hw_dmar, OID_AUTO, batch_coalesce, CTLFLAG_RWTUN,
     &dmar_batch_coalesce, 0,
     "Number of qi batches between interrupt");

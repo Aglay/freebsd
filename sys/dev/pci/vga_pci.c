@@ -1,6 +1,7 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 John Baldwin <jhb@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -141,11 +142,35 @@ vga_pci_is_boot_display(device_t dev)
 	return (1);
 }
 
+static void
+vga_pci_reset(device_t dev)
+{
+	int ps;
+	/*
+	 * FLR is unsupported on GPUs so attempt a power-management reset by cycling
+	 * the device in/out of D3 state.
+	 * PCI spec says we can only go into D3 state from D0 state.
+	 * Transition from D[12] into D0 before going to D3 state.
+	 */
+	ps = pci_get_powerstate(dev);
+	if (ps != PCI_POWERSTATE_D0 && ps != PCI_POWERSTATE_D3)
+		pci_set_powerstate(dev, PCI_POWERSTATE_D0);
+	if (pci_get_powerstate(dev) != PCI_POWERSTATE_D3)
+		pci_set_powerstate(dev, PCI_POWERSTATE_D3);
+	pci_set_powerstate(dev, ps);
+}
+
+
 void *
 vga_pci_map_bios(device_t dev, size_t *size)
 {
-	int rid;
+	struct vga_resource *vr;
 	struct resource *res;
+	device_t pcib;
+	uint32_t rom_addr;
+	uint16_t config;
+	volatile unsigned char *bios;
+	int i, rid, found;
 
 #if defined(__amd64__) || defined(__i386__)
 	if (vga_pci_is_boot_display(dev)) {
@@ -163,21 +188,96 @@ vga_pci_map_bios(device_t dev, size_t *size)
 	}
 #endif
 
-	rid = PCIR_BIOS;
+	pcib = device_get_parent(device_get_parent(dev));
+	if (device_get_devclass(device_get_parent(pcib)) ==
+	    devclass_find("pci")) {
+		/*
+		 * The parent bridge is a PCI-to-PCI bridge: check the
+		 * value of the "VGA Enable" bit.
+		 */
+		config = pci_read_config(pcib, PCIR_BRIDGECTL_1, 2);
+		if ((config & PCIB_BCR_VGA_ENABLE) == 0) {
+			config |= PCIB_BCR_VGA_ENABLE;
+			pci_write_config(pcib, PCIR_BRIDGECTL_1, config, 2);
+		}
+	}
+
+	switch(pci_read_config(dev, PCIR_HDRTYPE, 1)) {
+	case PCIM_HDRTYPE_BRIDGE:
+		rid = PCIR_BIOS_1;
+		break;
+	case PCIM_HDRTYPE_CARDBUS:
+		rid = 0;
+		break;
+	default:
+		rid = PCIR_BIOS;
+		break;
+	}
+	if (rid == 0)
+		return (NULL);
+	res = vga_pci_alloc_resource(dev, NULL, SYS_RES_MEMORY, &rid, 0,
+	    ~0, 1, RF_ACTIVE);
+
+	if (res == NULL) {
+		device_printf(dev, "vga_pci_alloc_resource failed\n");
+		return (NULL);
+	}
+	bios = rman_get_virtual(res);
+	*size = rman_get_size(res);
+	for (found = i = 0; i < hz; i++) {
+		found = (bios[0] == 0x55 && bios[1] == 0xaa);
+		if (found)
+			break;
+		pause("vgabios", 1);
+	}
+	if (found)
+		return (__DEVOLATILE(void *, bios));
+	if (bootverbose)
+		device_printf(dev, "initial ROM mapping failed -- resetting\n");
+
+	/*
+	 * Enable ROM decode
+	 */
+	vga_pci_reset(dev);
+	rom_addr = pci_read_config(dev, rid, 4);
+	rom_addr &= 0x7ff;
+	rom_addr |= rman_get_start(res) | 0x1;
+	pci_write_config(dev, rid, rom_addr, 4);
+	vr = lookup_res(device_get_softc(dev), rid);
+	vga_pci_release_resource(dev, NULL, SYS_RES_MEMORY, rid,
+	    vr->vr_res);
+
+	/*
+	 * re-allocate
+	 */
 	res = vga_pci_alloc_resource(dev, NULL, SYS_RES_MEMORY, &rid, 0,
 	    ~0, 1, RF_ACTIVE);
 	if (res == NULL) {
+		device_printf(dev, "vga_pci_alloc_resource failed\n");
 		return (NULL);
 	}
-
+	bios = rman_get_virtual(res);
 	*size = rman_get_size(res);
-	return (rman_get_virtual(res));
+	for (found = i = 0; i < 3*hz; i++) {
+		found = (bios[0] == 0x55 && bios[1] == 0xaa);
+		if (found)
+			break;
+		pause("vgabios", 1);
+	}
+	if (found)
+		return (__DEVOLATILE(void *, bios));
+	device_printf(dev, "ROM mapping failed\n");
+	vr = lookup_res(device_get_softc(dev), rid);
+	vga_pci_release_resource(dev, NULL, SYS_RES_MEMORY, rid,
+	    vr->vr_res);
+	return (NULL);
 }
 
 void
 vga_pci_unmap_bios(device_t dev, void *bios)
 {
 	struct vga_resource *vr;
+	int rid;
 
 	if (bios == NULL) {
 		return;
@@ -191,16 +291,28 @@ vga_pci_unmap_bios(device_t dev, void *bios)
 		return;
 	}
 #endif
-
+	switch(pci_read_config(dev, PCIR_HDRTYPE, 1)) {
+	case PCIM_HDRTYPE_BRIDGE:
+		rid = PCIR_BIOS_1;
+		break;
+	case PCIM_HDRTYPE_CARDBUS:
+		rid = 0;
+		break;
+	default:
+		rid = PCIR_BIOS;
+		break;
+	}
+	if (rid == 0)
+		return;
 	/*
 	 * Look up the PCIR_BIOS resource in our softc.  It should match
 	 * the address we returned previously.
 	 */
-	vr = lookup_res(device_get_softc(dev), PCIR_BIOS);
+	vr = lookup_res(device_get_softc(dev), rid);
 	KASSERT(vr->vr_res != NULL, ("vga_pci_unmap_bios: bios not mapped"));
 	KASSERT(rman_get_virtual(vr->vr_res) == bios,
 	    ("vga_pci_unmap_bios: mismatch"));
-	vga_pci_release_resource(dev, NULL, SYS_RES_MEMORY, PCIR_BIOS,
+	vga_pci_release_resource(dev, NULL, SYS_RES_MEMORY, rid,
 	    vr->vr_res);
 }
 
@@ -278,6 +390,17 @@ vga_pci_suspend(device_t dev)
 {
 
 	return (bus_generic_suspend(dev));
+}
+
+static int
+vga_pci_detach(device_t dev)
+{
+	int error; 
+
+	error = bus_generic_detach(dev);
+	if (error == 0)
+		error = device_delete_children(dev);
+	return (error);
 }
 
 static int
@@ -495,6 +618,14 @@ vga_pci_find_cap(device_t dev, device_t child, int capability,
 }
 
 static int
+vga_pci_find_next_cap(device_t dev, device_t child, int capability,
+    int start, int *capreg)
+{
+
+	return (pci_find_next_cap(dev, capability, start, capreg));
+}
+
+static int
 vga_pci_find_extcap(device_t dev, device_t child, int capability,
     int *capreg)
 {
@@ -503,11 +634,27 @@ vga_pci_find_extcap(device_t dev, device_t child, int capability,
 }
 
 static int
+vga_pci_find_next_extcap(device_t dev, device_t child, int capability,
+    int start, int *capreg)
+{
+
+	return (pci_find_next_extcap(dev, capability, start, capreg));
+}
+
+static int
 vga_pci_find_htcap(device_t dev, device_t child, int capability,
     int *capreg)
 {
 
 	return (pci_find_htcap(dev, capability, capreg));
+}
+
+static int
+vga_pci_find_next_htcap(device_t dev, device_t child, int capability,
+    int start, int *capreg)
+{
+
+	return (pci_find_next_htcap(dev, capability, start, capreg));
 }
 
 static int
@@ -594,6 +741,7 @@ static device_method_t vga_pci_methods[] = {
 	DEVMETHOD(device_attach,	vga_pci_attach),
 	DEVMETHOD(device_shutdown,	bus_generic_shutdown),
 	DEVMETHOD(device_suspend,	vga_pci_suspend),
+	DEVMETHOD(device_detach,	vga_pci_detach),
 	DEVMETHOD(device_resume,	vga_pci_resume),
 
 	/* Bus interface */
@@ -620,8 +768,11 @@ static device_method_t vga_pci_methods[] = {
 	DEVMETHOD(pci_set_powerstate,	vga_pci_set_powerstate),
 	DEVMETHOD(pci_assign_interrupt,	vga_pci_assign_interrupt),
 	DEVMETHOD(pci_find_cap,		vga_pci_find_cap),
+	DEVMETHOD(pci_find_next_cap,	vga_pci_find_next_cap),
 	DEVMETHOD(pci_find_extcap,	vga_pci_find_extcap),
+	DEVMETHOD(pci_find_next_extcap,	vga_pci_find_next_extcap),
 	DEVMETHOD(pci_find_htcap,	vga_pci_find_htcap),
+	DEVMETHOD(pci_find_next_htcap,	vga_pci_find_next_htcap),
 	DEVMETHOD(pci_alloc_msi,	vga_pci_alloc_msi),
 	DEVMETHOD(pci_alloc_msix,	vga_pci_alloc_msix),
 	DEVMETHOD(pci_remap_msix,	vga_pci_remap_msix),

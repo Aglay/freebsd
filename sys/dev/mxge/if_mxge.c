@@ -1,4 +1,5 @@
 /******************************************************************************
+SPDX-License-Identifier: BSD-2-Clause-FreeBSD
 
 Copyright (c) 2006-2013, Myricom Inc.
 All rights reserved.
@@ -46,7 +47,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/sx.h>
 #include <sys/taskqueue.h>
-#include <sys/zlib.h>
+#include <contrib/zlib/zlib.h>
+#include <dev/zlib/zcalloc.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -682,22 +684,6 @@ mxge_validate_firmware(mxge_softc_t *sc, const mcp_gen_header_t *hdr)
 
 }
 
-static void *
-z_alloc(void *nil, u_int items, u_int size)
-{
-	void *ptr;
-
-	ptr = malloc(items * size, M_TEMP, M_NOWAIT);
-	return ptr;
-}
-
-static void
-z_free(void *nil, void *ptr)
-{
-	free(ptr, M_TEMP);
-}
-
-
 static int
 mxge_load_firmware_helper(mxge_softc_t *sc, uint32_t *limit)
 {
@@ -722,8 +708,8 @@ mxge_load_firmware_helper(mxge_softc_t *sc, uint32_t *limit)
 
 	/* setup zlib and decompress f/w */
 	bzero(&zs, sizeof (zs));
-	zs.zalloc = z_alloc;
-	zs.zfree = z_free;
+	zs.zalloc = zcalloc_nowait;
+	zs.zfree = zcfree;
 	status = inflateInit(&zs);
 	if (status != Z_OK) {
 		status = EIO;
@@ -1105,12 +1091,35 @@ mxge_change_promisc(mxge_softc_t *sc, int promisc)
 	}
 }
 
+struct mxge_add_maddr_ctx {
+	mxge_softc_t *sc;
+	int error;
+};
+
+static u_int
+mxge_add_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct mxge_add_maddr_ctx *ctx = arg;
+	mxge_cmd_t cmd;
+
+	if (ctx->error != 0)
+		return (0);
+	bcopy(LLADDR(sdl), &cmd.data0, 4);
+	bcopy(LLADDR(sdl) + 4, &cmd.data1, 2);
+	cmd.data0 = htonl(cmd.data0);
+	cmd.data1 = htonl(cmd.data1);
+
+	ctx->error = mxge_send_cmd(ctx->sc, MXGEFW_JOIN_MULTICAST_GROUP, &cmd);
+
+	return (1);
+}
+
 static void
 mxge_set_multicast_list(mxge_softc_t *sc)
 {
-	mxge_cmd_t cmd;
-	struct ifmultiaddr *ifma;
+	struct mxge_add_maddr_ctx ctx;
 	struct ifnet *ifp = sc->ifp;
+	mxge_cmd_t cmd;
 	int err;
 
 	/* This firmware is known to not support multicast */
@@ -1143,28 +1152,16 @@ mxge_set_multicast_list(mxge_softc_t *sc)
 	}
 
 	/* Walk the multicast list, and add each address */
-
-	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		bcopy(LLADDR((struct sockaddr_dl *)ifma->ifma_addr),
-		      &cmd.data0, 4);
-		bcopy(LLADDR((struct sockaddr_dl *)ifma->ifma_addr) + 4,
-		      &cmd.data1, 2);
-		cmd.data0 = htonl(cmd.data0);
-		cmd.data1 = htonl(cmd.data1);
-		err = mxge_send_cmd(sc, MXGEFW_JOIN_MULTICAST_GROUP, &cmd);
-		if (err != 0) {
-			device_printf(sc->dev, "Failed "
-			       "MXGEFW_JOIN_MULTICAST_GROUP, error status:"
-			       "%d\t", err);
-			/* abort, leaving multicast filtering off */
-			if_maddr_runlock(ifp);
-			return;
-		}
+	ctx.sc = sc;
+	ctx.error = 0;
+	if_foreach_llmaddr(ifp, mxge_add_maddr, &ctx);
+	if (ctx.error != 0) {
+		device_printf(sc->dev, "Failed MXGEFW_JOIN_MULTICAST_GROUP, "
+		    "error status:" "%d\t", ctx.error);
+		/* abort, leaving multicast filtering off */
+		return;
 	}
-	if_maddr_runlock(ifp);
+
 	/* Enable multicast filtering */
 	err = mxge_send_cmd(sc, MXGEFW_DISABLE_ALLMULTI, &cmd);
 	if (err != 0) {
@@ -4153,19 +4150,54 @@ mxge_media_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 }
 
 static int
+mxge_fetch_i2c(mxge_softc_t *sc, struct ifi2creq *i2c)
+{
+	mxge_cmd_t cmd;
+	uint32_t i2c_args;
+	int i, ms, err;
+
+
+	if (i2c->dev_addr != 0xA0 &&
+	    i2c->dev_addr != 0xA2)
+		return (EINVAL);
+	if (i2c->len > sizeof(i2c->data))
+		return (EINVAL);
+
+	for (i = 0; i < i2c->len; i++) {
+		i2c_args = i2c->dev_addr << 0x8;
+		i2c_args |= i2c->offset + i;
+		cmd.data0 = 0;	 /* just fetch 1 byte, not all 256 */
+		cmd.data1 = i2c_args;
+		err = mxge_send_cmd(sc, MXGEFW_CMD_I2C_READ, &cmd);
+
+		if (err != MXGEFW_CMD_OK)
+			return (EIO);
+		/* now we wait for the data to be cached */
+		cmd.data0 = i2c_args & 0xff;
+		err = mxge_send_cmd(sc, MXGEFW_CMD_I2C_BYTE, &cmd);
+		for (ms = 0; (err == EBUSY) && (ms < 50); ms++) {
+			cmd.data0 = i2c_args & 0xff;
+			err = mxge_send_cmd(sc, MXGEFW_CMD_I2C_BYTE, &cmd);
+			if (err == EBUSY)
+				DELAY(1000);
+		}
+		if (err != MXGEFW_CMD_OK)
+			return (EIO);
+		i2c->data[i] = cmd.data0;
+	}
+	return (0);
+}
+
+static int
 mxge_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 {
 	mxge_softc_t *sc = ifp->if_softc;
 	struct ifreq *ifr = (struct ifreq *)data;
+	struct ifi2creq i2c;
 	int err, mask;
 
 	err = 0;
 	switch (command) {
-	case SIOCSIFADDR:
-	case SIOCGIFADDR:
-		err = ether_ioctl(ifp, command, data);
-		break;
-
 	case SIOCSIFMTU:
 		err = mxge_change_mtu(sc, ifr->ifr_mtu);
 		break;
@@ -4197,6 +4229,10 @@ mxge_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	case SIOCADDMULTI:
 	case SIOCDELMULTI:
 		mtx_lock(&sc->driver_mtx);
+		if (sc->dying) {
+			mtx_unlock(&sc->driver_mtx);
+			return (EINVAL);
+		}
 		mxge_set_multicast_list(sc);
 		mtx_unlock(&sc->driver_mtx);
 		break;
@@ -4282,14 +4318,39 @@ mxge_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 
 	case SIOCGIFMEDIA:
 		mtx_lock(&sc->driver_mtx);
+		if (sc->dying) {
+			mtx_unlock(&sc->driver_mtx);
+			return (EINVAL);
+		}
 		mxge_media_probe(sc);
 		mtx_unlock(&sc->driver_mtx);
 		err = ifmedia_ioctl(ifp, (struct ifreq *)data,
 				    &sc->media, command);
 		break;
 
+	case SIOCGI2C:
+		if (sc->connector != MXGE_XFP &&
+		    sc->connector != MXGE_SFP) {
+			err = ENXIO;
+			break;
+		}
+		err = copyin(ifr_data_get_ptr(ifr), &i2c, sizeof(i2c));
+		if (err != 0)
+			break;
+		mtx_lock(&sc->driver_mtx);
+		if (sc->dying) {
+			mtx_unlock(&sc->driver_mtx);
+			return (EINVAL);
+		}
+		err = mxge_fetch_i2c(sc, &i2c);
+		mtx_unlock(&sc->driver_mtx);
+		if (err == 0)
+			err = copyout(&i2c, ifr->ifr_ifru.ifru_data,
+			    sizeof(i2c));
+		break;
 	default:
-		err = ENOTTY;
+		err = ether_ioctl(ifp, command, data);
+		break;
 	}
 	return err;
 }
@@ -4919,6 +4980,9 @@ mxge_attach(device_t dev)
 	ifp->if_ioctl = mxge_ioctl;
 	ifp->if_start = mxge_start;
 	ifp->if_get_counter = mxge_get_counter;
+	ifp->if_hw_tsomax = IP_MAXPACKET - (ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN);
+	ifp->if_hw_tsomaxsegcount = sc->ss[0].tx.max_desc;
+	ifp->if_hw_tsomaxsegsize = IP_MAXPACKET;
 	/* Initialise the ifmedia structure */
 	ifmedia_init(&sc->media, 0, mxge_media_change,
 		     mxge_media_status);

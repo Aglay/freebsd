@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2014 Jakub Wojciech Klama <jceel@FreeBSD.org>
- * Copyright (c) 2015-2016 Vladimir Kondratyev <wulf@cicgroup.ru>
+ * Copyright (c) 2015-2016 Vladimir Kondratyev <wulf@FreeBSD.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,10 +31,14 @@
 #define	_DEV_EVDEV_EVDEV_PRIVATE_H
 
 #include <sys/bitstring.h>
-#include <sys/queue.h>
-#include <sys/malloc.h>
 #include <sys/kbio.h>
+#include <sys/lock.h>
+#include <sys/malloc.h>
+#include <sys/mutex.h>
+#include <sys/queue.h>
 #include <sys/selinfo.h>
+#include <sys/sysctl.h>
+
 #include <dev/evdev/evdev.h>
 #include <dev/evdev/input.h>
 #include <dev/kbd/kbdreg.h>
@@ -116,6 +120,10 @@ struct evdev_dev
 	bitstr_t		bit_decl(ev_sw_states, SW_CNT);
 	bool			ev_report_opened;
 
+	/* KDB state: */
+	bool			ev_kdb_active;
+	bitstr_t		bit_decl(ev_kdb_led_states, LED_CNT);
+
 	/* Multitouch protocol type B state: */
 	struct evdev_mt *	ev_mt;
 
@@ -127,13 +135,31 @@ struct evdev_dev
 	const struct evdev_methods * ev_methods;
 	void *			ev_softc;
 
+	/* Sysctl: */
+	struct sysctl_ctx_list	ev_sysctl_ctx;
+
 	LIST_ENTRY(evdev_dev) ev_link;
 	LIST_HEAD(, evdev_client) ev_clients;
 };
 
+#define	SYSTEM_CONSOLE_LOCK	&Giant
+
 #define	EVDEV_LOCK(evdev)		mtx_lock((evdev)->ev_lock)
 #define	EVDEV_UNLOCK(evdev)		mtx_unlock((evdev)->ev_lock)
-#define	EVDEV_LOCK_ASSERT(evdev)	mtx_assert((evdev)->ev_lock, MA_OWNED)
+#define	EVDEV_LOCK_ASSERT(evdev)	do {				\
+	if ((evdev)->ev_lock != SYSTEM_CONSOLE_LOCK)			\
+		mtx_assert((evdev)->ev_lock, MA_OWNED);			\
+} while (0)
+#define	EVDEV_ENTER(evdev)	do {					\
+	if ((evdev)->ev_lock_type == EV_LOCK_INTERNAL)			\
+		EVDEV_LOCK(evdev);					\
+	else								\
+		EVDEV_LOCK_ASSERT(evdev);				\
+} while (0)
+#define	EVDEV_EXIT(evdev)	do {					\
+	if ((evdev)->ev_lock_type == EV_LOCK_INTERNAL)			\
+		EVDEV_UNLOCK(evdev);					\
+} while (0)
 
 struct evdev_client
 {
@@ -174,6 +200,7 @@ int evdev_cdev_destroy(struct evdev_dev *);
 bool evdev_event_supported(struct evdev_dev *, uint16_t);
 void evdev_set_abs_bit(struct evdev_dev *, uint16_t);
 void evdev_set_absinfo(struct evdev_dev *, uint16_t, struct input_absinfo *);
+void evdev_restore_after_kdb(struct evdev_dev *);
 
 /* Client interface: */
 int evdev_register_client(struct evdev_dev *, struct evdev_client *);

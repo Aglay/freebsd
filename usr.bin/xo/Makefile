@@ -14,12 +14,11 @@ MAN=	xo.1
 CFLAGS+=-I${LIBXOSRC}/libxo
 
 # XXX For xo_config.h
-CFLAGS+=-I${SRCTOP}/lib/libxo
+CFLAGS+=-I${SRCTOP}/lib/libxo/libxo
 
 LIBADD=	xo util
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.prog.mk>

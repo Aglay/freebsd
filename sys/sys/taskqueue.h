@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000 Doug Rabson
  * All rights reserved.
  *
@@ -40,6 +42,7 @@
 
 struct taskqueue;
 struct taskqgroup;
+struct proc;
 struct thread;
 
 struct timeout_task {
@@ -73,12 +76,17 @@ struct taskqueue *taskqueue_create(const char *name, int mflags,
 				    taskqueue_enqueue_fn enqueue,
 				    void *context);
 int	taskqueue_start_threads(struct taskqueue **tqp, int count, int pri,
-				const char *name, ...) __printflike(4, 5);
+	    const char *name, ...) __printflike(4, 5);
+int	taskqueue_start_threads_in_proc(struct taskqueue **tqp, int count,
+	    int pri, struct proc *p, const char *name, ...) __printflike(5, 6);
 int	taskqueue_start_threads_cpuset(struct taskqueue **tqp, int count,
 	    int pri, cpuset_t *mask, const char *name, ...) __printflike(5, 6);
 int	taskqueue_enqueue(struct taskqueue *queue, struct task *task);
 int	taskqueue_enqueue_timeout(struct taskqueue *queue,
 	    struct timeout_task *timeout_task, int ticks);
+int	taskqueue_enqueue_timeout_sbt(struct taskqueue *queue,
+	    struct timeout_task *timeout_task, sbintime_t sbt, sbintime_t pr,
+	    int flags);
 int	taskqueue_poll_is_busy(struct taskqueue *queue, struct task *task);
 int	taskqueue_cancel(struct taskqueue *queue, struct task *task,
 	    u_int *pendp);
@@ -88,6 +96,7 @@ void	taskqueue_drain(struct taskqueue *queue, struct task *task);
 void	taskqueue_drain_timeout(struct taskqueue *queue,
 	    struct timeout_task *timeout_task);
 void	taskqueue_drain_all(struct taskqueue *queue);
+void	taskqueue_quiesce(struct taskqueue *queue);
 void	taskqueue_free(struct taskqueue *queue);
 void	taskqueue_run(struct taskqueue *queue);
 void	taskqueue_block(struct taskqueue *queue);
@@ -146,7 +155,7 @@ taskqueue_define_##name(void *arg)					\
 	init;								\
 }									\
 									\
-SYSINIT(taskqueue_##name, SI_SUB_INIT_IF, SI_ORDER_SECOND,		\
+SYSINIT(taskqueue_##name, SI_SUB_TASKQ, SI_ORDER_SECOND,		\
 	taskqueue_define_##name, NULL);					\
 									\
 struct __hack
@@ -171,7 +180,7 @@ taskqueue_define_##name(void *arg)					\
 	init;								\
 }									\
 									\
-SYSINIT(taskqueue_##name, SI_SUB_INIT_IF, SI_ORDER_SECOND,		\
+SYSINIT(taskqueue_##name, SI_SUB_TASKQ, SI_ORDER_SECOND,		\
 	taskqueue_define_##name, NULL);					\
 									\
 struct __hack

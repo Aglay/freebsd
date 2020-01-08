@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2012 Ganbold Tsagaankhuu <ganbold@freebsd.org>
- * Copyright (c) 2016 Emmanuel Vadot <manu@bidouilliste.org>
+ * Copyright (c) 2016 Emmanuel Vadot <manu@freebsd.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,11 +30,12 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_platform.h"
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/cpuset.h>
 #include <sys/kernel.h>
 #include <sys/ktr.h>
+#include <sys/lock.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/param.h>

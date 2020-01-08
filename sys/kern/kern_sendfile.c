@@ -30,13 +30,15 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
+#include "opt_kern_tls.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/capsicum.h>
 #include <sys/kernel.h>
+#include <netinet/in.h>
 #include <sys/lock.h>
+#include <sys/ktls.h>
 #include <sys/mutex.h>
 #include <sys/sysproto.h>
 #include <sys/malloc.h>
@@ -54,6 +56,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/vnode.h>
 
 #include <net/vnet.h>
+#include <netinet/tcp.h>
 
 #include <security/audit/audit.h>
 #include <security/mac/mac_framework.h>
@@ -61,6 +64,10 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/vm_object.h>
 #include <vm/vm_pager.h>
+
+#define	EXT_FLAG_SYNC		EXT_FLAG_VENDOR1
+#define	EXT_FLAG_NOCACHE	EXT_FLAG_VENDOR2
+#define	EXT_FLAG_CACHE_LAST	EXT_FLAG_VENDOR3
 
 /*
  * Structure describing a single sendfile(2) I/O, which may consist of
@@ -80,8 +87,11 @@ struct sf_io {
 	volatile u_int	nios;
 	u_int		error;
 	int		npages;
-	struct file	*sock_fp;
+	struct socket	*so;
 	struct mbuf	*m;
+#ifdef KERN_TLS
+	struct ktls_session *tls;
+#endif
 	vm_page_t	pa[];
 };
 
@@ -118,30 +128,26 @@ sfstat_sysctl(SYSCTL_HANDLER_ARGS)
 SYSCTL_PROC(_kern_ipc, OID_AUTO, sfstat, CTLTYPE_OPAQUE | CTLFLAG_RW,
     NULL, 0, sfstat_sysctl, "I", "sendfile statistics");
 
-/*
- * Detach mapped page and release resources back to the system.  Called
- * by mbuf(9) code when last reference to a page is freed.
- */
-void
-sf_ext_free(void *arg1, void *arg2)
+static void
+sendfile_free_mext(struct mbuf *m)
 {
-	struct sf_buf *sf = arg1;
-	struct sendfile_sync *sfs = arg2;
-	vm_page_t pg = sf_buf_page(sf);
+	struct sf_buf *sf;
+	vm_page_t pg;
+	int flags;
+
+	KASSERT(m->m_flags & M_EXT && m->m_ext.ext_type == EXT_SFBUF,
+	    ("%s: m %p !M_EXT or !EXT_SFBUF", __func__, m));
+
+	sf = m->m_ext.ext_arg1;
+	pg = sf_buf_page(sf);
+	flags = (m->m_ext.ext_flags & EXT_FLAG_NOCACHE) != 0 ? VPR_TRYFREE : 0;
 
 	sf_buf_free(sf);
+	vm_page_release(pg, flags);
 
-	vm_page_lock(pg);
-	/*
-	 * Check for the object going away on us. This can
-	 * happen since we don't hold a reference to it.
-	 * If so, we're responsible for freeing the page.
-	 */
-	if (vm_page_unwire(pg, PQ_INACTIVE) && pg->object == NULL)
-		vm_page_free(pg);
-	vm_page_unlock(pg);
+	if (m->m_ext.ext_flags & EXT_FLAG_SYNC) {
+		struct sendfile_sync *sfs = m->m_ext.ext_arg2;
 
-	if (sfs != NULL) {
 		mtx_lock(&sfs->mtx);
 		KASSERT(sfs->count > 0, ("Sendfile sync botchup count == 0"));
 		if (--sfs->count == 0)
@@ -150,35 +156,31 @@ sf_ext_free(void *arg1, void *arg2)
 	}
 }
 
-/*
- * Same as above, but forces the page to be detached from the object
- * and go into free pool.
- */
-void
-sf_ext_free_nocache(void *arg1, void *arg2)
+static void
+sendfile_free_mext_pg(struct mbuf *m)
 {
-	struct sf_buf *sf = arg1;
-	struct sendfile_sync *sfs = arg2;
-	vm_page_t pg = sf_buf_page(sf);
+	struct mbuf_ext_pgs *ext_pgs;
+	vm_page_t pg;
+	int flags, i;
+	bool cache_last;
 
-	sf_buf_free(sf);
+	KASSERT(m->m_flags & M_EXT && m->m_ext.ext_type == EXT_PGS,
+	    ("%s: m %p !M_EXT or !EXT_PGS", __func__, m));
 
-	vm_page_lock(pg);
-	if (vm_page_unwire(pg, PQ_NONE)) {
-		vm_object_t obj;
+	cache_last = m->m_ext.ext_flags & EXT_FLAG_CACHE_LAST;
+	ext_pgs = m->m_ext.ext_pgs;
+	flags = (m->m_ext.ext_flags & EXT_FLAG_NOCACHE) != 0 ? VPR_TRYFREE : 0;
 
-		/* Try to free the page, but only if it is cheap to. */
-		if ((obj = pg->object) == NULL)
-			vm_page_free(pg);
-		else if (!vm_page_xbusied(pg) && VM_OBJECT_TRYWLOCK(obj)) {
-			vm_page_free(pg);
-			VM_OBJECT_WUNLOCK(obj);
-		} else
-			vm_page_deactivate(pg);
+	for (i = 0; i < ext_pgs->npgs; i++) {
+		if (cache_last && i == ext_pgs->npgs - 1)
+			flags = 0;
+		pg = PHYS_TO_VM_PAGE(ext_pgs->pa[i]);
+		vm_page_release(pg, flags);
 	}
-	vm_page_unlock(pg);
 
-	if (sfs != NULL) {
+	if (m->m_ext.ext_flags & EXT_FLAG_SYNC) {
+		struct sendfile_sync *sfs = m->m_ext.ext_arg2;
+
 		mtx_lock(&sfs->mtx);
 		KASSERT(sfs->count > 0, ("Sendfile sync botchup count == 0"));
 		if (--sfs->count == 0)
@@ -255,11 +257,11 @@ static void
 sendfile_iodone(void *arg, vm_page_t *pg, int count, int error)
 {
 	struct sf_io *sfio = arg;
-	struct socket *so;
+	struct socket *so = sfio->so;
 
 	for (int i = 0; i < count; i++)
 		if (pg[i] != bogus_page)
-			vm_page_xunbusy(pg[i]);
+			vm_page_xunbusy_unchecked(pg[i]);
 
 	if (error)
 		sfio->error = error;
@@ -267,11 +269,27 @@ sendfile_iodone(void *arg, vm_page_t *pg, int count, int error)
 	if (!refcount_release(&sfio->nios))
 		return;
 
-	so = sfio->sock_fp->f_data;
+	if (__predict_false(sfio->error && sfio->m == NULL)) {
+		/*
+		 * I/O operation failed, but pru_send hadn't been executed -
+		 * nothing had been sent to the socket.  The syscall has
+		 * returned error to the user.
+		 */
+		free(sfio, M_TEMP);
+		return;
+	}
 
-	if (sfio->error) {
-		struct mbuf *m;
-
+#if defined(KERN_TLS) && defined(INVARIANTS)
+	if ((sfio->m->m_flags & M_EXT) != 0 &&
+	    sfio->m->m_ext.ext_type == EXT_PGS)
+		KASSERT(sfio->tls == sfio->m->m_ext.ext_pgs->tls,
+		    ("TLS session mismatch"));
+	else
+		KASSERT(sfio->tls == NULL,
+		    ("non-ext_pgs mbuf with TLS session"));
+#endif
+	CURVNET_SET(so->so_vnet);
+	if (__predict_false(sfio->error)) {
 		/*
 		 * I/O operation failed.  The state of data in the socket
 		 * is now inconsistent, and all what we can do is to tear
@@ -286,18 +304,31 @@ sendfile_iodone(void *arg, vm_page_t *pg, int count, int error)
 		so->so_proto->pr_usrreqs->pru_abort(so);
 		so->so_error = EIO;
 
-		m = sfio->m;
-		for (int i = 0; i < sfio->npages; i++)
-			m = m_free(m);
-	} else {
-		CURVNET_SET(so->so_vnet);
-		(void )(so->so_proto->pr_usrreqs->pru_ready)(so, sfio->m,
+		mb_free_notready(sfio->m, sfio->npages);
+#ifdef KERN_TLS
+	} else if (sfio->tls != NULL && sfio->tls->mode == TCP_TLS_MODE_SW) {
+		/*
+		 * I/O operation is complete, but we still need to
+		 * encrypt.  We cannot do this in the interrupt thread
+		 * of the disk controller, so forward the mbufs to a
+		 * different thread.
+		 *
+		 * Donate the socket reference from sfio to rather
+		 * than explicitly invoking soref().
+		 */
+		ktls_enqueue(sfio->m, so, sfio->npages);
+		goto out_with_ref;
+#endif
+	} else
+		(void)(so->so_proto->pr_usrreqs->pru_ready)(so, sfio->m,
 		    sfio->npages);
-		CURVNET_RESTORE();
-	}
 
-	/* XXXGL: curthread */
-	fdrop(sfio->sock_fp, curthread);
+	SOCK_LOCK(so);
+	sorele(so);
+#ifdef KERN_TLS
+out_with_ref:
+#endif
+	CURVNET_RESTORE();
 	free(sfio, M_TEMP);
 }
 
@@ -305,13 +336,13 @@ sendfile_iodone(void *arg, vm_page_t *pg, int count, int error)
  * Iterate through pages vector and request paging for non-valid pages.
  */
 static int
-sendfile_swapin(vm_object_t obj, struct sf_io *sfio, off_t off, off_t len,
-    int npages, int rhpages, int flags)
+sendfile_swapin(vm_object_t obj, struct sf_io *sfio, int *nios, off_t off,
+    off_t len, int npages, int rhpages, int flags)
 {
 	vm_page_t *pa = sfio->pa;
-	int nios;
+	int grabbed;
 
-	nios = 0;
+	*nios = 0;
 	flags = (flags & SF_NODISKIO) ? VM_ALLOC_NOWAIT : 0;
 
 	/*
@@ -319,14 +350,14 @@ sendfile_swapin(vm_object_t obj, struct sf_io *sfio, off_t off, off_t len,
 	 * only required pages.  Readahead pages are dealt with later.
 	 */
 	VM_OBJECT_WLOCK(obj);
-	for (int i = 0; i < npages; i++) {
-		pa[i] = vm_page_grab(obj, OFF_TO_IDX(vmoff(i, off)),
-		    VM_ALLOC_WIRED | VM_ALLOC_NORMAL | flags);
-		if (pa[i] == NULL) {
-			npages = i;
-			rhpages = 0;
-			break;
-		}
+
+	grabbed = vm_page_grab_pages(obj, OFF_TO_IDX(off),
+	    VM_ALLOC_NORMAL | VM_ALLOC_WIRED | flags, pa, npages);
+	if (grabbed < npages) {
+		for (int i = grabbed; i < npages; i++)
+			pa[i] = NULL;
+		npages = grabbed;
+		rhpages = 0;
 	}
 
 	for (int i = 0; i < npages;) {
@@ -355,7 +386,7 @@ sendfile_swapin(vm_object_t obj, struct sf_io *sfio, off_t off, off_t len,
 		    &a)) {
 			pmap_zero_page(pa[i]);
 			pa[i]->valid = VM_PAGE_BITS_ALL;
-			pa[i]->dirty = 0;
+			MPASS(pa[i]->dirty == 0);
 			vm_page_xunbusy(pa[i]);
 			i++;
 			continue;
@@ -393,8 +424,29 @@ sendfile_swapin(vm_object_t obj, struct sf_io *sfio, off_t off, off_t len,
 		rv = vm_pager_get_pages_async(obj, pa + i, count, NULL,
 		    i + count == npages ? &rhpages : NULL,
 		    &sendfile_iodone, sfio);
-		KASSERT(rv == VM_PAGER_OK, ("%s: pager fail obj %p page %p",
-		    __func__, obj, pa[i]));
+		if (__predict_false(rv != VM_PAGER_OK)) {
+			/*
+			 * Perform full pages recovery before returning EIO.
+			 * Pages from 0 to npages are wired.
+			 * Pages from i to npages are also busied.
+			 * Pages from (i + 1) to (i + count - 1) may be
+			 * substituted to bogus page, and not busied.
+			 */
+			for (j = 0; j < npages; j++) {
+				if (j > i && j < i + count - 1 &&
+				    pa[j] == bogus_page)
+					pa[j] = vm_page_lookup(obj,
+					    OFF_TO_IDX(vmoff(j, off)));
+				else if (j >= i)
+					vm_page_xunbusy(pa[j]);
+				KASSERT(pa[j] != NULL && pa[j] != bogus_page,
+				    ("%s: page %p[%d] I/O recovery failure",
+				    __func__, pa, j));
+				vm_page_unwire(pa[j], PQ_INACTIVE);
+			}
+			VM_OBJECT_WUNLOCK(obj);
+			return (EIO);
+		}
 
 		SFSTAT_INC(sf_iocnt);
 		SFSTAT_ADD(sf_pages_read, count);
@@ -414,15 +466,15 @@ sendfile_swapin(vm_object_t obj, struct sf_io *sfio, off_t off, off_t len,
 
 			}
 		i += count;
-		nios++;
+		(*nios)++;
 	}
 
 	VM_OBJECT_WUNLOCK(obj);
 
-	if (nios == 0 && npages != 0)
+	if (*nios == 0 && npages != 0)
 		SFSTAT_INC(sf_noiocnt);
 
-	return (nios);
+	return (0);
 }
 
 static int
@@ -492,7 +544,7 @@ sendfile_getobj(struct thread *td, struct file *fp, vm_object_t *obj_res,
 
 out:
 	if (vp != NULL)
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 	return (error);
 }
 
@@ -500,7 +552,6 @@ static int
 sendfile_getsock(struct thread *td, int s, struct file **sock_fp,
     struct socket **so)
 {
-	cap_rights_t rights;
 	int error;
 
 	*sock_fp = NULL;
@@ -509,14 +560,14 @@ sendfile_getsock(struct thread *td, int s, struct file **sock_fp,
 	/*
 	 * The socket must be a stream socket and connected.
 	 */
-	error = getsock_cap(td, s, cap_rights_init(&rights, CAP_SEND),
+	error = getsock_cap(td, s, &cap_send_rights,
 	    sock_fp, NULL, NULL);
 	if (error != 0)
 		return (error);
 	*so = (*sock_fp)->f_data;
 	if ((*so)->so_type != SOCK_STREAM)
 		return (EINVAL);
-	if (((*so)->so_state & SS_ISCONNECTED) == 0)
+	if (SOLISTENING(*so))
 		return (ENOTCONN);
 	return (0);
 }
@@ -530,20 +581,32 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 	struct vnode *vp;
 	struct vm_object *obj;
 	struct socket *so;
+#ifdef KERN_TLS
+	struct ktls_session *tls;
+#endif
+	struct mbuf_ext_pgs *ext_pgs;
 	struct mbuf *m, *mh, *mhtail;
 	struct sf_buf *sf;
 	struct shmfd *shmfd;
 	struct sendfile_sync *sfs;
 	struct vattr va;
 	off_t off, sbytes, rem, obj_size;
-	int error, softerr, bsize, hdrlen;
+	int bsize, error, ext_pgs_idx, hdrlen, max_pgs, softerr;
+#ifdef KERN_TLS
+	int tls_enq_cnt;
+#endif
+	bool use_ext_pgs;
 
 	obj = NULL;
 	so = NULL;
 	m = mh = NULL;
 	sfs = NULL;
+#ifdef KERN_TLS
+	tls = NULL;
+#endif
 	hdrlen = sbytes = 0;
 	softerr = 0;
+	use_ext_pgs = false;
 
 	error = sendfile_getobj(td, fp, &obj, &vp, &shmfd, &obj_size, &bsize);
 	if (error != 0)
@@ -577,6 +640,9 @@ vn_sendfile(struct file *fp, int sockfd, struct uio *hdr_uio,
 	 * we implement that, but possibly shouldn't.
 	 */
 	(void)sblock(&so->so_snd, SBL_WAIT | SBL_NOINTR);
+#ifdef KERN_TLS
+	tls = ktls_hold(so->so_snd.sb_tls_info);
+#endif
 
 	/*
 	 * Loop through the pages of the file, starting with the requested
@@ -626,6 +692,12 @@ retry_space:
 			SOCKBUF_UNLOCK(&so->so_snd);
 			goto done;
 		}
+		if ((so->so_state & SS_ISCONNECTED) == 0) {
+			SOCKBUF_UNLOCK(&so->so_snd);
+			error = ENOTCONN;
+			goto done;
+		}
+
 		space = sbspace(&so->so_snd);
 		if (space < rem &&
 		    (space <= 0 ||
@@ -664,7 +736,14 @@ retry_space:
 		if (hdr_uio != NULL && hdr_uio->uio_resid > 0) {
 			hdr_uio->uio_td = td;
 			hdr_uio->uio_rw = UIO_WRITE;
-			mh = m_uiotombuf(hdr_uio, M_WAITOK, space, 0, 0);
+#ifdef KERN_TLS
+			if (tls != NULL)
+				mh = m_uiotombuf(hdr_uio, M_WAITOK, space,
+				    tls->params.max_frame_len, M_NOMAP);
+			else
+#endif
+				mh = m_uiotombuf(hdr_uio, M_WAITOK,
+				    space, 0, 0);
 			hdrlen = m_length(mh, &mhtail);
 			space -= hdrlen;
 			/*
@@ -685,7 +764,7 @@ retry_space:
 				goto done;
 			error = VOP_GETATTR(vp, &va, td->td_ucred);
 			if (error != 0 || off >= va.va_size) {
-				VOP_UNLOCK(vp, 0);
+				VOP_UNLOCK(vp);
 				goto done;
 			}
 			if (va.va_size != obj_size) {
@@ -698,6 +777,17 @@ retry_space:
 
 		if (space > rem)
 			space = rem;
+		else if (space > PAGE_SIZE) {
+			/*
+			 * Use page boundaries when possible for large
+			 * requests.
+			 */
+			if (off & PAGE_MASK)
+				space -= (PAGE_SIZE - (off & PAGE_MASK));
+			space = trunc_page(space);
+			if (off & PAGE_MASK)
+				space += (PAGE_SIZE - (off & PAGE_MASK));
+		}
 
 		npages = howmany(space + (off & PAGE_MASK), PAGE_SIZE);
 
@@ -724,16 +814,60 @@ retry_space:
 		sfio = malloc(sizeof(struct sf_io) +
 		    npages * sizeof(vm_page_t), M_TEMP, M_WAITOK);
 		refcount_init(&sfio->nios, 1);
+		sfio->so = so;
 		sfio->error = 0;
 
-		nios = sendfile_swapin(obj, sfio, off, space, npages, rhpages,
-		    flags);
+#ifdef KERN_TLS
+		/*
+		 * This doesn't use ktls_hold() because sfio->m will
+		 * also have a reference on 'tls' that will be valid
+		 * for all of sfio's lifetime.
+		 */
+		sfio->tls = tls;
+#endif
+
+		error = sendfile_swapin(obj, sfio, &nios, off, space, npages,
+		    rhpages, flags);
+		if (error != 0) {
+			if (vp != NULL)
+				VOP_UNLOCK(vp);
+			sfio->m = NULL;
+			sendfile_iodone(sfio, NULL, 0, error);
+			goto done;
+		}
 
 		/*
 		 * Loop and construct maximum sized mbuf chain to be bulk
 		 * dumped into socket buffer.
 		 */
 		pa = sfio->pa;
+
+		/*
+		 * Use unmapped mbufs if enabled for TCP.  Unmapped
+		 * bufs are restricted to TCP as that is what has been
+		 * tested.  In particular, unmapped mbufs have not
+		 * been tested with UNIX-domain sockets.
+		 *
+		 * TLS frames always require unmapped mbufs.
+		 */
+		if ((mb_use_ext_pgs &&
+		    so->so_proto->pr_protocol == IPPROTO_TCP)
+#ifdef KERN_TLS
+		    || tls != NULL
+#endif
+		    ) {
+			use_ext_pgs = true;
+#ifdef KERN_TLS
+			if (tls != NULL)
+				max_pgs = num_pages(tls->params.max_frame_len);
+			else
+#endif
+				max_pgs = MBUF_PEXT_MAX_PGS;
+
+			/* Start at last index, to wrap on first use. */
+			ext_pgs_idx = max_pgs - 1;
+		}
+
 		for (int i = 0; i < npages; i++) {
 			struct mbuf *m0;
 
@@ -749,6 +883,66 @@ retry_space:
 				break;
 			}
 
+			if (use_ext_pgs) {
+				off_t xfs;
+
+				ext_pgs_idx++;
+				if (ext_pgs_idx == max_pgs) {
+					m0 = mb_alloc_ext_pgs(M_WAITOK, false,
+					    sendfile_free_mext_pg);
+
+					if (flags & SF_NOCACHE) {
+						m0->m_ext.ext_flags |=
+						    EXT_FLAG_NOCACHE;
+
+						/*
+						 * See comment below regarding
+						 * ignoring SF_NOCACHE for the
+						 * last page.
+						 */
+						if ((npages - i <= max_pgs) &&
+						    ((off + space) & PAGE_MASK) &&
+						    (rem > space || rhpages > 0))
+							m0->m_ext.ext_flags |=
+							    EXT_FLAG_CACHE_LAST;
+					}
+					if (sfs != NULL) {
+						m0->m_ext.ext_flags |=
+						    EXT_FLAG_SYNC;
+						m0->m_ext.ext_arg2 = sfs;
+						mtx_lock(&sfs->mtx);
+						sfs->count++;
+						mtx_unlock(&sfs->mtx);
+					}
+					ext_pgs = m0->m_ext.ext_pgs;
+					if (i == 0)
+						sfio->m = m0;
+					ext_pgs_idx = 0;
+
+					/* Append to mbuf chain. */
+					if (mtail != NULL)
+						mtail->m_next = m0;
+					else
+						m = m0;
+					mtail = m0;
+					ext_pgs->first_pg_off =
+					    vmoff(i, off) & PAGE_MASK;
+				}
+				if (nios) {
+					mtail->m_flags |= M_NOTREADY;
+					ext_pgs->nrdy++;
+				}
+
+				ext_pgs->pa[ext_pgs_idx] = VM_PAGE_TO_PHYS(pa[i]);
+				ext_pgs->npgs++;
+				xfs = xfsize(i, npages, off, space);
+				ext_pgs->last_pg_len = xfs;
+				MBUF_EXT_PGS_ASSERT_SANITY(ext_pgs);
+				mtail->m_len += xfs;
+				mtail->m_ext.ext_size += PAGE_SIZE;
+				continue;
+			}
+
 			/*
 			 * Get a sendfile buf.  When allocating the
 			 * first buffer for mbuf chain, we usually
@@ -762,11 +956,8 @@ retry_space:
 			    m != NULL ? SFB_NOWAIT : SFB_CATCH);
 			if (sf == NULL) {
 				SFSTAT_INC(sf_allocfail);
-				for (int j = i; j < npages; j++) {
-					vm_page_lock(pa[j]);
+				for (int j = i; j < npages; j++)
 					vm_page_unwire(pa[j], PQ_INACTIVE);
-					vm_page_unlock(pa[j]);
-				}
 				if (m == NULL)
 					softerr = ENOBUFS;
 				fixspace(npages, i, off, &space);
@@ -778,7 +969,9 @@ retry_space:
 			m0->m_ext.ext_buf = (char *)sf_buf_kva(sf);
 			m0->m_ext.ext_size = PAGE_SIZE;
 			m0->m_ext.ext_arg1 = sf;
-			m0->m_ext.ext_arg2 = sfs;
+			m0->m_ext.ext_type = EXT_SFBUF;
+			m0->m_ext.ext_flags = EXT_FLAG_EMBREF;
+			m0->m_ext.ext_free = sendfile_free_mext;
 			/*
 			 * SF_NOCACHE sets the page as being freed upon send.
 			 * However, we ignore it for the last page in 'space',
@@ -786,14 +979,18 @@ retry_space:
 			 * send (rem > space), or if we have readahead
 			 * configured (rhpages > 0).
 			 */
-			if ((flags & SF_NOCACHE) == 0 ||
-			    (i == npages - 1 &&
-			    ((off + space) & PAGE_MASK) &&
-			    (rem > space || rhpages > 0)))
-				m0->m_ext.ext_type = EXT_SFBUF;
-			else
-				m0->m_ext.ext_type = EXT_SFBUF_NOCACHE;
-			m0->m_ext.ext_flags = EXT_FLAG_EMBREF;
+			if ((flags & SF_NOCACHE) &&
+			    (i != npages - 1 ||
+			    !((off + space) & PAGE_MASK) ||
+			    !(rem > space || rhpages > 0)))
+				m0->m_ext.ext_flags |= EXT_FLAG_NOCACHE;
+			if (sfs != NULL) {
+				m0->m_ext.ext_flags |= EXT_FLAG_SYNC;
+				m0->m_ext.ext_arg2 = sfs;
+				mtx_lock(&sfs->mtx);
+				sfs->count++;
+				mtx_unlock(&sfs->mtx);
+			}
 			m0->m_ext.ext_count = 1;
 			m0->m_flags |= (M_EXT | M_RDONLY);
 			if (nios)
@@ -811,16 +1008,10 @@ retry_space:
 			else
 				m = m0;
 			mtail = m0;
-
-			if (sfs != NULL) {
-				mtx_lock(&sfs->mtx);
-				sfs->count++;
-				mtx_unlock(&sfs->mtx);
-			}
 		}
 
 		if (vp != NULL)
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 
 		/* Keep track of bytes processed. */
 		off += space;
@@ -847,6 +1038,14 @@ prepend_header:
 		    __func__, m_length(m, NULL), space, hdrlen));
 
 		CURVNET_SET(so->so_vnet);
+#ifdef KERN_TLS
+		if (tls != NULL) {
+			error = ktls_frame(m, tls, &tls_enq_cnt,
+			    TLS_RLTYPE_APP);
+			if (error != 0)
+				goto done;
+		}
+#endif
 		if (nios == 0) {
 			/*
 			 * If sendfile_swapin() didn't initiate any I/Os,
@@ -855,12 +1054,19 @@ prepend_header:
 			 * PRUS_NOTREADY flag.
 			 */
 			free(sfio, M_TEMP);
-			error = (*so->so_proto->pr_usrreqs->pru_send)
-			    (so, 0, m, NULL, NULL, td);
+#ifdef KERN_TLS
+			if (tls != NULL && tls->mode == TCP_TLS_MODE_SW) {
+				error = (*so->so_proto->pr_usrreqs->pru_send)
+				    (so, PRUS_NOTREADY, m, NULL, NULL, td);
+				soref(so);
+				ktls_enqueue(m, so, tls_enq_cnt);
+			} else
+#endif
+				error = (*so->so_proto->pr_usrreqs->pru_send)
+				    (so, 0, m, NULL, NULL, td);
 		} else {
-			sfio->sock_fp = sock_fp;
 			sfio->npages = npages;
-			fhold(sock_fp);
+			soref(so);
 			error = (*so->so_proto->pr_usrreqs->pru_send)
 			    (so, PRUS_NOTREADY, m, NULL, NULL, td);
 			sendfile_iodone(sfio, NULL, 0, 0);
@@ -921,6 +1127,10 @@ out:
 		mtx_destroy(&sfs->mtx);
 		free(sfs, M_TEMP);
 	}
+#ifdef KERN_TLS
+	if (tls != NULL)
+		ktls_free(tls);
+#endif
 
 	if (error == ERESTART)
 		error = EINTR;
@@ -934,7 +1144,6 @@ sendfile(struct thread *td, struct sendfile_args *uap, int compat)
 	struct sf_hdtr hdtr;
 	struct uio *hdr_uio, *trl_uio;
 	struct file *fp;
-	cap_rights_t rights;
 	off_t sbytes;
 	int error;
 
@@ -945,6 +1154,7 @@ sendfile(struct thread *td, struct sendfile_args *uap, int compat)
 	if (uap->offset < 0)
 		return (EINVAL);
 
+	sbytes = 0;
 	hdr_uio = trl_uio = NULL;
 
 	if (uap->hdtr != NULL) {
@@ -984,10 +1194,8 @@ sendfile(struct thread *td, struct sendfile_args *uap, int compat)
 	 * sendfile(2) can start at any offset within a file so we require
 	 * CAP_READ+CAP_SEEK = CAP_PREAD.
 	 */
-	if ((error = fget_read(td, uap->fd,
-	    cap_rights_init(&rights, CAP_PREAD), &fp)) != 0) {
+	if ((error = fget_read(td, uap->fd, &cap_pread_rights, &fp)) != 0)
 		goto out;
-	}
 
 	error = fo_sendfile(fp, uap->s, hdr_uio, trl_uio, uap->offset,
 	    uap->nbytes, &sbytes, uap->flags, td);

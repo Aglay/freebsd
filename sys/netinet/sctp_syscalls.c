@@ -35,7 +35,6 @@ __FBSDID("$FreeBSD$");
 #include "opt_inet.h"
 #include "opt_inet6.h"
 #include "opt_sctp.h"
-#include "opt_compat.h"
 #include "opt_ktrace.h"
 
 #include <sys/param.h>
@@ -82,17 +81,17 @@ __FBSDID("$FreeBSD$");
 #include <netinet/sctp_peeloff.h>
 
 static struct syscall_helper_data sctp_syscalls[] = {
-	SYSCALL_INIT_HELPER(sctp_peeloff),
-	SYSCALL_INIT_HELPER(sctp_generic_sendmsg),
-	SYSCALL_INIT_HELPER(sctp_generic_sendmsg_iov),
-	SYSCALL_INIT_HELPER(sctp_generic_recvmsg),
+	SYSCALL_INIT_HELPER_F(sctp_peeloff, SYF_CAPENABLED),
+	SYSCALL_INIT_HELPER_F(sctp_generic_sendmsg, SYF_CAPENABLED),
+	SYSCALL_INIT_HELPER_F(sctp_generic_sendmsg_iov, SYF_CAPENABLED),
+	SYSCALL_INIT_HELPER_F(sctp_generic_recvmsg, SYF_CAPENABLED),
 	SYSCALL_INIT_LAST
 };
 
 static void
 sctp_syscalls_init(void *unused __unused)
 {
-	int error;
+	int error __unused;
 
 	error = syscall_helper_register(sctp_syscalls, SY_THR_STATIC);
 	KASSERT((error == 0),

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0
+ *
  * Copyright (c) 2009 Mellanox Technologies Ltd.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -132,7 +134,7 @@ sdp_post_recv(struct sdp_sock *ssk)
 		rx_req->mapping[i] = addr;
 		sge->addr = addr;
 		sge->length = mb->m_len;
-		sge->lkey = ssk->sdp_dev->mr->lkey;
+		sge->lkey = ssk->sdp_dev->pd->local_dma_lkey;
         }
 
 	rx_wr.next = NULL;
@@ -479,8 +481,9 @@ sdp_process_rx_wc(struct sdp_sock *ssk, struct ib_wc *wc)
 	if (unlikely(wc->status)) {
 		if (ssk->qp_active && sk) {
 			sdp_dbg(sk, "Recv completion with error. "
-					"Status %d, vendor: %d\n",
-				wc->status, wc->vendor_err);
+			    "Status %s (%d), vendor: %d\n",
+			    ib_wc_status_msg(wc->status), wc->status,
+			    wc->vendor_err);
 			sdp_abort(sk);
 			ssk->qp_active = 0;
 		}
@@ -698,6 +701,11 @@ sdp_rx_cq_event_handler(struct ib_event *event, void *data)
 int
 sdp_rx_ring_create(struct sdp_sock *ssk, struct ib_device *device)
 {
+	struct ib_cq_init_attr rx_cq_attr = {
+		.cqe = SDP_RX_SIZE,
+		.comp_vector = 0,
+		.flags = 0,
+	};
 	struct ib_cq *rx_cq;
 	int rc = 0;
 
@@ -710,7 +718,7 @@ sdp_rx_ring_create(struct sdp_sock *ssk, struct ib_device *device)
 	    M_SDP, M_WAITOK);
 
 	rx_cq = ib_create_cq(device, sdp_rx_irq, sdp_rx_cq_event_handler,
-	    ssk, SDP_RX_SIZE, 0);
+	    ssk, &rx_cq_attr);
 	if (IS_ERR(rx_cq)) {
 		rc = PTR_ERR(rx_cq);
 		sdp_warn(ssk->socket, "Unable to allocate RX CQ: %d.\n", rc);

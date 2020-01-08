@@ -42,6 +42,21 @@ SRCS=ecore_cxt.c ecore_dcbx.c ecore_dev.c ecore_hw.c
 SRCS+=ecore_init_fw_funcs.c ecore_int.c ecore_mcp.c
 SRCS+=ecore_sp_commands.c ecore_spq.c ecore_l2.c
 SRCS+=ecore_init_ops.c ecore_dbg_fw_funcs.c
+SRCS+=ecore_mng_tlv.c
+
+SRCS+=ecore_sriov.c
+SRCS+=ecore_vf.c
+
+#roce/iwarp files. Compilation can be turned off roce/iwarp are not required.
+# In other words if you don't need RDMA please comment out SRCS adds for
+# ecore_rdma.c ecore_roce.c ecore_iwarp.c ecore_ooo.c ecore_ll2.c qlnx_rdma.c
+SRCS+=ecore_rdma.c
+SRCS+=ecore_roce.c
+SRCS+=ecore_iwarp.c
+SRCS+=ecore_ooo.c
+SRCS+=ecore_ll2.c
+SRCS+=qlnx_rdma.c
+
 
 SRCS+=qlnx_ioctl.c
 SRCS+=qlnx_os.c
@@ -49,10 +64,12 @@ SRCS+=qlnx_os.c
 SRCS+= device_if.h
 SRCS+= bus_if.h
 SRCS+= pci_if.h
+SRCS+= pci_iov_if.h
 
-CWARNEXTRA += -Wno-cast-qual
 
-CFLAGS += -DQLNX_DEBUG
+.include <bsd.kmod.mk>
+
+#CFLAGS += -DQLNX_DEBUG
 CFLAGS += -DECORE_PACKAGE
 CFLAGS += -DCONFIG_ECORE_L2
 CFLAGS += -DECORE_CONFIG_DIRECT_HWFN
@@ -65,7 +82,17 @@ CFLAGS+= -I${SRCTOP}/sys/compat/linuxkpi/common/include
 #CFLAGS += -DQLNX_SOFT_LRO
 #CFLAGS += -DQLNX_QSORT_LRO
 #CFLAGS += -DQLNX_MAX_COALESCE
+#CFLAGS += -DQLNX_USER_LLDP
 
+CFLAGS += -DCONFIG_ECORE_SRIOV
 
-.include <bsd.kmod.mk>
+# For roce/iwarp files. Compilation can be turned off if roce/iwarp are not required.
+# In other words if you don't need RDMA please comment out the CFLAGS which define
+# CONFIG_ECORE_LL2 CONFIG_ECORE_ROCE CONFIG_ECORE_IWARP QLNX_ENABLE_IWARP
+CFLAGS += -DCONFIG_ECORE_LL2
+CFLAGS += -DCONFIG_ECORE_ROCE
+CFLAGS += -DCONFIG_ECORE_IWARP
+CFLAGS += -DCONFIG_ECORE_RDMA
+CFLAGS += -DQLNX_ENABLE_IWARP
 
+CWARNFLAGS+= -Wno-cast-qual

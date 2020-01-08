@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2014 Leon Dang <ldang@nahannisys.com>
  * All rights reserved.
  *
@@ -1898,6 +1900,11 @@ pci_xhci_device_doorbell(struct pci_xhci_softc *sc, uint32_t slot,
 		return;
 	}
 
+	if (epid == 0 || epid >= XHCI_MAX_ENDPOINTS) {
+		DPRINTF(("pci_xhci: invalid endpoint %u\r\n", epid));
+		return;
+	}
+
 	dev = XHCI_SLOTDEV_PTR(sc, slot);
 	devep = &dev->eps[epid];
 	dev_ctx = pci_xhci_get_dev_ctx(sc, slot);
@@ -1923,6 +1930,23 @@ pci_xhci_device_doorbell(struct pci_xhci_softc *sc, uint32_t slot,
 
 	/* get next trb work item */
 	if (XHCI_EPCTX_0_MAXP_STREAMS_GET(ep_ctx->dwEpCtx0) != 0) {
+		struct xhci_stream_ctx *sctx;
+
+		/*
+		 * Stream IDs of 0, 65535 (any stream), and 65534
+		 * (prime) are invalid.
+		 */
+		if (streamid == 0 || streamid == 65534 || streamid == 65535) {
+			DPRINTF(("pci_xhci: invalid stream %u\r\n", streamid));
+			return;
+		}
+
+		sctx = NULL;
+		pci_xhci_find_stream(sc, ep_ctx, streamid, &sctx);
+		if (sctx == NULL) {
+			DPRINTF(("pci_xhci: invalid stream %u\r\n", streamid));
+			return;
+		}
 		sctx_tr = &devep->ep_sctx_trbs[streamid];
 		ringaddr = sctx_tr->ringaddr;
 		ccs = sctx_tr->ccs;
@@ -1931,6 +1955,10 @@ pci_xhci_device_doorbell(struct pci_xhci_softc *sc, uint32_t slot,
 		        streamid, ep_ctx->qwEpCtx2 & XHCI_TRB_3_CYCLE_BIT,
 		        trb->dwTrb3 & XHCI_TRB_3_CYCLE_BIT));
 	} else {
+		if (streamid != 0) {
+			DPRINTF(("pci_xhci: invalid stream %u\r\n", streamid));
+			return;
+		}
 		ringaddr = devep->ep_ringaddr;
 		ccs = devep->ep_ccs;
 		trb = devep->ep_tr;
@@ -2210,12 +2238,12 @@ pci_xhci_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 
 	sc = pi->pi_arg;
 
-        assert(baridx == 0);
+	assert(baridx == 0);
 
 
-        pthread_mutex_lock(&sc->mtx);
+	pthread_mutex_lock(&sc->mtx);
 	if (offset < XHCI_CAPLEN)	/* read only registers */
-                WPRINTF(("pci_xhci: write RO-CAPs offset %ld\r\n", offset));
+		WPRINTF(("pci_xhci: write RO-CAPs offset %ld\r\n", offset));
 	else if (offset < sc->dboff)
 		pci_xhci_hostop_write(sc, offset, value);
 	else if (offset < sc->rtsoff)
@@ -2223,9 +2251,9 @@ pci_xhci_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	else if (offset < sc->regsend)
 		pci_xhci_rtsregs_write(sc, offset, value);
 	else
-                WPRINTF(("pci_xhci: write invalid offset %ld\r\n", offset));
+		WPRINTF(("pci_xhci: write invalid offset %ld\r\n", offset));
 
-        pthread_mutex_unlock(&sc->mtx);
+	pthread_mutex_unlock(&sc->mtx);
 }
 
 static uint64_t
@@ -2433,9 +2461,9 @@ pci_xhci_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx,
 
 	sc = pi->pi_arg;
 
-        assert(baridx == 0);
+	assert(baridx == 0);
 
-        pthread_mutex_lock(&sc->mtx);
+	pthread_mutex_lock(&sc->mtx);
 	if (offset < XHCI_CAPLEN)
 		value = pci_xhci_hostcap_read(sc, offset);
 	else if (offset < sc->dboff)
@@ -2448,10 +2476,10 @@ pci_xhci_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx,
 		value = pci_xhci_xecp_read(sc, offset);
 	else {
 		value = 0;
-                WPRINTF(("pci_xhci: read invalid offset %ld\r\n", offset));
+		WPRINTF(("pci_xhci: read invalid offset %ld\r\n", offset));
 	}
 
-        pthread_mutex_unlock(&sc->mtx);
+	pthread_mutex_unlock(&sc->mtx);
 
 	switch (size) {
 	case 1:
@@ -2526,10 +2554,10 @@ pci_xhci_init_port(struct pci_xhci_softc *sc, int portn)
 		               XHCI_PS_SPEED_SET(dev->dev_ue->ue_usbspeed);
 		}
 		
-		DPRINTF(("Init port %d 0x%x\n", portn, port->portsc));
+		DPRINTF(("Init port %d 0x%x\r\n", portn, port->portsc));
 	} else {
 		port->portsc = XHCI_PS_PLS_SET(UPS_PORT_LS_RX_DET) | XHCI_PS_PP;
-		DPRINTF(("Init empty port %d 0x%x\n", portn, port->portsc));
+		DPRINTF(("Init empty port %d 0x%x\r\n", portn, port->portsc));
 	}
 }
 
@@ -2542,7 +2570,7 @@ pci_xhci_dev_intr(struct usb_hci *hci, int epctx)
 	struct pci_xhci_softc	*sc;
 	struct pci_xhci_portregs *p;
 	struct xhci_endp_ctx	*ep_ctx;
-	int	error;
+	int	error = 0;
 	int	dir_in;
 	int	epid;
 
@@ -2624,6 +2652,7 @@ pci_xhci_parse_opts(struct pci_xhci_softc *sc, char *opts)
 	char	*uopt, *xopts, *config;
 	int	usb3_port, usb2_port, i;
 
+	uopt = NULL;
 	usb3_port = sc->usb3_port_start - 1;
 	usb2_port = sc->usb2_port_start - 1;
 	devices = NULL;
@@ -2727,6 +2756,7 @@ done:
 			free(devices);
 		}
 	}
+	free(uopt);
 	return (sc->ndevices);
 }
 

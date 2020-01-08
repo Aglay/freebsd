@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -492,6 +494,7 @@ struct crypt_data {
 int	 acct(const char *);
 int	 async_daemon(void);
 int	 check_utility_compat(const char *);
+ssize_t	 copy_file_range(int, off_t *, int, off_t *, size_t, unsigned int);
 const char *
 	 crypt_get_format(void);
 char	*crypt_r(const char *, const char *, struct crypt_data *);
@@ -504,6 +507,7 @@ int	 execvP(const char *, const char *, char * const *);
 int	 feature_present(const char *);
 char	*fflagstostr(u_long);
 int	 getdomainname(char *, int);
+int	 getentropy(void *, size_t);
 int	 getgrouplist(const char *, gid_t, gid_t *, int *);
 int	 getloginclass(char *, size_t);
 mode_t	 getmode(const void *, mode_t);
@@ -553,11 +557,9 @@ pid_t	 rfork_thread(int, void *, int (*)(void *), void *);
 int	 rresvport(int *);
 int	 rresvport_af(int *, int);
 int	 ruserok(const char *, int, const char *, const char *);
-#if __BSD_VISIBLE
 #ifndef _SELECT_DECLARED
 #define	_SELECT_DECLARED
 int	 select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
-#endif
 #endif
 int	 setdomainname(const char *, int);
 int	 setgroups(int, const gid_t *);
@@ -568,6 +570,7 @@ int	 setloginclass(const char *);
 void	*setmode(const char *);
 int	 setpgrp(pid_t, pid_t);			/* obsoleted by setpgid() */
 void	 setproctitle(const char *_fmt, ...) __printf0like(1, 2);
+void	 setproctitle_fast(const char *_fmt, ...) __printf0like(1, 2);
 int	 setresgid(gid_t, gid_t, gid_t);
 int	 setresuid(uid_t, uid_t, uid_t);
 int	 setrgid(gid_t);
@@ -581,6 +584,7 @@ off_t	 __syscall(quad_t, ...);
 int	 undelete(const char *);
 int	 unwhiteout(const char *);
 void	*valloc(size_t);			/* obsoleted by malloc() */
+int	 funlinkat(int, const char *, int, int);
 
 #ifndef _OPTRESET_DECLARED
 #define	_OPTRESET_DECLARED

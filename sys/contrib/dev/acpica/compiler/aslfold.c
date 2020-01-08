@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -232,8 +232,8 @@ OpcAmlConstantWalk (
      * Only interested in subtrees that could possibly contain
      * expressions that can be evaluated at this time
      */
-    if ((!(Op->Asl.CompileFlags & NODE_COMPILE_TIME_CONST)) ||
-          (Op->Asl.CompileFlags & NODE_IS_TARGET))
+    if ((!(Op->Asl.CompileFlags & OP_COMPILE_TIME_CONST)) ||
+          (Op->Asl.CompileFlags & OP_IS_TARGET))
     {
         return (AE_OK);
     }
@@ -412,7 +412,7 @@ OpcAmlCheckForConstant (
         {
             /* Error if there is a target operand */
 
-            if (Op->Asl.CompileFlags & NODE_IS_TARGET)
+            if (Op->Asl.CompileFlags & OP_IS_TARGET)
             {
                 AslError (ASL_ERROR, ASL_MSG_INVALID_TARGET, Op, NULL);
                 Status = AE_TYPE;
@@ -420,11 +420,11 @@ OpcAmlCheckForConstant (
 
             /* Error if expression cannot be reduced (folded) */
 
-            if (!(NextOp->Asl.CompileFlags & NODE_COULD_NOT_REDUCE))
+            if (!(NextOp->Asl.CompileFlags & OP_COULD_NOT_REDUCE))
             {
                 /* Ensure only one error message per statement */
 
-                NextOp->Asl.CompileFlags |= NODE_COULD_NOT_REDUCE;
+                NextOp->Asl.CompileFlags |= OP_COULD_NOT_REDUCE;
                 DbgPrint (ASL_PARSE_OUTPUT,
                     "**** Could not reduce operands for NAME opcode ****\n");
 
@@ -441,10 +441,10 @@ OpcAmlCheckForConstant (
 
         /* This is not a 3/4/5 opcode, but maybe can convert to STORE */
 
-        if (Op->Asl.CompileFlags & NODE_IS_TARGET)
+        if (Op->Asl.CompileFlags & OP_IS_TARGET)
         {
             DbgPrint (ASL_PARSE_OUTPUT,
-                "**** Valid Target, transform to Store ****\n");
+                "**** Valid Target, transform to Store or CopyObject ****\n");
             return (AE_CTRL_RETURN_VALUE);
         }
 
@@ -468,7 +468,7 @@ OpcAmlCheckForConstant (
     if (WalkState->Opcode == AML_BUFFER_OP)
     {
         DbgPrint (ASL_PARSE_OUTPUT,
-            "\nBuffer constant reduction is not supported yet\n");
+            "\nBuffer constant reduction is currently not supported\n");
 
         if (NextOp) /* Found a Name() operator, error */
         {
@@ -484,7 +484,7 @@ OpcAmlCheckForConstant (
 
     DbgPrint (ASL_PARSE_OUTPUT, "TYPE_345");
 
-    if (Op->Asl.CompileFlags & NODE_IS_TARGET)
+    if (Op->Asl.CompileFlags & OP_IS_TARGET)
     {
         if (Op->Asl.ParseOpcode == PARSEOP_ZERO)
         {
@@ -496,7 +496,7 @@ OpcAmlCheckForConstant (
         }
     }
 
-    if (Op->Asl.CompileFlags & NODE_IS_TERM_ARG)
+    if (Op->Asl.CompileFlags & OP_IS_TERM_ARG)
     {
         DbgPrint (ASL_PARSE_OUTPUT, "%-16s", " TERMARG");
     }
@@ -505,7 +505,7 @@ CleanupAndExit:
 
     /* Dump the node compile flags also */
 
-    TrPrintNodeCompileFlags (Op->Asl.CompileFlags);
+    TrPrintOpFlags (Op->Asl.CompileFlags, ASL_PARSE_OUTPUT);
     DbgPrint (ASL_PARSE_OUTPUT, "\n");
     return (Status);
 }
@@ -543,7 +543,7 @@ TrSimpleConstantReduction (
 
     /* Allocate a new temporary root for this subtree */
 
-    RootOp = TrAllocateNode (PARSEOP_INTEGER);
+    RootOp = TrAllocateOp (PARSEOP_INTEGER);
     if (!RootOp)
     {
         return (AE_NO_MEMORY);
@@ -623,6 +623,8 @@ TrTransformToStoreOp (
     ACPI_PARSE_OBJECT       *NewParent;
     ACPI_PARSE_OBJECT       *OriginalParent;
     ACPI_STATUS             Status;
+    UINT16                  NewParseOpcode;
+    UINT16                  NewAmlOpcode;
 
 
     /* Extract the operands */
@@ -646,15 +648,51 @@ TrTransformToStoreOp (
         }
     }
 
-    DbgPrint (ASL_PARSE_OUTPUT,
-        "Reduction/Transform to StoreOp: Store(%s, %s)\n",
-        Child1->Asl.ParseOpName, Child2->Asl.ParseOpName);
+    switch (Op->Asl.ParseOpcode)
+    {
+    /*
+     * Folding of the explicit conversion opcodes must use CopyObject
+     * instead of Store. This can change the object type of the target
+     * operand, as per the ACPI specification:
+     *
+     * "If the ASL operator is one of the explicit conversion operators
+     * (ToString, ToInteger, etc., and the CopyObject operator), no
+     * [implicit] conversion is performed. (In other words, the result
+     * object is stored directly to the target and completely overwrites
+     * any existing object already stored at the target)"
+     */
+    case PARSEOP_TOINTEGER:
+    case PARSEOP_TOSTRING:
+    case PARSEOP_TOBUFFER:
+    case PARSEOP_TODECIMALSTRING:
+    case PARSEOP_TOHEXSTRING:
+    case PARSEOP_TOBCD:
+    case PARSEOP_FROMBCD:
+
+        NewParseOpcode = PARSEOP_COPYOBJECT;
+        NewAmlOpcode = AML_COPY_OBJECT_OP;
+
+        DbgPrint (ASL_PARSE_OUTPUT,
+            "Reduction/Transform to CopyObjectOp: CopyObject(%s, %s)\n",
+            Child1->Asl.ParseOpName, Child2->Asl.ParseOpName);
+        break;
+
+    default:
+
+        NewParseOpcode = PARSEOP_STORE;
+        NewAmlOpcode = AML_STORE_OP;
+
+        DbgPrint (ASL_PARSE_OUTPUT,
+            "Reduction/Transform to StoreOp: Store(%s, %s)\n",
+            Child1->Asl.ParseOpName, Child2->Asl.ParseOpName);
+        break;
+    }
 
     /*
      * Create a NULL (zero) target so that we can use the
      * interpreter to evaluate the expression.
      */
-    NewTarget = TrCreateNullTarget ();
+    NewTarget = TrCreateNullTargetOp ();
     NewTarget->Common.AmlOpcode = AML_INT_NAMEPATH_OP;
 
     /* Handle one-operand cases (NOT, TOBCD, etc.) */
@@ -670,7 +708,7 @@ TrTransformToStoreOp (
     Child2->Asl.Next = NewTarget;
     NewTarget->Asl.Parent = OriginalTarget->Asl.Parent;
 
-    NewParent = TrAllocateNode (PARSEOP_INTEGER);
+    NewParent = TrAllocateOp (PARSEOP_INTEGER);
     NewParent->Common.AmlOpcode = AML_INT_EVAL_SUBTREE_OP;
 
     OriginalParent = Op->Common.Parent;
@@ -709,10 +747,10 @@ TrTransformToStoreOp (
 
     TrInstallReducedConstant (Child1, ObjDesc);
 
-    /* Convert operator to STORE */
+    /* Convert operator to STORE or COPYOBJECT */
 
-    Op->Asl.ParseOpcode = PARSEOP_STORE;
-    Op->Asl.AmlOpcode = AML_STORE_OP;
+    Op->Asl.ParseOpcode = NewParseOpcode;
+    Op->Asl.AmlOpcode = NewAmlOpcode;
     UtSetParseOpName (Op);
     Op->Common.Parent = OriginalParent;
 
@@ -757,7 +795,7 @@ TrInstallReducedConstant (
     ACPI_PARSE_OBJECT       *DataOp;
 
 
-    TotalFolds++;
+    AslGbl_TotalFolds++;
     AslError (ASL_OPTIMIZATION, ASL_MSG_CONSTANT_FOLDED, Op,
         Op->Asl.ParseOpName);
 
@@ -799,12 +837,12 @@ TrInstallReducedConstant (
          */
         Op->Asl.ParseOpcode = PARSEOP_BUFFER;
         Op->Common.AmlOpcode = AML_BUFFER_OP;
-        Op->Asl.CompileFlags = NODE_AML_PACKAGE;
+        Op->Asl.CompileFlags = OP_AML_PACKAGE;
         UtSetParseOpName (Op);
 
         /* Child node is the buffer length */
 
-        LengthOp = TrAllocateNode (PARSEOP_INTEGER);
+        LengthOp = TrAllocateOp (PARSEOP_INTEGER);
 
         LengthOp->Asl.AmlOpcode = AML_DWORD_OP;
         LengthOp->Asl.Value.Integer = ObjDesc->Buffer.Length;
@@ -815,7 +853,7 @@ TrInstallReducedConstant (
 
         /* Next child is the raw buffer data */
 
-        DataOp = TrAllocateNode (PARSEOP_RAW_DATA);
+        DataOp = TrAllocateOp (PARSEOP_RAW_DATA);
         DataOp->Asl.AmlOpcode = AML_RAW_DATA_BUFFER;
         DataOp->Asl.AmlLength = ObjDesc->Buffer.Length;
         DataOp->Asl.Value.String = (char *) ObjDesc->Buffer.Pointer;
@@ -863,25 +901,25 @@ OpcUpdateIntegerNode (
     {
     case 1:
 
-        TrUpdateNode (PARSEOP_BYTECONST, Op);
+        TrSetOpIntegerValue (PARSEOP_BYTECONST, Op);
         Op->Asl.AmlOpcode = AML_RAW_DATA_BYTE;
         break;
 
     case 2:
 
-        TrUpdateNode (PARSEOP_WORDCONST, Op);
+        TrSetOpIntegerValue (PARSEOP_WORDCONST, Op);
         Op->Asl.AmlOpcode = AML_RAW_DATA_WORD;
         break;
 
     case 4:
 
-        TrUpdateNode (PARSEOP_DWORDCONST, Op);
+        TrSetOpIntegerValue (PARSEOP_DWORDCONST, Op);
         Op->Asl.AmlOpcode = AML_RAW_DATA_DWORD;
         break;
 
     case 8:
 
-        TrUpdateNode (PARSEOP_QWORDCONST, Op);
+        TrSetOpIntegerValue (PARSEOP_QWORDCONST, Op);
         Op->Asl.AmlOpcode = AML_RAW_DATA_QWORD;
         break;
 
@@ -889,7 +927,7 @@ OpcUpdateIntegerNode (
     default:
 
         OpcSetOptimalIntegerSize (Op);
-        TrUpdateNode (PARSEOP_INTEGER, Op);
+        TrSetOpIntegerValue (PARSEOP_INTEGER, Op);
         break;
     }
 

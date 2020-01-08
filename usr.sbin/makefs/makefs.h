@@ -1,6 +1,8 @@
 /*	$NetBSD: makefs.h,v 1.20 2008/12/28 21:51:46 christos Exp $	*/
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2001 Wasabi Systems, Inc.
  * All rights reserved.
  *
@@ -181,8 +183,9 @@ int		fs ## _parse_opts(const char *, fsinfo_t *);		\
 void		fs ## _cleanup_opts(fsinfo_t *);			\
 void		fs ## _makefs(const char *, const char *, fsnode *, fsinfo_t *)
 
-DECLARE_FUN(ffs);
 DECLARE_FUN(cd9660);
+DECLARE_FUN(ffs);
+DECLARE_FUN(msdos);
 
 extern	u_int		debug;
 extern	int		dupsok;
@@ -223,6 +226,7 @@ extern	struct stat stampst;
 #define	DEBUG_APPLY_SPECFILE		0x04000000
 #define	DEBUG_APPLY_SPECENTRY		0x08000000
 #define	DEBUG_APPLY_SPECONLY		0x10000000
+#define	DEBUG_MSDOSFS			0x20000000
 
 
 #define	TIMER_START(x)				\

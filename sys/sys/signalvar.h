@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -347,7 +349,7 @@ static inline int
 sigdeferstop(int mode)
 {
 
-	if (mode == SIGDEFERSTOP_NOP)
+	if (__predict_true(mode == SIGDEFERSTOP_NOP))
 		return (SIGDEFERSTOP_VAL_NCHG);
 	return (sigdeferstop_impl(mode));
 }
@@ -356,7 +358,7 @@ static inline void
 sigallowstop(int prev)
 {
 
-	if (prev == SIGDEFERSTOP_VAL_NCHG)
+	if (__predict_true(prev == SIGDEFERSTOP_VAL_NCHG))
 		return;
 	sigallowstop_impl(prev);
 }
@@ -379,6 +381,7 @@ void	sigacts_copy(struct sigacts *dest, struct sigacts *src);
 void	sigacts_free(struct sigacts *ps);
 struct sigacts *sigacts_hold(struct sigacts *ps);
 int	sigacts_shared(struct sigacts *ps);
+void	sig_drop_caught(struct proc *p);
 void	sigexit(struct thread *td, int sig) __dead2;
 int	sigev_findtd(struct proc *p, struct sigevent *sigev, struct thread **);
 int	sig_ffs(sigset_t *set);

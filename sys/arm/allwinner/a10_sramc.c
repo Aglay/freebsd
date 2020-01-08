@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 Ganbold Tsagaankhuu <ganbold@freebsd.org>
  * All rights reserved.
  *
@@ -114,7 +116,7 @@ static driver_t a10_sramc_driver = {
 static devclass_t a10_sramc_devclass;
 
 EARLY_DRIVER_MODULE(a10_sramc, simplebus, a10_sramc_driver, a10_sramc_devclass,
-    0, 0, BUS_PASS_RESOURCE + BUS_PASS_ORDER_EARLY);
+    0, 0, BUS_PASS_SUPPORTDEV + BUS_PASS_ORDER_FIRST);
 
 int
 a10_map_to_emac(void)

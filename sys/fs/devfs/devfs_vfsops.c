@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1992, 1993, 1995
  *	The Regents of the University of California.  All rights reserved.
  * Copyright (c) 2000
@@ -81,9 +83,6 @@ devfs_mount(struct mount *mp)
 	if (mp->mnt_flag & MNT_ROOTFS)
 		return (EOPNOTSUPP);
 
-	if (!prison_allow(td->td_ucred, PR_ALLOW_MOUNT_DEVFS))
-		return (EPERM);
-
 	rsnum = 0;
 	injail = jailed(td->td_ucred);
 
@@ -131,7 +130,8 @@ devfs_mount(struct mount *mp)
 
 	MNT_ILOCK(mp);
 	mp->mnt_flag |= MNT_LOCAL;
-	mp->mnt_kern_flag |= MNTK_LOOKUP_SHARED | MNTK_EXTENDED_SHARED;
+	mp->mnt_kern_flag |= MNTK_LOOKUP_SHARED | MNTK_EXTENDED_SHARED |
+	    MNTK_NOMSYNC;
 #ifdef MAC
 	mp->mnt_flag |= MNT_MULTILABEL;
 #endif
@@ -156,7 +156,8 @@ devfs_mount(struct mount *mp)
 		sx_xunlock(&fmp->dm_lock);
 	}
 
-	VOP_UNLOCK(rvp, 0);
+	VOP_UNLOCK(rvp);
+	vfs_cache_root_set(mp, rvp);
 
 	vfs_mountedfrom(mp, "devfs");
 
@@ -238,7 +239,8 @@ devfs_statfs(struct mount *mp, struct statfs *sbp)
 
 static struct vfsops devfs_vfsops = {
 	.vfs_mount =		devfs_mount,
-	.vfs_root =		devfs_root,
+	.vfs_root =		vfs_cache_root,
+	.vfs_cachedroot =	devfs_root,
 	.vfs_statfs =		devfs_statfs,
 	.vfs_unmount =		devfs_unmount,
 };

@@ -22,7 +22,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
- * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
  * Copyright 2016 Toomas Soome <tsoome@me.com>
  */
@@ -131,6 +131,12 @@ enum zio_checksum {
 #define	ZIO_FAILURE_MODE_CONTINUE	1
 #define	ZIO_FAILURE_MODE_PANIC		2
 
+typedef enum zio_suspend_reason {
+	ZIO_SUSPEND_NONE = 0,
+	ZIO_SUSPEND_IOERR,
+	ZIO_SUSPEND_MMP,
+} zio_suspend_reason_t;
+
 enum zio_flag {
 	/*
 	 * Flags inherited by gang, ddt, and vdev children,
@@ -199,7 +205,10 @@ enum zio_flag {
 
 #define	ZIO_VDEV_CHILD_FLAGS(zio)				\
 	(((zio)->io_flags & ZIO_FLAG_VDEV_INHERIT) |		\
-	ZIO_FLAG_CANFAIL)
+	ZIO_FLAG_DONT_PROPAGATE | ZIO_FLAG_CANFAIL)
+
+#define	ZIO_CHILD_BIT(x)		(1 << (x))
+#define	ZIO_CHILD_BIT_IS_SET(val, x)	((val) & (1 << (x)))
 
 enum zio_child {
 	ZIO_CHILD_VDEV = 0,
@@ -208,6 +217,14 @@ enum zio_child {
 	ZIO_CHILD_LOGICAL,
 	ZIO_CHILD_TYPES
 };
+
+#define	ZIO_CHILD_VDEV_BIT		ZIO_CHILD_BIT(ZIO_CHILD_VDEV)
+#define	ZIO_CHILD_GANG_BIT		ZIO_CHILD_BIT(ZIO_CHILD_GANG)
+#define	ZIO_CHILD_DDT_BIT		ZIO_CHILD_BIT(ZIO_CHILD_DDT)
+#define	ZIO_CHILD_LOGICAL_BIT		ZIO_CHILD_BIT(ZIO_CHILD_LOGICAL)
+#define	ZIO_CHILD_ALL_BITS					\
+	(ZIO_CHILD_VDEV_BIT | ZIO_CHILD_GANG_BIT |		\
+	ZIO_CHILD_DDT_BIT | ZIO_CHILD_LOGICAL_BIT)
 
 enum zio_wait_type {
 	ZIO_WAIT_READY = 0,
@@ -290,6 +307,7 @@ typedef struct zio_prop {
 	boolean_t		zp_dedup;
 	boolean_t		zp_dedup_verify;
 	boolean_t		zp_nopwrite;
+	uint32_t		zp_zpl_smallblk;
 } zio_prop_t;
 
 typedef struct zio_cksum_report zio_cksum_report_t;
@@ -345,7 +363,7 @@ typedef struct zio_transform {
 	struct zio_transform	*zt_next;
 } zio_transform_t;
 
-typedef int zio_pipe_stage_t(zio_t *zio);
+typedef zio_t *zio_pipe_stage_t(zio_t *zio);
 
 /*
  * The io_reexecute flags are distinct from io_flags because the child must
@@ -443,6 +461,7 @@ struct zio {
 	vdev_t		*io_vd;
 	void		*io_vsd;
 	const zio_vsd_ops_t *io_vsd_ops;
+	metaslab_class_t *io_metaslab_class;	/* dva throttle class */
 
 	uint64_t	io_offset;
 	hrtime_t	io_timestamp;
@@ -451,10 +470,13 @@ struct zio {
 	avl_node_t	io_queue_node;
 	avl_node_t	io_offset_node;
 	avl_node_t	io_alloc_node;
-	zio_alloc_list_t 	io_alloc_list;
+	zio_alloc_list_t	io_alloc_list;
 
 #ifdef __FreeBSD__
 	struct bio	*io_bio;
+#ifdef _KERNEL
+	struct callout	io_timer;
+#endif
 #endif
 
 	/* Internal pipeline state */
@@ -478,6 +500,7 @@ struct zio {
 	void		*io_waiter;
 	kmutex_t	io_lock;
 	kcondvar_t	io_cv;
+	int		io_allocator;
 
 	/* FMA state */
 	zio_cksum_report_t *io_cksum_report;
@@ -539,9 +562,8 @@ extern zio_t *zio_write_phys(zio_t *pio, vdev_t *vd, uint64_t offset,
 extern zio_t *zio_free_sync(zio_t *pio, spa_t *spa, uint64_t txg,
     const blkptr_t *bp, uint64_t size, enum zio_flag flags);
 
-extern int zio_alloc_zil(spa_t *spa, uint64_t txg, blkptr_t *new_bp,
-    blkptr_t *old_bp, uint64_t size, boolean_t *slog);
-extern void zio_free_zil(spa_t *spa, uint64_t txg, blkptr_t *bp);
+extern int zio_alloc_zil(spa_t *spa, uint64_t objset, uint64_t txg,
+    blkptr_t *new_bp, blkptr_t *old_bp, uint64_t size, boolean_t *slog);
 extern void zio_flush(zio_t *zio, vdev_t *vd);
 extern zio_t *zio_trim(zio_t *zio, spa_t *spa, vdev_t *vd, uint64_t offset,
     uint64_t size);
@@ -576,12 +598,14 @@ extern zio_t *zio_vdev_child_io(zio_t *zio, blkptr_t *bp, vdev_t *vd,
     zio_done_func_t *done, void *priv);
 
 extern zio_t *zio_vdev_delegated_io(vdev_t *vd, uint64_t offset,
-    struct abd *data, uint64_t size, int type, zio_priority_t priority,
+    struct abd *data, uint64_t size, zio_type_t type, zio_priority_t priority,
     enum zio_flag flags, zio_done_func_t *done, void *priv);
 
 extern void zio_vdev_io_bypass(zio_t *zio);
 extern void zio_vdev_io_reissue(zio_t *zio);
 extern void zio_vdev_io_redone(zio_t *zio);
+
+extern void zio_change_priority(zio_t *pio, zio_priority_t priority);
 
 extern void zio_checksum_verified(zio_t *zio);
 extern int zio_worst_error(int e1, int e2);
@@ -593,7 +617,7 @@ extern enum zio_checksum zio_checksum_dedup_select(spa_t *spa,
 extern enum zio_compress zio_compress_select(spa_t *spa,
     enum zio_compress child, enum zio_compress parent);
 
-extern void zio_suspend(spa_t *spa, zio_t *zio);
+extern void zio_suspend(spa_t *spa, zio_t *zio, zio_suspend_reason_t);
 extern int zio_resume(spa_t *spa);
 extern void zio_resume_wait(spa_t *spa);
 

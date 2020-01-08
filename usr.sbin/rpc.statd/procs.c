@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1995
  *	A.R. Gordon (andrew.gordon@net-tel.co.uk).  All rights reserved.
  *
@@ -50,9 +52,10 @@ __FBSDID("$FreeBSD$");
 
 #include "statd.h"
 
+static const char *from_addr(struct sockaddr *);
+
 static const char *
-from_addr(saddr)
-	struct sockaddr *saddr;
+from_addr(struct sockaddr *saddr)
 {
 	static char inet_buf[INET6_ADDRSTRLEN];
 

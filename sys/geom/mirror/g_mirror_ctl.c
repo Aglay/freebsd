@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004-2009 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
  *
@@ -29,24 +31,18 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/bio.h>
 #include <sys/kernel.h>
-#include <sys/module.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
-#include <sys/mutex.h>
-#include <sys/bio.h>
-#include <sys/sbuf.h>
-#include <sys/sysctl.h>
 #include <sys/malloc.h>
-#include <sys/bitstring.h>
-#include <vm/uma.h>
-#include <machine/atomic.h>
-#include <geom/geom.h>
-#include <geom/geom_int.h>
-#include <sys/proc.h>
-#include <sys/kthread.h>
-#include <geom/mirror/g_mirror.h>
+#include <sys/sbuf.h>
+#include <sys/sx.h>
 
+#include <geom/geom.h>
+#include <geom/geom_dbg.h>
+#include <geom/geom_int.h>
+#include <geom/mirror/g_mirror.h>
 
 static struct g_mirror_softc *
 g_mirror_find_device(struct g_class *mp, const char *name)
@@ -857,7 +853,7 @@ g_mirror_ctl_resize(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	/* Deny shrinking of an opened provider */
-	if ((g_debugflags & 16) == 0 && sc->sc_provider_open > 0) {
+	if ((g_debugflags & G_F_FOOTSHOOTING) == 0 && sc->sc_provider_open > 0) {
 		if (sc->sc_mediasize > mediasize) {
 			gctl_error(req, "Device %s is busy.",
 			    sc->sc_provider->name);

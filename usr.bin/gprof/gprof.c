@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1983, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -158,8 +160,11 @@ main(int argc, char **argv)
 	 *	get information from the executable file.
 	 */
     if ((Kflag && kernel_getnfile(a_outname, &defaultEs) == -1) ||
-      (!Kflag && elf_getnfile(a_outname, &defaultEs) == -1 &&
-      aout_getnfile(a_outname, &defaultEs) == -1))
+      (!Kflag && elf_getnfile(a_outname, &defaultEs) == -1
+#ifdef WITH_AOUT
+      && aout_getnfile(a_outname, &defaultEs) == -1
+#endif
+      ))
 	errx(1, "%s: bad format", a_outname);
 	/*
 	 *	sort symbol table.

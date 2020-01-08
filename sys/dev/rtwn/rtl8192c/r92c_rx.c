@@ -52,6 +52,13 @@ __FBSDID("$FreeBSD$");
 #include <dev/rtwn/rtl8192c/r92c_rx_desc.h>
 
 
+int
+r92c_classify_intr(struct rtwn_softc *sc, void *buf, int len)
+{
+	/* NB: reports are fetched from C2H_MSG register. */
+	return (RTWN_RX_DATA);
+}
+
 int8_t
 r92c_get_rssi_cck(struct rtwn_softc *sc, void *physt)
 {
@@ -117,7 +124,7 @@ r92c_get_rx_stats(struct rtwn_softc *sc, struct ieee80211_rx_stats *rxs,
 		rxs->c_pktflags |= IEEE80211_RX_F_AMPDU;
 	else if (rxdw1 & R92C_RXDW1_AMPDU_MORE)
 		rxs->c_pktflags |= IEEE80211_RX_F_AMPDU_MORE;
-	if ((rxdw3 & R92C_RXDW3_SPLCP) && rate >= RTWN_RIDX_MCS(0))
+	if ((rxdw3 & R92C_RXDW3_SPLCP) && rate >= RTWN_RIDX_HT_MCS(0))
 		rxs->c_pktflags |= IEEE80211_RX_F_SHORTGI;
 
 	if (rxdw3 & R92C_RXDW3_HT40)
@@ -127,20 +134,21 @@ r92c_get_rx_stats(struct rtwn_softc *sc, struct ieee80211_rx_stats *rxs,
 
 	if (RTWN_RATE_IS_CCK(rate))
 		rxs->c_phytype = IEEE80211_RX_FP_11B;
-	else if (rate < RTWN_RIDX_MCS(0))
+	else if (rate < RTWN_RIDX_HT_MCS(0))
 		rxs->c_phytype = IEEE80211_RX_FP_11G;
 	else
 		rxs->c_phytype = IEEE80211_RX_FP_11NG;
 
 	/* Map HW rate index to 802.11 rate. */
-	if (rate < RTWN_RIDX_MCS(0)) {
+	if (rate < RTWN_RIDX_HT_MCS(0)) {
 		rxs->c_rate = ridx2rate[rate];
 		if (RTWN_RATE_IS_CCK(rate))
 			rxs->c_pktflags |= IEEE80211_RX_F_CCK;
 		else
 			rxs->c_pktflags |= IEEE80211_RX_F_OFDM;
 	} else {	/* MCS0~15. */
-		rxs->c_rate = IEEE80211_RATE_MCS | (rate - 12);
+		rxs->c_rate =
+		    IEEE80211_RATE_MCS | (rate - RTWN_RIDX_HT_MCS_SHIFT);
 		rxs->c_pktflags |= IEEE80211_RX_F_HT;
 	}
 }

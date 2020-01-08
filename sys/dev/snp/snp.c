@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Ed Schouten <ed@FreeBSD.org>
  * All rights reserved.
  *
@@ -176,7 +178,7 @@ snp_read(struct cdev *dev, struct uio *uio, int flag)
 			error = EWOULDBLOCK;
 			break;
 		}
-		error = cv_wait_sig(&ss->snp_outwait, tp->t_mtx);
+		error = cv_wait_sig(&ss->snp_outwait, tty_getlock(tp));
 		if (error != 0)
 			break;
 		if (tty_gone(tp)) {

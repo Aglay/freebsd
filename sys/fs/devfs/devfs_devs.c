@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000,2004
  *	Poul-Henning Kamp.  All rights reserved.
  *
@@ -27,8 +29,6 @@
  *
  * $FreeBSD$
  */
-
-#include "opt_compat.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -138,6 +138,8 @@ devfs_alloc(int flags)
 	if (cdp == NULL)
 		return (NULL);
 
+	mtx_init(&cdp->cdp_threadlock, "devthrd", NULL, MTX_DEF);
+
 	cdp->cdp_dirents = &cdp->cdp_dirent0;
 
 	cdev = &cdp->cdp_c;
@@ -180,6 +182,7 @@ devfs_free(struct cdev *cdev)
 	devfs_free_cdp_inode(cdp->cdp_inode);
 	if (cdp->cdp_maxdirent > 0) 
 		free(cdp->cdp_dirents, M_DEVFS2);
+	mtx_destroy(&cdp->cdp_threadlock);
 	free(cdp, M_CDEVP);
 }
 
@@ -226,7 +229,7 @@ devfs_newdirent(char *name, int namelen)
 	de->de_dirent->d_namlen = namelen;
 	de->de_dirent->d_reclen = GENERIC_DIRSIZ(&d);
 	bcopy(name, de->de_dirent->d_name, namelen);
-	de->de_dirent->d_name[namelen] = '\0';
+	dirent_terminate(de->de_dirent);
 	vfs_timestamp(&de->de_ctime);
 	de->de_mtime = de->de_atime = de->de_ctime;
 	de->de_links = 1;
@@ -404,7 +407,7 @@ devfs_delete(struct devfs_mount *dm, struct devfs_dirent *de, int flags)
 			VI_UNLOCK(vp);
 		vgone(vp);
 		if ((flags & DEVFS_DEL_VNLOCKED) == 0)
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 		vdrop(vp);
 		sx_xlock(&dm->dm_lock);
 	} else

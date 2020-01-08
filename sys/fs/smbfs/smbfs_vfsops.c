@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000-2001 Boris Popov
  * All rights reserved.
  *
@@ -86,7 +88,7 @@ MODULE_DEPEND(smbfs, netsmb, NSMB_VERSION, NSMB_VERSION, NSMB_VERSION);
 MODULE_DEPEND(smbfs, libiconv, 1, 1, 2);
 MODULE_DEPEND(smbfs, libmchain, 1, 1, 1);
 
-int smbfs_pbuf_freecnt = -1;	/* start out unlimited */
+uma_zone_t smbfs_pbuf_zone;
 
 static int
 smbfs_cmount(struct mntarg *ma, void * data, uint64_t flags)
@@ -232,7 +234,7 @@ smbfs_mount(struct mount *mp)
 		vfs_mount_error(mp, "smbfs_root error: %d", error);
 		goto bad;
 	}
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 	SMBVDEBUG("root.v_usecount = %d\n", vrefcnt(vp));
 
 #ifdef DIAGNOSTIC
@@ -365,7 +367,8 @@ smbfs_quotactl(mp, cmd, uid, arg)
 int
 smbfs_init(struct vfsconf *vfsp)
 {
-	smbfs_pbuf_freecnt = nswbuf / 2 + 1;
+
+	smbfs_pbuf_zone = pbuf_zsecond_create("smbpbuf", nswbuf / 2);
 	SMBVDEBUG("done.\n");
 	return 0;
 }
@@ -375,6 +378,7 @@ int
 smbfs_uninit(struct vfsconf *vfsp)
 {
 
+	uma_zdestroy(smbfs_pbuf_zone);
 	SMBVDEBUG("done.\n");
 	return 0;
 }

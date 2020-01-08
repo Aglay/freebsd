@@ -1,6 +1,5 @@
 #-
-# Copyright (c) 2006 M. Warner Losh
-# All rights reserved.
+# Copyright (c) 2006 M. Warner Losh <imp@FreeBSD.org>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -54,7 +53,6 @@
 #
 
 #include <sys/types.h>
-#include <dev/mmc/bridge.h>
 #include <dev/mmc/mmcreg.h>
 
 #
@@ -70,6 +68,22 @@ INTERFACE mmcbr;
 CODE {
 	static int
 	null_switch_vccq(device_t brdev __unused, device_t reqdev __unused)
+	{
+
+		return (0);
+	}
+
+	static int
+	null_retune(device_t brdev __unused, device_t reqdev __unused,
+	    bool reset __unused)
+	{
+
+		return (0);
+	}
+
+	static int
+	null_tune(device_t brdev __unused, device_t reqdev __unused,
+	    bool hs400 __unused)
 	{
 
 		return (0);
@@ -95,10 +109,29 @@ METHOD int switch_vccq {
 } DEFAULT null_switch_vccq;
 
 #
+# Called by the mmcbus with the bridge claimed to execute initial tuning.
+#
+METHOD int tune {
+	device_t	brdev;
+	device_t	reqdev;
+	bool		hs400;
+} DEFAULT null_tune;
+
+#
+# Called by the mmcbus with the bridge claimed to execute re-tuning.
+#
+METHOD int retune {
+	device_t	brdev;
+	device_t	reqdev;
+	bool		reset;
+} DEFAULT null_retune;
+
+#
 # Called by the mmcbus or its children to schedule a mmc request.  These
 # requests are queued.  Time passes.  The bridge then gets notification
 # of the status of the request, who then notifies the requesting device
 # by calling the completion function supplied as part of the request.
+# Requires the bridge to be claimed.
 #
 METHOD int request {
 	device_t	brdev;
@@ -121,7 +154,7 @@ METHOD int get_ro {
 METHOD int acquire_host {
 	device_t	brdev;
 	device_t	reqdev;
-}
+};
 
 #
 # Release the current bridge.
@@ -129,4 +162,4 @@ METHOD int acquire_host {
 METHOD int release_host {
 	device_t	brdev;
 	device_t	reqdev;
-}
+};

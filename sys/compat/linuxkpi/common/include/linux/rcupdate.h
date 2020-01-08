@@ -74,13 +74,16 @@
 } while (0)
 
 #define	rcu_access_pointer(p)			\
-	((__typeof(*p) *)(READ_ONCE(p)))
+	((__typeof(*p) *)READ_ONCE(p))
 
 #define	rcu_dereference_protected(p, c)		\
-	((__typeof(*p) *)(p))
+	((__typeof(*p) *)READ_ONCE(p))
 
 #define	rcu_dereference(p)			\
 	rcu_dereference_protected(p, 0)
+
+#define	rcu_dereference_raw(p)			\
+	((__typeof(*p) *)READ_ONCE(p))
 
 #define	rcu_pointer_handoff(p) (p)
 
@@ -96,5 +99,11 @@ extern void linux_rcu_barrier(void);
 extern void linux_rcu_read_lock(void);
 extern void linux_rcu_read_unlock(void);
 extern void linux_synchronize_rcu(void);
+
+/* Empty implementation for !DEBUG */
+#define	init_rcu_head(...)
+#define	destroy_rcu_head(...)
+#define	init_rcu_head_on_stack(...)
+#define	destroy_rcu_head_on_stack(...)
 
 #endif					/* _LINUX_RCUPDATE_H_ */

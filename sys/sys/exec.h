@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -75,7 +77,6 @@ struct execsw {
  * Prefer the kern.ps_strings or kern.proc.ps_strings sysctls to this constant.
  */
 #define	PS_STRINGS	(USRSTACK - sizeof(struct ps_strings))
-#define	SPARE_USRSPACE	4096
 
 int exec_map_first_page(struct image_params *);        
 void exec_unmap_first_page(struct image_params *);       

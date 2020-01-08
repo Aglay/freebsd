@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2019  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -32,16 +32,23 @@ extern int less_is_more;
 #define CLEAR_PATTERN(name)   name = NULL
 #endif
 
+#if HAVE_PCRE2
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+#define PATTERN_TYPE          pcre2_code *
+#define CLEAR_PATTERN(name)   name = NULL
+#endif
+
 #if HAVE_RE_COMP
-char *re_comp();
-int re_exec();
+char *re_comp LESSPARAMS ((char*));
+int re_exec LESSPARAMS ((char*));
 #define PATTERN_TYPE          int
 #define CLEAR_PATTERN(name)   name = 0
 #endif
 
 #if HAVE_REGCMP
-char *regcmp();
-char *regex();
+char *regcmp LESSPARAMS ((char*));
+char *regex LESSPARAMS ((char**, char*));
 extern char *__loc1;
 #define PATTERN_TYPE          char **
 #define CLEAR_PATTERN(name)   name = NULL

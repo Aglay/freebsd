@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: MIT-CMU
+ *
  * Mach Operating System
  * Copyright (c) 1991,1990 Carnegie Mellon University
  * All Rights Reserved.
@@ -35,6 +37,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/eventhandler.h>
 #include <sys/linker_set.h>
 #include <sys/lock.h>
 #include <sys/kdb.h>
@@ -143,7 +146,7 @@ static struct command db_cmds[] = {
 	{ "reset",	db_reset,		0,	NULL },
 	{ "kill",	db_kill,		CS_OWN,	NULL },
 	{ "watchdog",	db_watchdog,		CS_OWN,	NULL },
-	{ "thread",	db_set_thread,		CS_OWN,	NULL },
+	{ "thread",	db_set_thread,		0,	NULL },
 	{ "run",	db_run_cmd,		CS_OWN,	NULL },
 	{ "script",	db_script_cmd,		CS_OWN,	NULL },
 	{ "scripts",	db_scripts_cmd,		0,	NULL },
@@ -398,7 +401,7 @@ db_command(struct command **last_cmdp, struct command_table *cmd_table,
 		    case CMD_HELP:
 			if (cmd_table == &db_cmd_table) {
 			    db_printf("This is ddb(4), the kernel debugger; "
-			        "see http://man.freebsd.org/ddb/4 for help.\n");
+			        "see https://man.FreeBSD.org/ddb/4 for help.\n");
 			    db_printf("Use \"bt\" for backtrace, \"dump\" for "
 			        "kernel core dump, \"reset\" to reboot.\n");
 			    db_printf("Available commands:\n");
@@ -556,7 +559,7 @@ db_error(const char *s)
 	if (s)
 	    db_printf("%s", s);
 	db_flush_lex();
-	kdb_reenter();
+	kdb_reenter_silent();
 }
 
 static void
@@ -810,6 +813,7 @@ db_stack_trace(db_expr_t tid, bool hastid, db_expr_t count, char *modif)
 		if (!db_expression(&count)) {
 			db_printf("Count missing\n");
 			db_flush_lex();
+			db_radix = radix;
 			return;
 		}
 	} else {

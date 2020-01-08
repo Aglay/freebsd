@@ -1,6 +1,8 @@
 /*	$KAME: ipsec_strerror.c,v 1.7 2000/07/30 00:45:12 itojun Exp $	*/
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (C) 1995, 1996, 1997, 1998, and 1999 WIDE Project.
  * All rights reserved.
  *
@@ -60,7 +62,7 @@ static const char *ipsec_errlist[] = {
 "Invalid key length",				/*EIPSEC_INVAL_KEYLEN*/
 "Invalid address family",			/*EIPSEC_INVAL_FAMILY*/
 "Invalid prefix length",			/*EIPSEC_INVAL_PREFIXLEN*/
-"Invalid direciton",				/*EIPSEC_INVAL_DIR*/
+"Invalid direction",				/*EIPSEC_INVAL_DIR*/
 "SPI range violation",				/*EIPSEC_INVAL_SPI*/
 "No protocol specified",			/*EIPSEC_NO_PROTO*/
 "No algorithm specified",			/*EIPSEC_NO_ALGS*/

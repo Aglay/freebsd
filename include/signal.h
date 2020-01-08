@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -120,7 +122,10 @@ void	psignal(int, const char *);
 #endif
 
 #if __BSD_VISIBLE
+int	sigandset(sigset_t *dest, const sigset_t *left, const sigset_t *right);
 int	sigblock(int);
+int	sigisemptyset(const sigset_t *set);
+int	sigorset(sigset_t *dest, const sigset_t *left, const sigset_t *right);
 int	sigreturn(const struct __ucontext *);
 int	sigsetmask(int);
 int	sigstack(const struct sigstack *, struct sigstack *);

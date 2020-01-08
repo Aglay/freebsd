@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993, 1995
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -84,6 +86,7 @@ extern enum nfsiod_state ncl_iodwant[NFS_MAXASYNCDAEMON];
 extern struct nfsmount *ncl_iodmount[NFS_MAXASYNCDAEMON];
 extern struct mtx ncl_iod_mutex;
 NFSCLSTATEMUTEX;
+extern struct mtx nfsrv_dslock_mtx;
 
 MALLOC_DEFINE(M_NEWNFSREQ, "newnfsclient_req", "NFS request header");
 MALLOC_DEFINE(M_NEWNFSMNT, "newnfsmnt", "NFS mount struct");
@@ -133,7 +136,8 @@ static struct vfsops nfs_vfsops = {
 	.vfs_init =		ncl_init,
 	.vfs_mount =		nfs_mount,
 	.vfs_cmount =		nfs_cmount,
-	.vfs_root =		nfs_root,
+	.vfs_root =		vfs_cache_root,
+	.vfs_cachedroot =	nfs_root,
 	.vfs_statfs =		nfs_statfs,
 	.vfs_sync =		nfs_sync,
 	.vfs_uninit =		ncl_uninit,
@@ -1147,7 +1151,7 @@ nfs_mount(struct mount *mp)
 	if (vfs_getopt(mp->mnt_optnew, "minorversion", (void **)&opt, NULL) ==
 	    0) {
 		ret = sscanf(opt, "%d", &minvers);
-		if (ret != 1 || minvers < 0 || minvers > 1 ||
+		if (ret != 1 || minvers < 0 || minvers > 2 ||
 		    (args.flags & NFSMNT_NFSV4) == 0) {
 			vfs_mount_error(mp, "illegal minorversion: %s", opt);
 			error = EINVAL;
@@ -1235,8 +1239,7 @@ nfs_mount(struct mount *mp)
 		bzero(&hst[hstlen], MNAMELEN - hstlen);
 		args.hostname = hst;
 		/* getsockaddr() call must be after above copyin() calls */
-		error = getsockaddr(&nam, (caddr_t)args.addr,
-		    args.addrlen);
+		error = getsockaddr(&nam, args.addr, args.addrlen);
 		if (error != 0)
 			goto out;
 	} else if (nfs_mount_parse_from(mp->mnt_optnew,
@@ -1390,10 +1393,10 @@ mountnfs(struct nfs_args *argp, struct mount *mp, struct sockaddr *nam,
 	if (mp->mnt_flag & MNT_UPDATE) {
 		nmp = VFSTONFS(mp);
 		printf("%s: MNT_UPDATE is no longer handled here\n", __func__);
-		FREE(nam, M_SONAME);
+		free(nam, M_SONAME);
 		return (0);
 	} else {
-		MALLOC(nmp, struct nfsmount *, sizeof (struct nfsmount) +
+		nmp = malloc(sizeof (struct nfsmount) +
 		    krbnamelen + dirlen + srvkrbnamelen + 2,
 		    M_NEWNFSMNT, M_WAITOK | M_ZERO);
 		TAILQ_INIT(&nmp->nm_bufq);
@@ -1541,10 +1544,8 @@ mountnfs(struct nfs_args *argp, struct mount *mp, struct sockaddr *nam,
 			if (error)
 				(void) nfs_catnap(PZERO, error, "nfsgetdirp");
 		} while (error && --trycnt > 0);
-		if (error) {
-			error = nfscl_maperr(td, error, (uid_t)0, (gid_t)0);
+		if (error)
 			goto bad;
-		}
 	}
 
 	/*
@@ -1623,7 +1624,8 @@ mountnfs(struct nfs_args *argp, struct mount *mp, struct sockaddr *nam,
 		/*
 		 * Lose the lock but keep the ref.
 		 */
-		NFSVOPUNLOCK(*vpp, 0);
+		NFSVOPUNLOCK(*vpp);
+		vfs_cache_root_set(mp, *vpp);
 		return (0);
 	}
 	error = EIO;
@@ -1649,8 +1651,8 @@ bad:
 			newnfs_disconnect(dsp->nfsclds_sockp);
 		nfscl_freenfsclds(dsp);
 	}
-	FREE(nmp, M_NEWNFSMNT);
-	FREE(nam, M_SONAME);
+	free(nmp, M_NEWNFSMNT);
+	free(nam, M_SONAME);
 	return (error);
 }
 
@@ -1670,6 +1672,7 @@ nfs_unmount(struct mount *mp, int mntflags)
 	if (mntflags & MNT_FORCE)
 		flags |= FORCECLOSE;
 	nmp = VFSTONFS(mp);
+	error = 0;
 	/*
 	 * Goes something like this..
 	 * - Call vflush() to clear out vnodes for this filesystem
@@ -1678,6 +1681,12 @@ nfs_unmount(struct mount *mp, int mntflags)
 	 */
 	/* In the forced case, cancel any outstanding requests. */
 	if (mntflags & MNT_FORCE) {
+		NFSDDSLOCK();
+		if (nfsv4_findmirror(nmp) != NULL)
+			error = ENXIO;
+		NFSDDSUNLOCK();
+		if (error)
+			goto out;
 		error = newnfs_nmcancelreqs(nmp);
 		if (error)
 			goto out;
@@ -1698,17 +1707,35 @@ nfs_unmount(struct mount *mp, int mntflags)
 	 */
 	if ((mntflags & MNT_FORCE) == 0)
 		nfscl_umount(nmp, td);
+	else {
+		mtx_lock(&nmp->nm_mtx);
+		nmp->nm_privflag |= NFSMNTP_FORCEDISM;
+		mtx_unlock(&nmp->nm_mtx);
+	}
 	/* Make sure no nfsiods are assigned to this mount. */
-	mtx_lock(&ncl_iod_mutex);
+	NFSLOCKIOD();
 	for (i = 0; i < NFS_MAXASYNCDAEMON; i++)
 		if (ncl_iodmount[i] == nmp) {
 			ncl_iodwant[i] = NFSIOD_AVAILABLE;
 			ncl_iodmount[i] = NULL;
 		}
-	mtx_unlock(&ncl_iod_mutex);
+	NFSUNLOCKIOD();
+
+	/*
+	 * We can now set mnt_data to NULL and wait for
+	 * nfssvc(NFSSVC_FORCEDISM) to complete.
+	 */
+	mtx_lock(&mountlist_mtx);
+	mtx_lock(&nmp->nm_mtx);
+	mp->mnt_data = NULL;
+	mtx_unlock(&mountlist_mtx);
+	while ((nmp->nm_privflag & NFSMNTP_CANCELRPCS) != 0)
+		msleep(nmp, &nmp->nm_mtx, PVFS, "nfsfdism", 0);
+	mtx_unlock(&nmp->nm_mtx);
+
 	newnfs_disconnect(&nmp->nm_sockreq);
 	crfree(nmp->nm_sockreq.nr_cred);
-	FREE(nmp->nm_nam, M_SONAME);
+	free(nmp->nm_nam, M_SONAME);
 	if (nmp->nm_sockreq.nr_auth != NULL)
 		AUTH_DESTROY(nmp->nm_sockreq.nr_auth);
 	mtx_destroy(&nmp->nm_sockreq.nr_mtx);
@@ -1719,7 +1746,7 @@ nfs_unmount(struct mount *mp, int mntflags)
 			newnfs_disconnect(dsp->nfsclds_sockp);
 		nfscl_freenfsclds(dsp);
 	}
-	FREE(nmp, M_NEWNFSMNT);
+	free(nmp, M_NEWNFSMNT);
 out:
 	return (error);
 }
@@ -1775,7 +1802,7 @@ nfs_sync(struct mount *mp, int waitfor)
 	 * the umount(2) syscall doesn't get stuck in VFS_SYNC() before
 	 * calling VFS_UNMOUNT().
 	 */
-	if ((mp->mnt_kern_flag & MNTK_UNMOUNTF) != 0) {
+	if (NFSCL_FORCEDISM(mp)) {
 		MNT_IUNLOCK(mp);
 		return (EBADF);
 	}
@@ -1799,7 +1826,7 @@ loop:
 		error = VOP_FSYNC(vp, waitfor, td);
 		if (error)
 			allerror = error;
-		NFSVOPUNLOCK(vp, 0);
+		NFSVOPUNLOCK(vp);
 		vrele(vp);
 	}
 	return (allerror);

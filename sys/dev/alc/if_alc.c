@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009, Pyun YongHyeon <yongari@FreeBSD.org>
  * All rights reserved.
  *
@@ -48,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/taskqueue.h>
 
 #include <net/bpf.h>
+#include <net/debugnet.h>
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_arp.h>
@@ -197,6 +200,7 @@ static int	alc_shutdown(device_t);
 static void	alc_start(struct ifnet *);
 static void	alc_start_locked(struct ifnet *);
 static void	alc_start_queue(struct alc_softc *);
+static void	alc_start_tx(struct alc_softc *);
 static void	alc_stats_clear(struct alc_softc *);
 static void	alc_stats_update(struct alc_softc *);
 static void	alc_stop(struct alc_softc *);
@@ -210,6 +214,8 @@ static void	alc_watchdog(struct alc_softc *);
 static int	sysctl_int_range(SYSCTL_HANDLER_ARGS, int, int);
 static int	sysctl_hw_alc_proc_limit(SYSCTL_HANDLER_ARGS);
 static int	sysctl_hw_alc_int_mod(SYSCTL_HANDLER_ARGS);
+
+DEBUGNET_DEFINE(alc);
 
 static device_method_t alc_methods[] = {
 	/* Device interface. */
@@ -225,7 +231,7 @@ static device_method_t alc_methods[] = {
 	DEVMETHOD(miibus_writereg,	alc_miibus_writereg),
 	DEVMETHOD(miibus_statchg,	alc_miibus_statchg),
 
-	{ NULL, NULL }
+	DEVMETHOD_END
 };
 
 static driver_t alc_driver = {
@@ -237,6 +243,8 @@ static driver_t alc_driver = {
 static devclass_t alc_devclass;
 
 DRIVER_MODULE(alc, pci, alc_driver, alc_devclass, 0, 0);
+MODULE_PNP_INFO("U16:vendor;U16:device", pci, alc, alc_ident_table,
+    nitems(alc_ident_table) - 1);
 DRIVER_MODULE(miibus, alc, miibus_driver, miibus_devclass, 0, 0);
 
 static struct resource_spec alc_res_spec_mem[] = {
@@ -1649,6 +1657,9 @@ alc_attach(device_t dev)
 		goto fail;
 	}
 
+	/* Attach driver debugnet methods. */
+	DEBUGNET_SET(ifp, alc);
+
 fail:
 	if (error != 0)
 		alc_detach(dev);
@@ -2972,22 +2983,28 @@ alc_start_locked(struct ifnet *ifp)
 		ETHER_BPF_MTAP(ifp, m_head);
 	}
 
-	if (enq > 0) {
-		/* Sync descriptors. */
-		bus_dmamap_sync(sc->alc_cdata.alc_tx_ring_tag,
-		    sc->alc_cdata.alc_tx_ring_map, BUS_DMASYNC_PREWRITE);
-		/* Kick. Assume we're using normal Tx priority queue. */
-		if ((sc->alc_flags & ALC_FLAG_AR816X_FAMILY) != 0)
-			CSR_WRITE_2(sc, ALC_MBOX_TD_PRI0_PROD_IDX,
-			    (uint16_t)sc->alc_cdata.alc_tx_prod);
-		else
-			CSR_WRITE_4(sc, ALC_MBOX_TD_PROD_IDX,
-			    (sc->alc_cdata.alc_tx_prod <<
-			    MBOX_TD_PROD_LO_IDX_SHIFT) &
-			    MBOX_TD_PROD_LO_IDX_MASK);
-		/* Set a timeout in case the chip goes out to lunch. */
-		sc->alc_watchdog_timer = ALC_TX_TIMEOUT;
-	}
+	if (enq > 0)
+		alc_start_tx(sc);
+}
+
+static void
+alc_start_tx(struct alc_softc *sc)
+{
+
+	/* Sync descriptors. */
+	bus_dmamap_sync(sc->alc_cdata.alc_tx_ring_tag,
+	    sc->alc_cdata.alc_tx_ring_map, BUS_DMASYNC_PREWRITE);
+	/* Kick. Assume we're using normal Tx priority queue. */
+	if ((sc->alc_flags & ALC_FLAG_AR816X_FAMILY) != 0)
+		CSR_WRITE_2(sc, ALC_MBOX_TD_PRI0_PROD_IDX,
+		    (uint16_t)sc->alc_cdata.alc_tx_prod);
+	else
+		CSR_WRITE_4(sc, ALC_MBOX_TD_PROD_IDX,
+		    (sc->alc_cdata.alc_tx_prod <<
+		    MBOX_TD_PROD_LO_IDX_SHIFT) &
+		    MBOX_TD_PROD_LO_IDX_MASK);
+	/* Set a timeout in case the chip goes out to lunch. */
+	sc->alc_watchdog_timer = ALC_TX_TIMEOUT;
 }
 
 static void
@@ -4564,12 +4581,22 @@ alc_rxvlan(struct alc_softc *sc)
 	CSR_WRITE_4(sc, ALC_MAC_CFG, reg);
 }
 
+static u_int
+alc_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t *mchash = arg;
+	uint32_t crc;
+
+	crc = ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN);
+	mchash[crc >> 31] |= 1 << ((crc >> 26) & 0x1f);
+
+	return (1);
+}
+
 static void
 alc_rxfilter(struct alc_softc *sc)
 {
 	struct ifnet *ifp;
-	struct ifmultiaddr *ifma;
-	uint32_t crc;
 	uint32_t mchash[2];
 	uint32_t rxcfg;
 
@@ -4592,15 +4619,7 @@ alc_rxfilter(struct alc_softc *sc)
 		goto chipit;
 	}
 
-	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &sc->alc_ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		crc = ether_crc32_be(LLADDR((struct sockaddr_dl *)
-		    ifma->ifma_addr), ETHER_ADDR_LEN);
-		mchash[crc >> 31] |= 1 << ((crc >> 26) & 0x1f);
-	}
-	if_maddr_runlock(ifp);
+	if_foreach_llmaddr(ifp, alc_hash_maddr, mchash);
 
 chipit:
 	CSR_WRITE_4(sc, ALC_MAR0, mchash[0]);
@@ -4640,3 +4659,54 @@ sysctl_hw_alc_int_mod(SYSCTL_HANDLER_ARGS)
 	return (sysctl_int_range(oidp, arg1, arg2, req,
 	    ALC_IM_TIMER_MIN, ALC_IM_TIMER_MAX));
 }
+
+#ifdef DEBUGNET
+static void
+alc_debugnet_init(struct ifnet *ifp, int *nrxr, int *ncl, int *clsize)
+{
+	struct alc_softc *sc;
+
+	sc = if_getsoftc(ifp);
+	KASSERT(sc->alc_buf_size <= MCLBYTES, ("incorrect cluster size"));
+
+	*nrxr = ALC_RX_RING_CNT;
+	*ncl = DEBUGNET_MAX_IN_FLIGHT;
+	*clsize = MCLBYTES;
+}
+
+static void
+alc_debugnet_event(struct ifnet *ifp __unused, enum debugnet_ev event __unused)
+{
+}
+
+static int
+alc_debugnet_transmit(struct ifnet *ifp, struct mbuf *m)
+{
+	struct alc_softc *sc;
+	int error;
+
+	sc = if_getsoftc(ifp);
+	if ((if_getdrvflags(ifp) & (IFF_DRV_RUNNING | IFF_DRV_OACTIVE)) !=
+	    IFF_DRV_RUNNING)
+		return (EBUSY);
+
+	error = alc_encap(sc, &m);
+	if (error == 0)
+		alc_start_tx(sc);
+	return (error);
+}
+
+static int
+alc_debugnet_poll(struct ifnet *ifp, int count)
+{
+	struct alc_softc *sc;
+
+	sc = if_getsoftc(ifp);
+	if ((if_getdrvflags(ifp) & (IFF_DRV_RUNNING | IFF_DRV_OACTIVE)) !=
+	    IFF_DRV_RUNNING)
+		return (EBUSY);
+
+	alc_txeof(sc);
+	return (alc_rxintr(sc, count));
+}
+#endif /* DEBUGNET */

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -33,6 +35,6 @@
 #include <paths.h>
 
 #define	_PATH_HUSHLOGIN		".hushlogin"
-#define	_PATH_MOTDFILE		"/etc/motd"
+#define	_PATH_MOTDFILE		"/var/run/motd"
 #define _PATH_FBTAB		"/etc/fbtab"
 #define _PATH_LOGINDEVPERM	"/etc/logindevperm"

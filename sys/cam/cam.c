@@ -1,6 +1,8 @@
 /*-
  * Generic utility routines for the Common Access Method layer.
  *
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1997 Justin T. Gibbs.
  * All rights reserved.
  *
@@ -235,29 +237,35 @@ cam_strmatch(const u_int8_t *str, const u_int8_t *pattern, int str_len)
 			return (1);
 		} else if (*pattern == '[') {
 			int negate_range, ok;
-			uint8_t pc, sc;
+			uint8_t pc = UCHAR_MAX;
+			uint8_t sc;
 
 			ok = 0;
 			sc = *str++;
 			str_len--;
+			pattern++;
 			if ((negate_range = (*pattern == '^')) != 0)
 				pattern++;
-			while (((pc = *pattern) != ']') && *pattern != '\0') {
-				pattern++;
+			while ((*pattern != ']') && *pattern != '\0') {
 				if (*pattern == '-') {
 					if (pattern[1] == '\0') /* Bad pattern */
 						return (1);
 					if (sc >= pc && sc <= pattern[1])
 						ok = 1;
-					pattern += 2;
-				} else if (pc == sc)
+					pattern++;
+				} else if (*pattern == sc)
 					ok = 1;
+				pc = *pattern;
+				pattern++;
 			}
 			if (ok == negate_range)
 				return (1);
+			pattern++;
 		} else if (*pattern == '?') {
-			/* NB: || *str == ' ' of the old code is a bug and was removed */
-			/* if you add it back, keep this the last if before the naked else */
+			/*
+			 * NB: || *str == ' ' of the old code is a bug and was
+			 * removed.  If you add it back, keep this the last if
+			 * before the naked else */
 			pattern++;
 			str++;
 			str_len--;
@@ -269,6 +277,17 @@ cam_strmatch(const u_int8_t *str, const u_int8_t *pattern, int str_len)
 			str_len--;
 		}
 	}
+
+	/* '*' is allowed to match nothing, so gobble it */
+	while (*pattern == '*')
+		pattern++;
+
+	if ( *pattern != '\0') {
+		/* Pattern not fully consumed.  Not a match */
+		return (1);
+	}
+
+	/* Eat trailing spaces, which get added by SAT */
 	while (str_len > 0 && *str == ' ') {
 		str++;
 		str_len--;
@@ -396,7 +415,6 @@ cam_error_string(struct cam_device *device, union ccb *ccb, char *str,
 		switch (ccb->ccb_h.func_code) {
 		case XPT_ATA_IO:
 			ata_command_sbuf(&ccb->ataio, &sb);
-			sbuf_printf(&sb, "\n");
 			break;
 		case XPT_SCSI_IO:
 #ifdef _KERNEL
@@ -404,17 +422,22 @@ cam_error_string(struct cam_device *device, union ccb *ccb, char *str,
 #else /* !_KERNEL */
 			scsi_command_string(device, &ccb->csio, &sb);
 #endif /* _KERNEL/!_KERNEL */
-			sbuf_printf(&sb, "\n");
 			break;
 		case XPT_SMP_IO:
 			smp_command_sbuf(&ccb->smpio, &sb, path_str, 79 -
 					 strlen(path_str), (proto_flags &
 					 CAM_ESMF_PRINT_FULL_CMD) ? 79 : 0);
-			sbuf_printf(&sb, "\n");
+			break;
+		case XPT_NVME_IO:
+		case XPT_NVME_ADMIN:
+			nvme_command_sbuf(&ccb->nvmeio, &sb);
 			break;
 		default:
+			sbuf_printf(&sb, "CAM func %#x",
+			    ccb->ccb_h.func_code);
 			break;
 		}
+		sbuf_printf(&sb, "\n");
 	}
 
 	if (flags & CAM_ESF_CAM_STATUS) {

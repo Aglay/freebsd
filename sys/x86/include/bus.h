@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause AND BSD-2-Clause-NetBSDE
+ *
  * Copyright (c) KATO Takenori, 1999.
  *
  * All rights reserved.  Unpublished rights reserved under the copyright
@@ -99,11 +101,10 @@
 
 #include <machine/_bus.h>
 #include <machine/cpufunc.h>
+#include <machine/bus_dma.h>
 
 #ifndef __GNUCLIKE_ASM
-# ifndef lint
-#  error "no assembler code for your compiler"
-# endif
+#error "no assembler code for your compiler"
 #endif
 
 /*
@@ -114,10 +115,15 @@
 
 #define BUS_SPACE_MAXSIZE_24BIT	0xFFFFFF
 #define BUS_SPACE_MAXSIZE_32BIT 0xFFFFFFFF
+#if defined(__amd64__)
+#define BUS_SPACE_MAXSIZE	0xFFFFFFFFFFFFFFFFULL
+#else
 #define BUS_SPACE_MAXSIZE	0xFFFFFFFF
+#endif
 #define BUS_SPACE_MAXADDR_24BIT	0xFFFFFF
 #define BUS_SPACE_MAXADDR_32BIT 0xFFFFFFFF
 #if defined(__amd64__) || defined(PAE)
+#define BUS_SPACE_MAXADDR_48BIT	0xFFFFFFFFFFFFULL
 #define BUS_SPACE_MAXADDR	0xFFFFFFFFFFFFFFFFULL
 #else
 #define BUS_SPACE_MAXADDR	0xFFFFFFFF
@@ -125,6 +131,13 @@
 
 #define BUS_SPACE_INVALID_DATA	(~0)
 #define BUS_SPACE_UNRESTRICTED	(~0)
+
+#define	BUS_SPACE_BARRIER_READ	0x01		/* force read barrier */
+#define	BUS_SPACE_BARRIER_WRITE	0x02		/* force write barrier */
+
+#if defined(KCSAN) && !defined(KCSAN_RUNTIME)
+#include <sys/_cscan_bus.h>
+#else
 
 /*
  * Map a region of device bus space into CPU virtual address space.
@@ -275,7 +288,6 @@ bus_space_read_multi_1(bus_space_tag_t tag, bus_space_handle_t bsh,
 	else {
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	movb (%2),%%al				\n\
 			stosb					\n\
 			loop 1b"				:
@@ -296,7 +308,6 @@ bus_space_read_multi_2(bus_space_tag_t tag, bus_space_handle_t bsh,
 	else {
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	movw (%2),%%ax				\n\
 			stosw					\n\
 			loop 1b"				:
@@ -317,7 +328,6 @@ bus_space_read_multi_4(bus_space_tag_t tag, bus_space_handle_t bsh,
 	else {
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	movl (%2),%%eax				\n\
 			stosl					\n\
 			loop 1b"				:
@@ -362,7 +372,6 @@ bus_space_read_region_1(bus_space_tag_t tag, bus_space_handle_t bsh,
 		int _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	inb %w2,%%al				\n\
 			stosb					\n\
 			incl %2					\n\
@@ -375,7 +384,6 @@ bus_space_read_region_1(bus_space_tag_t tag, bus_space_handle_t bsh,
 		bus_space_handle_t _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 			repne					\n\
 			movsb"					:
 		    "=D" (addr), "=c" (count), "=S" (_port_)	:
@@ -394,7 +402,6 @@ bus_space_read_region_2(bus_space_tag_t tag, bus_space_handle_t bsh,
 		int _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	inw %w2,%%ax				\n\
 			stosw					\n\
 			addl $2,%2				\n\
@@ -407,7 +414,6 @@ bus_space_read_region_2(bus_space_tag_t tag, bus_space_handle_t bsh,
 		bus_space_handle_t _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 			repne					\n\
 			movsw"					:
 		    "=D" (addr), "=c" (count), "=S" (_port_)	:
@@ -426,7 +432,6 @@ bus_space_read_region_4(bus_space_tag_t tag, bus_space_handle_t bsh,
 		int _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	inl %w2,%%eax				\n\
 			stosl					\n\
 			addl $4,%2				\n\
@@ -439,7 +444,6 @@ bus_space_read_region_4(bus_space_tag_t tag, bus_space_handle_t bsh,
 		bus_space_handle_t _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 			repne					\n\
 			movsl"					:
 		    "=D" (addr), "=c" (count), "=S" (_port_)	:
@@ -554,7 +558,6 @@ bus_space_write_multi_1(bus_space_tag_t tag, bus_space_handle_t bsh,
 	else {
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	lodsb					\n\
 			movb %%al,(%2)				\n\
 			loop 1b"				:
@@ -575,7 +578,6 @@ bus_space_write_multi_2(bus_space_tag_t tag, bus_space_handle_t bsh,
 	else {
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	lodsw					\n\
 			movw %%ax,(%2)				\n\
 			loop 1b"				:
@@ -596,7 +598,6 @@ bus_space_write_multi_4(bus_space_tag_t tag, bus_space_handle_t bsh,
 	else {
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	lodsl					\n\
 			movl %%eax,(%2)				\n\
 			loop 1b"				:
@@ -642,7 +643,6 @@ bus_space_write_region_1(bus_space_tag_t tag, bus_space_handle_t bsh,
 		int _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	lodsb					\n\
 			outb %%al,%w0				\n\
 			incl %0					\n\
@@ -655,7 +655,6 @@ bus_space_write_region_1(bus_space_tag_t tag, bus_space_handle_t bsh,
 		bus_space_handle_t _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 			repne					\n\
 			movsb"					:
 		    "=D" (_port_), "=S" (addr), "=c" (count)	:
@@ -674,7 +673,6 @@ bus_space_write_region_2(bus_space_tag_t tag, bus_space_handle_t bsh,
 		int _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	lodsw					\n\
 			outw %%ax,%w0				\n\
 			addl $2,%0				\n\
@@ -687,7 +685,6 @@ bus_space_write_region_2(bus_space_tag_t tag, bus_space_handle_t bsh,
 		bus_space_handle_t _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 			repne					\n\
 			movsw"					:
 		    "=D" (_port_), "=S" (addr), "=c" (count)	:
@@ -706,7 +703,6 @@ bus_space_write_region_4(bus_space_tag_t tag, bus_space_handle_t bsh,
 		int _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 		1:	lodsl					\n\
 			outl %%eax,%w0				\n\
 			addl $4,%0				\n\
@@ -719,7 +715,6 @@ bus_space_write_region_4(bus_space_tag_t tag, bus_space_handle_t bsh,
 		bus_space_handle_t _port_ = bsh + offset;
 #ifdef __GNUCLIKE_ASM
 		__asm __volatile("				\n\
-			cld					\n\
 			repne					\n\
 			movsl"					:
 		    "=D" (_port_), "=S" (addr), "=c" (count)	:
@@ -1005,9 +1000,6 @@ bus_space_copy_region_4(bus_space_tag_t tag, bus_space_handle_t bsh1,
  * prevent reordering by the compiler; all Intel x86 processors currently
  * retire operations outside the CPU in program order.
  */
-#define	BUS_SPACE_BARRIER_READ	0x01		/* force read barrier */
-#define	BUS_SPACE_BARRIER_WRITE	0x02		/* force write barrier */
-
 static __inline void
 bus_space_barrier(bus_space_tag_t tag __unused, bus_space_handle_t bsh __unused,
 		  bus_size_t offset __unused, bus_size_t len __unused, int flags)
@@ -1034,8 +1026,6 @@ bus_space_barrier(bus_space_tag_t tag __unused, bus_space_handle_t bsh __unused,
 #define outw(a, b) compiler_error
 #define outl(a, b) compiler_error
 #endif
-
-#include <machine/bus_dma.h>
 
 /*
  * Stream accesses are the same as normal accesses on x86; there are no
@@ -1100,5 +1090,7 @@ bus_space_barrier(bus_space_tag_t tag __unused, bus_space_handle_t bsh __unused,
 	bus_space_copy_region_2((t), (h1), (o1), (h2), (o2), (c))
 #define	bus_space_copy_region_stream_4(t, h1, o1, h2, o2, c) \
 	bus_space_copy_region_4((t), (h1), (o1), (h2), (o2), (c))
+
+#endif /* KCSAN && !KCSAN_RUNTIME */
 
 #endif /* _X86_BUS_H_ */

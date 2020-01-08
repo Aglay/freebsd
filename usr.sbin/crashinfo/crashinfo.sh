@@ -1,5 +1,7 @@
 #!/bin/sh
 #
+# SPDX-License-Identifier: BSD-3-Clause
+#
 # Copyright (c) 2008 Yahoo!, Inc.
 # All rights reserved.
 #
@@ -34,6 +36,13 @@ usage()
 	echo "usage: crashinfo [-b] [-d crashdir] [-n dumpnr]" \
 		"[-k kernel] [core]"
 	exit 1
+}
+
+# Remove an uncompressed copy of a dump
+cleanup()
+{
+
+	[ -e $VMCORE ] && rm -f $VMCORE
 }
 
 # Find a gdb binary to use and save the value in GDB.
@@ -83,10 +92,12 @@ find_kernel()
 		}
 	}' $INFO)
 
-	# Look for a matching kernel version.
+	# Look for a matching kernel version, handling possible truncation
+	# of the version string recovered from the dump.
 	for k in `sysctl -n kern.bootfile` $(ls -t /boot/*/kernel); do
-		kvers=$(gdb_command $k 'printf "  Version String: %s", version' \
-		     2>/dev/null)
+		kvers=$(gdb_command $k 'printf "  Version String: %s", version' | \
+		    awk "{line=line\$0\"\n\"} END{print substr(line,1,${#ivers})}" \
+		    2>/dev/null)
 		if [ "$ivers" = "$kvers" ]; then
 			KERNEL=$k
 			break
@@ -129,7 +140,7 @@ if [ $# -eq 1 ]; then
 
 	# Figure out the crash directory and number from the vmcore name.
 	CRASHDIR=`dirname $1`
-	DUMPNR=$(expr $(basename $1) : 'vmcore\.\([0-9]*\)$')
+	DUMPNR=$(expr $(basename $1) : 'vmcore\.\([0-9]*\)')
 	if [ -z "$DUMPNR" ]; then
 		echo "Unable to determine dump number from vmcore file $1."
 		exit 1
@@ -170,8 +181,16 @@ if [ -z "$GDB" ]; then
 fi
 
 if [ ! -e $VMCORE ]; then
-	echo "$VMCORE not found"
-	exit 1
+    	if [ -e $VMCORE.gz ]; then
+		trap cleanup EXIT HUP INT QUIT TERM
+		gzcat $VMCORE.gz > $VMCORE
+	elif [ -e $VMCORE.zst ]; then
+		trap cleanup EXIT HUP INT QUIT TERM
+		zstdcat $VMCORE.zst > $VMCORE
+	else
+		echo "$VMCORE not found"
+		exit 1
+	fi
 fi
 
 if [ ! -e $INFO ]; then

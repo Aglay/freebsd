@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2002 Poul-Henning Kamp
  * Copyright (c) 2002 Networks Associates Technology, Inc.
  * All rights reserved.
@@ -66,7 +68,7 @@ static d_ioctl_t g_ctl_ioctl;
 
 static struct cdevsw g_ctl_cdevsw = {
 	.d_version =	D_VERSION,
-	.d_flags =	D_NEEDGIANT,
+	.d_flags =	0,
 	.d_ioctl =	g_ctl_ioctl,
 	.d_name =	"g_ctl",
 };
@@ -136,6 +138,12 @@ gctl_copyin(struct gctl_req *req)
 	struct gctl_req_arg *ap;
 	char *p;
 	u_int i;
+
+	if (req->narg > GEOM_CTL_ARG_MAX) {
+		gctl_error(req, "too many arguments");
+		req->arg = NULL;
+		return;
+	}
 
 	ap = geom_alloc_copyin(req, req->arg, req->narg * sizeof(*ap));
 	if (ap == NULL) {
@@ -357,18 +365,27 @@ gctl_get_asciiparam(struct gctl_req *req, const char *param)
 }
 
 void *
-gctl_get_paraml(struct gctl_req *req, const char *param, int len)
+gctl_get_paraml_opt(struct gctl_req *req, const char *param, int len)
 {
 	int i;
 	void *p;
 
 	p = gctl_get_param(req, param, &i);
-	if (p == NULL)
-		gctl_error(req, "Missing %s argument", param);
-	else if (i != len) {
+	if (i != len) {
 		p = NULL;
 		gctl_error(req, "Wrong length %s argument", param);
 	}
+	return (p);
+}
+
+void *
+gctl_get_paraml(struct gctl_req *req, const char *param, int len)
+{
+	void *p;
+
+	p = gctl_get_paraml_opt(req, param, len);
+	if (p == NULL)
+		gctl_error(req, "Missing %s argument", param);
 	return (p);
 }
 

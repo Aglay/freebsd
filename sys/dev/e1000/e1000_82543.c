@@ -1,4 +1,5 @@
 /******************************************************************************
+  SPDX-License-Identifier: BSD-3-Clause
 
   Copyright (c) 2001-2015, Intel Corporation 
   All rights reserved.
@@ -1309,7 +1310,7 @@ static s32 e1000_check_for_copper_link_82543(struct e1000_hw *hw)
 			 * turn it on. For compatibility with a TBI link
 			 * partner, we will store bad packets. Some
 			 * frames have an additional byte on the end and
-			 * will look like CRC errors to to the hardware.
+			 * will look like CRC errors to the hardware.
 			 */
 			if (!e1000_tbi_sbp_enabled_82543(hw)) {
 				e1000_set_tbi_sbp_82543(hw, TRUE);
@@ -1573,7 +1574,7 @@ s32 e1000_read_mac_addr_82543(struct e1000_hw *hw)
 
 	DEBUGFUNC("e1000_read_mac_addr");
 
-	for (i = 0; i < ETH_ADDR_LEN; i += 2) {
+	for (i = 0; i < ETHER_ADDR_LEN; i += 2) {
 		offset = i >> 1;
 		ret_val = hw->nvm.ops.read(hw, offset, 1, &nvm_data);
 		if (ret_val) {
@@ -1588,7 +1589,7 @@ s32 e1000_read_mac_addr_82543(struct e1000_hw *hw)
 	if (hw->bus.func == E1000_FUNC_1)
 		hw->mac.perm_addr[5] ^= 1;
 
-	for (i = 0; i < ETH_ADDR_LEN; i++)
+	for (i = 0; i < ETHER_ADDR_LEN; i++)
 		hw->mac.addr[i] = hw->mac.perm_addr[i];
 
 out:

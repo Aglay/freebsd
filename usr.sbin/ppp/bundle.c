@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 Brian Somers <brian@Awfulhak.org>
  * All rights reserved.
  *
@@ -676,12 +678,9 @@ bundle_LockTun(struct bundle *bundle)
   if (lockfile != NULL) {
     fprintf(lockfile, "%d\n", (int)getpid());
     fclose(lockfile);
-  }
-#ifndef RELEASE_CRUNCH
-  else
+  } else
     log_Printf(LogERROR, "Warning: Can't create %s: %s\n",
                pidfile, strerror(errno));
-#endif
 }
 
 static void

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) Peter Wemm <peter@netplex.com.au>
  * All rights reserved.
  *
@@ -33,6 +35,18 @@
 #error "sys/cdefs.h is a prerequisite for this file"
 #endif
 
+#include <machine/segments.h>
+#include <machine/tss.h>
+
+#define	PC_PTI_STACK_SZ	16
+
+struct monitorbuf {
+	int idle_state;		/* Used by cpu_idle_mwait. */
+	int stop_state;		/* Used by cpustop_handler. */
+	char padding[128 - (2 * sizeof(int))];
+};
+_Static_assert(sizeof(struct monitorbuf) == 128, "2x cache line");
+
 /*
  * The SMP parts are setup in pmap.c and locore.s for the BSP, and
  * mp_machdep.c sets up the data for the AP's to "see" when they awake.
@@ -41,13 +55,17 @@
  * other processors"
  */
 #define	PCPU_MD_FIELDS							\
-	char	pc_monitorbuf[128] __aligned(128); /* cache line */	\
+	struct monitorbuf pc_monitorbuf __aligned(128);	/* cache line */\
 	struct	pcpu *pc_prvspace;	/* Self-reference */		\
 	struct	pmap *pc_curpmap;					\
 	struct	amd64tss *pc_tssp;	/* TSS segment active on CPU */	\
-	struct	amd64tss *pc_commontssp;/* Common TSS for the CPU */	\
+	void	*pc_pad0;						\
+	uint64_t pc_kcr3;						\
+	uint64_t pc_ucr3;						\
+	uint64_t pc_saved_ucr3;						\
 	register_t pc_rsp0;						\
 	register_t pc_scratch_rsp;	/* User %rsp in syscall */	\
+	register_t pc_scratch_rax;					\
 	u_int	pc_apic_id;						\
 	u_int   pc_acpi_id;		/* ACPI CPU id */		\
 	/* Pointer to the CPU %fs descriptor */				\
@@ -61,31 +79,32 @@
 	uint64_t	pc_pm_save_cnt;					\
 	u_int	pc_cmci_mask;		/* MCx banks for CMCI */	\
 	uint64_t pc_dbreg[16];		/* ddb debugging regs */	\
+	uint64_t pc_pti_stack[PC_PTI_STACK_SZ];				\
+	register_t pc_pti_rsp0;						\
 	int pc_dbreg_cmd;		/* ddb debugging reg cmd */	\
 	u_int	pc_vcpu_id;		/* Xen vCPU ID */		\
 	uint32_t pc_pcid_next;						\
 	uint32_t pc_pcid_gen;						\
 	uint32_t pc_smp_tlb_done;	/* TLB op acknowledgement */	\
-	char	__pad[384]		/* be divisor of PAGE_SIZE	\
-					   after cache alignment */
+	uint32_t pc_ibpb_set;						\
+	void	*pc_mds_buf;						\
+	void	*pc_mds_buf64;						\
+	uint32_t pc_pad[2];						\
+	uint8_t	pc_mds_tmp[64];						\
+	u_int 	pc_ipi_bitmap;						\
+	struct amd64tss pc_common_tss;					\
+	struct user_segment_descriptor pc_gdt[NGDT];			\
+	char	__pad[2956]		/* pad to UMA_PCPU_ALLOC_SIZE */
 
 #define	PC_DBREG_CMD_NONE	0
 #define	PC_DBREG_CMD_LOAD	1
 
 #ifdef _KERNEL
 
-#ifdef lint
+#define MONITOR_STOPSTATE_RUNNING	0
+#define MONITOR_STOPSTATE_STOPPED	1
 
-extern struct pcpu *pcpup;
-
-#define	get_pcpu()		(pcpup)
-#define	PCPU_GET(member)	(pcpup->pc_ ## member)
-#define	PCPU_ADD(member, val)	(pcpup->pc_ ## member += (val))
-#define	PCPU_INC(member)	PCPU_ADD(member, 1)
-#define	PCPU_PTR(member)	(&pcpup->pc_ ## member)
-#define	PCPU_SET(member, val)	(pcpup->pc_ ## member = (val))
-
-#elif defined(__GNUCLIKE_ASM) && defined(__GNUCLIKE___TYPEOF)
+#if defined(__GNUCLIKE_ASM) && defined(__GNUCLIKE___TYPEOF)
 
 /*
  * Evaluates to the byte offset of the per-cpu variable name.
@@ -219,43 +238,13 @@ extern struct pcpu *pcpup;
 #define	PCPU_PTR(member)	__PCPU_PTR(pc_ ## member)
 #define	PCPU_SET(member, val)	__PCPU_SET(pc_ ## member, val)
 
-#define	OFFSETOF_CURTHREAD	0
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wnull-dereference"
-#endif
-static __inline __pure2 struct thread *
-__curthread(void)
-{
-	struct thread *td;
-
-	__asm("movq %%gs:%1,%0" : "=r" (td)
-	    : "m" (*(char *)OFFSETOF_CURTHREAD));
-	return (td);
-}
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-#define	curthread		(__curthread())
-
-#define	OFFSETOF_CURPCB		32
-static __inline __pure2 struct pcb *
-__curpcb(void)
-{
-	struct pcb *pcb;
-
-	__asm("movq %%gs:%1,%0" : "=r" (pcb) : "m" (*(char *)OFFSETOF_CURPCB));
-	return (pcb);
-}
-#define	curpcb		(__curpcb())
-
 #define	IS_BSP()	(PCPU_GET(cpuid) == 0)
 
-#else /* !lint || defined(__GNUCLIKE_ASM) && defined(__GNUCLIKE___TYPEOF) */
+#else /* !__GNUCLIKE_ASM || !__GNUCLIKE___TYPEOF */
 
 #error "this file needs to be ported to your compiler"
 
-#endif /* lint, etc. */
+#endif /* __GNUCLIKE_ASM && __GNUCLIKE___TYPEOF */
 
 #endif /* _KERNEL */
 

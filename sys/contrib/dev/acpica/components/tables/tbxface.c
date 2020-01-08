@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -263,7 +263,7 @@ AcpiInitializeTables (
     /*
      * Get the root table (RSDT or XSDT) and extract all entries to the local
      * Root Table Array. This array contains the information of the RSDT/XSDT
-     * in a common, more useable format.
+     * in a common, more usable format.
      */
     Status = AcpiTbParseRootTable (RsdpAddress);
     return_ACPI_STATUS (Status);
@@ -292,20 +292,26 @@ AcpiReallocateRootTable (
     void)
 {
     ACPI_STATUS             Status;
-    UINT32                  i;
+    ACPI_TABLE_DESC         *TableDesc;
+    UINT32                  i, j;
 
 
     ACPI_FUNCTION_TRACE (AcpiReallocateRootTable);
 
 
     /*
-     * Only reallocate the root table if the host provided a static buffer
-     * for the table array in the call to AcpiInitializeTables.
+     * If there are tables unverified, it is required to reallocate the
+     * root table list to clean up invalid table entries. Otherwise only
+     * reallocate the root table list if the host provided a static buffer
+     * for the table array in the call to AcpiInitializeTables().
      */
-    if (AcpiGbl_RootTableList.Flags & ACPI_ROOT_ORIGIN_ALLOCATED)
+    if ((AcpiGbl_RootTableList.Flags & ACPI_ROOT_ORIGIN_ALLOCATED) &&
+        AcpiGbl_EnableTableValidation)
     {
         return_ACPI_STATUS (AE_SUPPORT);
     }
+
+    (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
 
     /*
      * Ensure OS early boot logic, which is required by some hosts. If the
@@ -315,17 +321,41 @@ AcpiReallocateRootTable (
      */
     for (i = 0; i < AcpiGbl_RootTableList.CurrentTableCount; ++i)
     {
-        if (AcpiGbl_RootTableList.Tables[i].Pointer)
+        TableDesc = &AcpiGbl_RootTableList.Tables[i];
+        if (TableDesc->Pointer)
         {
             ACPI_ERROR ((AE_INFO,
                 "Table [%4.4s] is not invalidated during early boot stage",
-                AcpiGbl_RootTableList.Tables[i].Signature.Ascii));
+                TableDesc->Signature.Ascii));
+        }
+    }
+
+    if (!AcpiGbl_EnableTableValidation)
+    {
+        /*
+         * Now it's safe to do full table validation. We can do deferred
+         * table initialization here once the flag is set.
+         */
+        AcpiGbl_EnableTableValidation = TRUE;
+        for (i = 0; i < AcpiGbl_RootTableList.CurrentTableCount; ++i)
+        {
+            TableDesc = &AcpiGbl_RootTableList.Tables[i];
+            if (!(TableDesc->Flags & ACPI_TABLE_IS_VERIFIED))
+            {
+                Status = AcpiTbVerifyTempTable (TableDesc, NULL, &j);
+                if (ACPI_FAILURE (Status))
+                {
+                    AcpiTbUninstallTable (TableDesc);
+                }
+            }
         }
     }
 
     AcpiGbl_RootTableList.Flags |= ACPI_ROOT_ALLOW_RESIZE;
-
     Status = AcpiTbResizeRootTableList ();
+    AcpiGbl_RootTableList.Flags |= ACPI_ROOT_ORIGIN_ALLOCATED;
+
+    (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
     return_ACPI_STATUS (Status);
 }
 
@@ -371,7 +401,7 @@ AcpiGetTableHeader (
 
     for (i = 0, j = 0; i < AcpiGbl_RootTableList.CurrentTableCount; i++)
     {
-        if (!ACPI_COMPARE_NAME (
+        if (!ACPI_COMPARE_NAMESEG (
                 &(AcpiGbl_RootTableList.Tables[i].Signature), Signature))
         {
             continue;
@@ -474,7 +504,7 @@ AcpiGetTable (
     {
         TableDesc = &AcpiGbl_RootTableList.Tables[i];
 
-        if (!ACPI_COMPARE_NAME (&TableDesc->Signature, Signature))
+        if (!ACPI_COMPARE_NAMESEG (&TableDesc->Signature, Signature))
         {
             continue;
         }
@@ -521,6 +551,11 @@ AcpiPutTable (
 
     ACPI_FUNCTION_TRACE (AcpiPutTable);
 
+
+    if (!Table)
+    {
+        return_VOID;
+    }
 
     (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
 

@@ -14,7 +14,7 @@
 # 				html - generate html in obj.plist/ directories.
 # 				plist - generate xml obj.plist files.
 # 				See also:
-# 				  contrib/llvm/tools/clang/include/clang/StaticAnalyzer/Core/Analyses.def
+# 				  contrib/llvm-project/clang/include/clang/StaticAnalyzer/Core/Analyses.def
 #
 # CLANG_ANALYZE_OUTPUT_DIR	Sets which directory output set by
 # 				CLANG_ANALYZE_OUTPUT is placed into.
@@ -71,7 +71,7 @@ CLANG_ANALYZE_SRCS= \
 	${DPSRCS:M*.[cC]} ${DPSRCS:M*.cc} \
 	${DPSRCS:M*.cpp} ${DPSRCS:M*.cxx}
 .if !empty(CLANG_ANALYZE_SRCS)
-CLANG_ANALYZE_OBJS=	${CLANG_ANALYZE_SRCS:O:u:R:S,$,.clang-analyzer,}
+CLANG_ANALYZE_OBJS=	${CLANG_ANALYZE_SRCS:O:u:${OBJS_SRCS_FILTER:ts:}:S,$,.clang-analyzer,}
 .NOPATH:	${CLANG_ANALYZE_OBJS}
 .endif
 

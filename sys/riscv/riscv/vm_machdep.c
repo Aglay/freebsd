@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2015-2016 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015-2018 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * Portions of this software were developed by SRI International and the
@@ -55,6 +55,10 @@ __FBSDID("$FreeBSD$");
 #include <machine/frame.h>
 #include <machine/sbi.h>
 
+#if __riscv_xlen == 64
+#define	TP_OFFSET	16	/* sizeof(struct tcb) */
+#endif
+
 /*
  * Finish a fork operation, with process p2 nearly set up.
  * Copy and update the pcb, set up the stack so that the child
@@ -69,14 +73,13 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	if ((flags & RFPROC) == 0)
 		return;
 
+	/* RISCVTODO: save the FPU state here */
+
 	pcb2 = (struct pcb *)(td2->td_kstack +
 	    td2->td_kstack_pages * PAGE_SIZE) - 1;
 
 	td2->td_pcb = pcb2;
 	bcopy(td1->td_pcb, pcb2, sizeof(*pcb2));
-
-	td2->td_pcb->pcb_l1addr =
-	    vtophys(vmspace_pmap(td2->td_proc->p_vmspace)->pm_l1);
 
 	tf = (struct trapframe *)STACKALIGN((struct trapframe *)pcb2 - 1);
 	bcopy(td1->td_frame, tf, sizeof(*tf));
@@ -179,7 +182,9 @@ void
 cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 	stack_t *stack)
 {
-	struct trapframe *tf = td->td_frame;
+	struct trapframe *tf;
+
+	tf = td->td_frame;
 
 	tf->tf_sp = STACKALIGN((uintptr_t)stack->ss_sp + stack->ss_size);
 	tf->tf_sepc = (register_t)entry;
@@ -189,13 +194,15 @@ cpu_set_upcall(struct thread *td, void (*entry)(void *), void *arg,
 int
 cpu_set_user_tls(struct thread *td, void *tls_base)
 {
-	struct pcb *pcb;
 
 	if ((uintptr_t)tls_base >= VM_MAXUSER_ADDRESS)
 		return (EINVAL);
 
-	pcb = td->td_pcb;
-	pcb->pcb_tp = (register_t)tls_base;
+	/*
+	 * The user TLS is set by modifying the trapframe's tp value, which
+	 * will be restored when returning to userspace.
+	 */
+	td->td_frame->tf_tp = (register_t)tls_base + TP_OFFSET;
 
 	return (0);
 }
@@ -244,6 +251,21 @@ cpu_fork_kthread_handler(struct thread *td, void (*func)(void *), void *arg)
 void
 cpu_exit(struct thread *td)
 {
+}
+
+bool
+cpu_exec_vmspace_reuse(struct proc *p __unused, vm_map_t map __unused)
+{
+
+	return (true);
+}
+
+int
+cpu_procctl(struct thread *td __unused, int idtype __unused, id_t id __unused,
+    int com __unused, void *data __unused)
+{
+
+	return (EINVAL);
 }
 
 void

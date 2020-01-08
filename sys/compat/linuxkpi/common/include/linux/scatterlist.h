@@ -36,6 +36,7 @@
 #include <linux/slab.h>
 #include <linux/mm.h>
 
+struct bus_dmamap;
 struct scatterlist {
 	unsigned long page_link;
 #define	SG_PAGE_LINK_CHAIN	0x1UL
@@ -43,7 +44,8 @@ struct scatterlist {
 #define	SG_PAGE_LINK_MASK	0x3UL
 	unsigned int offset;
 	unsigned int length;
-	dma_addr_t address;
+	dma_addr_t dma_address;
+	struct bus_dmamap *dma_map;	/* FreeBSD specific */
 };
 
 CTASSERT((sizeof(struct scatterlist) & SG_PAGE_LINK_MASK) == 0);
@@ -64,16 +66,20 @@ struct sg_page_iter {
 	} internal;
 };
 
+#define	SCATTERLIST_MAX_SEGMENT	(-1U & ~(PAGE_SIZE - 1))
+
 #define	SG_MAX_SINGLE_ALLOC	(PAGE_SIZE / sizeof(struct scatterlist))
 
 #define	SG_MAGIC		0x87654321UL
+#define	SG_CHAIN		SG_PAGE_LINK_CHAIN
+#define	SG_END			SG_PAGE_LINK_LAST
 
 #define	sg_is_chain(sg)		((sg)->page_link & SG_PAGE_LINK_CHAIN)
 #define	sg_is_last(sg)		((sg)->page_link & SG_PAGE_LINK_LAST)
 #define	sg_chain_ptr(sg)	\
 	((struct scatterlist *) ((sg)->page_link & ~SG_PAGE_LINK_MASK))
 
-#define	sg_dma_address(sg)	(sg)->address
+#define	sg_dma_address(sg)	(sg)->dma_address
 #define	sg_dma_len(sg)		(sg)->length
 
 #define	for_each_sg_page(sgl, iter, nents, pgoffset)			\
@@ -131,6 +137,13 @@ static inline vm_paddr_t
 sg_phys(struct scatterlist *sg)
 {
 	return (VM_PAGE_TO_PHYS(sg_page(sg)) + sg->offset);
+}
+
+static inline void *
+sg_virt(struct scatterlist *sg)
+{
+
+	return ((void *)((unsigned long)page_address(sg_page(sg)) + sg->offset));
 }
 
 static inline void
@@ -286,18 +299,26 @@ sg_alloc_table(struct sg_table *table, unsigned int nents, gfp_t gfp_mask)
 }
 
 static inline int
-sg_alloc_table_from_pages(struct sg_table *sgt,
+__sg_alloc_table_from_pages(struct sg_table *sgt,
     struct page **pages, unsigned int count,
     unsigned long off, unsigned long size,
-    gfp_t gfp_mask)
+    unsigned int max_segment, gfp_t gfp_mask)
 {
-	unsigned int i, segs, cur;
+	unsigned int i, segs, cur, len;
 	int rc;
 	struct scatterlist *s;
 
+	if (__predict_false(!max_segment || offset_in_page(max_segment)))
+		return (-EINVAL);
+
+	len = 0;
 	for (segs = i = 1; i < count; ++i) {
-		if (page_to_pfn(pages[i]) != page_to_pfn(pages[i - 1]) + 1)
+		len += PAGE_SIZE;
+		if (len >= max_segment ||
+		    page_to_pfn(pages[i]) != page_to_pfn(pages[i - 1]) + 1) {
 			++segs;
+			len = 0;
+		}
 	}
 	if (__predict_false((rc = sg_alloc_table(sgt, segs, gfp_mask))))
 		return (rc);
@@ -307,10 +328,13 @@ sg_alloc_table_from_pages(struct sg_table *sgt,
 		unsigned long seg_size;
 		unsigned int j;
 
-		for (j = cur + 1; j < count; ++j)
-			if (page_to_pfn(pages[j]) !=
+		len = 0;
+		for (j = cur + 1; j < count; ++j) {
+			len += PAGE_SIZE;
+			if (len >= max_segment || page_to_pfn(pages[j]) !=
 			    page_to_pfn(pages[j - 1]) + 1)
 				break;
+		}
 
 		seg_size = ((j - cur) << PAGE_SHIFT) - off;
 		sg_set_page(s, pages[cur], min(size, seg_size), off);
@@ -321,6 +345,16 @@ sg_alloc_table_from_pages(struct sg_table *sgt,
 	return (0);
 }
 
+static inline int
+sg_alloc_table_from_pages(struct sg_table *sgt,
+    struct page **pages, unsigned int count,
+    unsigned long off, unsigned long size,
+    gfp_t gfp_mask)
+{
+
+	return (__sg_alloc_table_from_pages(sgt, pages, count, off, size,
+	    SCATTERLIST_MAX_SEGMENT, gfp_mask));
+}
 
 static inline int
 sg_nents(struct scatterlist *sg)
@@ -412,7 +446,7 @@ _sg_iter_init(struct scatterlist *sgl, struct sg_page_iter *iter,
 static inline dma_addr_t
 sg_page_iter_dma_address(struct sg_page_iter *spi)
 {
-	return (spi->sg->address + (spi->sg_pgoffset << PAGE_SHIFT));
+	return (spi->sg->dma_address + (spi->sg_pgoffset << PAGE_SHIFT));
 }
 
 static inline struct page *

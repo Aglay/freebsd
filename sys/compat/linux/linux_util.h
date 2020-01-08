@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1994 Christos Zoulas
  * Copyright (c) 1995 Frank van der Linden
  * Copyright (c) 1995 Scott Bartram
@@ -48,7 +50,7 @@ MALLOC_DECLARE(M_EPOLL);
 MALLOC_DECLARE(M_FUTEX);
 MALLOC_DECLARE(M_FUTEX_WP);
 
-extern const char linux_emul_path[];
+extern char linux_emul_path[];
 
 int linux_emul_convpath(struct thread *, const char *, enum uio_seg, char **, int, int);
 
@@ -62,7 +64,7 @@ int linux_emul_convpath(struct thread *, const char *, enum uio_seg, char **, in
 			return (_error);				\
 	} while (0)
 
-#define LCONVPATH(td, upath, pathp, i) 	\
+#define LCONVPATH(td, upath, pathp, i)	\
    LCONVPATH_AT(td, upath, pathp, i, AT_FDCWD)
 
 #define LCONVPATHEXIST(td, upath, pathp) LCONVPATH(td, upath, pathp, 0)

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1987, 1988, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -35,9 +37,6 @@
 
 #include <sys/disk/mbr.h>
 #include <sys/ioccom.h>
-
-void dos_partition_dec(void const *pp, struct dos_partition *d);
-void dos_partition_enc(void *pp, struct dos_partition *d);
 
 #define DIOCSMBR 	_IOW('M', 129, u_char[512])
 

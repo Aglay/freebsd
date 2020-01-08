@@ -350,7 +350,7 @@ nicvf_setup_ifnet(struct nicvf *nic)
 
 	if_setsoftc(ifp, nic);
 	if_initname(ifp, device_get_name(nic->dev), device_get_unit(nic->dev));
-	if_setflags(ifp, IFF_BROADCAST | IFF_SIMPLEX);
+	if_setflags(ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST);
 
 	if_settransmitfn(ifp, nicvf_if_transmit);
 	if_setqflushfn(ifp, nicvf_if_qflush);
@@ -480,11 +480,10 @@ nicvf_if_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		break;
 	case SIOCSIFFLAGS:
 		NICVF_CORE_LOCK(nic);
-		if (if_getflags(ifp) & IFF_UP) {
+		flags = if_getflags(ifp);
+		if (flags & IFF_UP) {
 			if (if_getdrvflags(ifp) & IFF_DRV_RUNNING) {
-				flags = if_getflags(ifp) ^ nic->if_flags;
-				if ((nic->if_flags & if_getflags(ifp)) &
-				    IFF_PROMISC) {
+				if ((flags ^ nic->if_flags) & IFF_PROMISC) {
 					/* Change promiscous mode */
 #if 0
 					/* ARM64TODO */
@@ -492,8 +491,7 @@ nicvf_if_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 #endif
 				}
 
-				if ((nic->if_flags ^ if_getflags(ifp)) &
-				    IFF_ALLMULTI) {
+				if ((flags ^ nic->if_flags) & IFF_ALLMULTI) {
 					/* Change multicasting settings */
 #if 0
 					/* ARM64TODO */
@@ -506,7 +504,7 @@ nicvf_if_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 		} else if (if_getdrvflags(ifp) & IFF_DRV_RUNNING)
 			nicvf_stop_locked(nic);
 
-		nic->if_flags = if_getflags(ifp);
+		nic->if_flags = flags;
 		NICVF_CORE_UNLOCK(nic);
 		break;
 

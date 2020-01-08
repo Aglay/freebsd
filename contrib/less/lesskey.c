@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2019  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -99,6 +99,7 @@ struct cmdname cmdnames[] =
 	{ "back-scroll",          A_B_SCROLL },
 	{ "back-search",          A_B_SEARCH },
 	{ "back-window",          A_B_WINDOW },
+	{ "clear-mark",           A_CLRMARK },
 	{ "debug",                A_DEBUG },
 	{ "digit",                A_DIGIT },
 	{ "display-flag",         A_DISP_OPTION },
@@ -146,6 +147,7 @@ struct cmdname cmdnames[] =
 	{ "reverse-search-all",   A_T_REVERSE_SEARCH },
 	{ "right-scroll",         A_RSHIFT },
 	{ "set-mark",             A_SETMARK },
+	{ "set-mark-bottom",      A_SETMARKBOT },
 	{ "shell",                A_SHELL },
 	{ "status",               A_STAT },
 	{ "toggle-flag",          A_OPT_TOGGLE },
@@ -218,7 +220,7 @@ int errors;
 extern char version[];
 
 	void
-usage()
+usage(VOID_PARAM)
 {
 	fprintf(stderr, "usage: lesskey [-o output] [input]\n");
 	exit(1);
@@ -341,7 +343,7 @@ parse_args(argc, argv)
  * Initialize data structures.
  */
 	void
-init_tables()
+init_tables(VOID_PARAM)
 {
 	cmdtable.names = cmdnames;
 	cmdtable.pbuffer = cmdtable.buffer;

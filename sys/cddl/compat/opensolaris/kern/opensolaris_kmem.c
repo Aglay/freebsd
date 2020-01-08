@@ -212,23 +212,44 @@ kmem_cache_free(kmem_cache_t *cache, void *buf)
 #endif
 }
 
+/*
+ * Allow our caller to determine if there are running reaps.
+ *
+ * This call is very conservative and may return B_TRUE even when
+ * reaping activity isn't active. If it returns B_FALSE, then reaping
+ * activity is definitely inactive.
+ */
+boolean_t
+kmem_cache_reap_active(void)
+{
+
+	return (B_FALSE);
+}
+
+/*
+ * Reap (almost) everything soon.
+ *
+ * Note: this does not wait for the reap-tasks to complete. Caller
+ * should use kmem_cache_reap_active() (above) and/or moderation to
+ * avoid scheduling too many reap-tasks.
+ */
 #ifdef _KERNEL
 void
-kmem_cache_reap_now(kmem_cache_t *cache)
+kmem_cache_reap_soon(kmem_cache_t *cache)
 {
 #ifndef KMEM_DEBUG
-	zone_drain(cache->kc_zone);
+	uma_zone_reclaim(cache->kc_zone, UMA_RECLAIM_DRAIN);
 #endif
 }
 
 void
 kmem_reap(void)
 {
-	uma_reclaim();
+	uma_reclaim(UMA_RECLAIM_TRIM);
 }
 #else
 void
-kmem_cache_reap_now(kmem_cache_t *cache __unused)
+kmem_cache_reap_soon(kmem_cache_t *cache __unused)
 {
 }
 

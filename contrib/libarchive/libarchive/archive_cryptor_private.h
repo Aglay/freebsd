@@ -64,7 +64,7 @@ typedef struct {
 } archive_crypto_ctx;
 
 #elif defined(_WIN32) && !defined(__CYGWIN__) && defined(HAVE_BCRYPT_H)
-#include <Bcrypt.h>
+#include <bcrypt.h>
 
 /* Common in other bcrypt implementations, but missing from VS2008. */
 #ifndef BCRYPT_SUCCESS
@@ -78,6 +78,23 @@ typedef struct {
 	BCRYPT_KEY_HANDLE hKey;
 	PBYTE		keyObj;
 	DWORD		keyObj_len;
+	uint8_t		nonce[AES_BLOCK_SIZE];
+	uint8_t		encr_buf[AES_BLOCK_SIZE];
+	unsigned	encr_pos;
+} archive_crypto_ctx;
+
+#elif defined(HAVE_LIBMBEDCRYPTO) && defined(HAVE_MBEDTLS_AES_H)
+#include <mbedtls/aes.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pkcs5.h>
+
+#define AES_MAX_KEY_SIZE 32
+#define AES_BLOCK_SIZE 16
+
+typedef struct {
+	mbedtls_aes_context	ctx;
+	uint8_t		key[AES_MAX_KEY_SIZE];
+	unsigned	key_len;
 	uint8_t		nonce[AES_BLOCK_SIZE];
 	uint8_t		encr_buf[AES_BLOCK_SIZE];
 	unsigned	encr_pos;

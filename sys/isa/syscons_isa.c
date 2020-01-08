@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999 Kazutaka YOKOTA <yokota@zodiac.mech.utsunomiya-u.ac.jp>
  * All rights reserved.
  *
@@ -60,12 +62,6 @@ __FBSDID("$FreeBSD$");
 
 #include <isa/isavar.h>
 
-#include "opt_xbox.h"
-
-#ifdef XBOX
-#include <machine/xbox.h>
-#endif
-
 static devclass_t	sc_devclass;
 
 static sc_softc_t	main_softc;
@@ -121,7 +117,6 @@ sc_softc_t
 	}
 	sc->unit = unit;
 	if ((sc->flags & SC_INIT_DONE) == 0) {
-		sc->keyboard = -1;
 		sc->adapter = -1;
 		sc->cursor_char = SC_CURSOR_CHAR;
 		sc->mouse_char = SC_MOUSE_CHAR;
@@ -157,19 +152,6 @@ sc_get_cons_priority(int *unit, int *flags)
 {
 	const char *at;
 	int f, u;
-
-#ifdef XBOX
-	/*
-	 * The XBox Loader does not support hints, which makes our initial
-	 * console probe fail. Therefore, if an XBox is found, we hardcode the
-	 * existence of the console, as it is always there anyway.
-	 */
-	if (arch_i386_is_xbox) {
-		*unit = 0;
-		*flags = SC_KERNEL_CONSOLE;
-		return (CN_INTERNAL);
-	}
-#endif
 
 	*unit = -1;
 	for (u = 0; u < 16; u++) {
@@ -207,17 +189,11 @@ sc_get_bios_values(bios_values_t *values)
 #if defined(__i386__) || defined(__amd64__)
 	uint8_t shift;
 
-	values->cursor_start = *(uint8_t *)BIOS_PADDRTOVADDR(0x461);
-	values->cursor_end = *(uint8_t *)BIOS_PADDRTOVADDR(0x460);
 	shift = *(uint8_t *)BIOS_PADDRTOVADDR(0x417);
 	values->shift_state = ((shift & BIOS_CLKED) != 0 ? CLKED : 0) |
 	    ((shift & BIOS_NLKED) != 0 ? NLKED : 0) |
 	    ((shift & BIOS_SLKED) != 0 ? SLKED : 0) |
 	    ((shift & BIOS_ALKED) != 0 ? ALKED : 0);
-#else
-	values->cursor_start = 0;
-	values->cursor_end = 32;
-	values->shift_state = 0;
 #endif
 	values->bell_pitch = BELL_PITCH;
 }

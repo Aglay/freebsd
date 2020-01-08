@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright 2013 Oleksandr Tymoshenko <gonzo@freebsd.org>
  * All rights reserved.
  *
@@ -33,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/clock.h>
+#include <sys/eventhandler.h>
 #include <sys/time.h>
 #include <sys/bus.h>
 #include <sys/lock.h>
@@ -959,7 +962,7 @@ am335x_lcd_attach(device_t dev)
 	am335x_read_hdmi_property(dev);
 
 	root = OF_finddevice("/");
-	if (root == 0) {
+	if (root == -1) {
 		device_printf(dev, "failed to get FDT root node\n");
 		return (ENXIO);
 	}

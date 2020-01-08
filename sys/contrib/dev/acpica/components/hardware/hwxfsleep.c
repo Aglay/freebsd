@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -184,9 +184,18 @@ AcpiHwSleepDispatch (
 
 static ACPI_SLEEP_FUNCTIONS         AcpiSleepDispatch[] =
 {
-    {ACPI_HW_OPTIONAL_FUNCTION (AcpiHwLegacySleep),    AcpiHwExtendedSleep},
-    {ACPI_HW_OPTIONAL_FUNCTION (AcpiHwLegacyWakePrep), AcpiHwExtendedWakePrep},
-    {ACPI_HW_OPTIONAL_FUNCTION (AcpiHwLegacyWake),     AcpiHwExtendedWake}
+    {ACPI_STRUCT_INIT (LegacyFunction,
+                       ACPI_HW_OPTIONAL_FUNCTION (AcpiHwLegacySleep)),
+     ACPI_STRUCT_INIT (ExtendedFunction,
+                       AcpiHwExtendedSleep) },
+    {ACPI_STRUCT_INIT (LegacyFunction,
+                       ACPI_HW_OPTIONAL_FUNCTION (AcpiHwLegacyWakePrep)),
+     ACPI_STRUCT_INIT (ExtendedFunction,
+                       AcpiHwExtendedWakePrep) },
+    {ACPI_STRUCT_INIT (LegacyFunction,
+                       ACPI_HW_OPTIONAL_FUNCTION (AcpiHwLegacyWake)),
+     ACPI_STRUCT_INIT (ExtendedFunction,
+                       AcpiHwExtendedWake) }
 };
 
 
@@ -328,7 +337,7 @@ AcpiEnterSleepStateS4bios (
     }
 
     /*
-     * 1) Disable/Clear all GPEs
+     * 1) Disable all GPEs
      * 2) Enable all wakeup GPEs
      */
     Status = AcpiHwDisableAllGpes ();
@@ -348,6 +357,10 @@ AcpiEnterSleepStateS4bios (
 
     Status = AcpiHwWritePort (AcpiGbl_FADT.SmiCommand,
         (UINT32) AcpiGbl_FADT.S4BiosRequest, 8);
+    if (ACPI_FAILURE (Status))
+    {
+        return_ACPI_STATUS (Status);
+    }
 
     do {
         AcpiOsStall (ACPI_USEC_PER_MSEC);

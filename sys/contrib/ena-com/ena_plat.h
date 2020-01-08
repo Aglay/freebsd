@@ -1,7 +1,7 @@
 /*-
  * BSD LICENSE
  *
- * Copyright (c) 2015-2017 Amazon.com, Inc. or its affiliates.
+ * Copyright (c) 2015-2019 Amazon.com, Inc. or its affiliates.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -103,27 +103,21 @@ extern struct ena_bus_space ebs;
 #define ENA_RSC 	(1 << 6) /* Goes with TXPTH or RXPTH, free/alloc res. */
 #define ENA_IOQ 	(1 << 7) /* Detailed info about IO queues. 	      */
 #define ENA_ADMQ	(1 << 8) /* Detailed info about admin queue. 	      */
+#define ENA_NETMAP	(1 << 9) /* Detailed info about netmap. 	      */
 
-#ifndef ENA_DEBUG_LEVEL
-#define ENA_DEBUG_LEVEL (ENA_ALERT | ENA_WARNING)
-#endif
+extern int ena_log_level;
 
-#ifdef ENA_TRACE
 #define ena_trace_raw(level, fmt, args...)			\
 	do {							\
-		if (((level) & ENA_DEBUG_LEVEL) != (level))	\
+		if (((level) & ena_log_level) != (level))	\
 			break;					\
 		printf(fmt, ##args);				\
 	} while (0)
 
 #define ena_trace(level, fmt, args...)				\
 	ena_trace_raw(level, "%s() [TID:%d]: "			\
-	    fmt " \n", __func__, curthread->td_tid, ##args)
+	    fmt, __func__, curthread->td_tid, ##args)
 
-#else /* ENA_TRACE */
-#define ena_trace_raw(...)
-#define ena_trace(...)
-#endif /* ENA_TRACE */
 
 #define ena_trc_dbg(format, arg...) 	ena_trace(ENA_DBG, format, ##arg)
 #define ena_trc_info(format, arg...) 	ena_trace(ENA_INFO, format, ##arg)
@@ -139,21 +133,12 @@ extern struct ena_bus_space ebs;
 #define MAX_ERRNO 4095
 #define IS_ERR_VALUE(x) unlikely((x) <= (unsigned long)MAX_ERRNO)
 
-#define WARN_ON(condition)						\
-	do {								\
-		int __ret_warn_on = !!(condition);			\
-		if (unlikely(__ret_warn_on))				\
-			printf("%s %s", __FUNCTION__, __FILE__);	\
-		unlikely(__ret_warn_on);				\
-	} while (0)
-
 #define ENA_ASSERT(cond, format, arg...)				\
 	do {								\
 		if (unlikely(!(cond))) {				\
 			ena_trc_err(					\
 				"Assert failed on %s:%s:%d:" format,	\
 				__FILE__, __func__, __LINE__, ##arg);	\
-			WARN_ON(cond);					\
 		}							\
 	} while (0)
 
@@ -179,9 +164,9 @@ static inline long PTR_ERR(const void *ptr)
 	return (long) ptr;
 }
 
-#define GENMASK(h, l)		(((1U << ((h) - (l) + 1)) - 1) << (l))
+#define GENMASK(h, l)	(((~0U) - (1U << (l)) + 1) & (~0U >> (32 - 1 - (h))))
 #define GENMASK_ULL(h, l)	(((~0ULL) << (l)) & (~0ULL >> (64 - 1 - (h))))
-#define BIT(x)			(1 << (x))
+#define BIT(x)			(1UL << (x))
 
 #define ENA_ABORT() 		BUG()
 #define BUG() 			panic("ENA BUG")
@@ -195,6 +180,7 @@ static inline long PTR_ERR(const void *ptr)
 #define ENA_COM_NO_MEM		ENOMEM
 #define	ENA_COM_NO_SPACE	ENOSPC
 #define ENA_COM_TRY_AGAIN	-1
+#define	ENA_COM_UNSUPPORTED	EOPNOTSUPP
 #define	ENA_COM_NO_DEVICE	ENODEV
 #define	ENA_COM_PERMISSION	EPERM
 #define ENA_COM_TIMER_EXPIRED	ETIMEDOUT
@@ -259,7 +245,12 @@ static inline long PTR_ERR(const void *ptr)
 		    timeout_us * hz / 1000 / 1000 );			\
 		mtx_unlock(&((waitqueue).mtx));				\
 	} while (0)
-#define ENA_WAIT_EVENT_SIGNAL(waitqueue) cv_broadcast(&((waitqueue).wq))
+#define ENA_WAIT_EVENT_SIGNAL(waitqueue)		\
+	do {						\
+		mtx_lock(&((waitqueue).mtx));		\
+		cv_broadcast(&((waitqueue).wq));	\
+		mtx_unlock(&((waitqueue).mtx));		\
+	} while (0)
 
 #define dma_addr_t 	bus_addr_t
 #define u8 		uint8_t
@@ -289,6 +280,17 @@ void	ena_dmamap_callback(void *arg, bus_dma_segment_t *segs, int nseg,
     int error);
 int	ena_dma_alloc(device_t dmadev, bus_size_t size, ena_mem_handle_t *dma,
     int mapflags);
+
+#define ENA_MEMCPY_TO_DEVICE_64(dst, src, size)				\
+	do {								\
+		int count, i;						\
+		volatile uint64_t *to = (volatile uint64_t *)(dst);	\
+		const uint64_t *from = (const uint64_t *)(src);		\
+		count = (size) / 8;					\
+									\
+		for (i = 0; i < count; i++, from++, to++)		\
+			*to = *from;					\
+	} while (0)
 
 #define ENA_MEM_ALLOC(dmadev, size) malloc(size, M_DEVBUF, M_NOWAIT | M_ZERO)
 #define ENA_MEM_ALLOC_NODE(dmadev, size, virt, node, dev_node) (virt = NULL)
@@ -323,6 +325,8 @@ int	ena_dma_alloc(device_t dmadev, bus_size_t size, ena_mem_handle_t *dma,
 			  ((struct ena_bus*)bus)->reg_bar_t,		\
 			  ((struct ena_bus*)bus)->reg_bar_h,		\
 			  (bus_size_t)(offset), (value))
+#define ENA_REG_WRITE32_RELAXED(bus, value, offset)			\
+	ENA_REG_WRITE32(bus, value, offset)
 
 #define ENA_REG_READ32(bus, offset)					\
 	bus_space_read_4(						\
@@ -330,20 +334,21 @@ int	ena_dma_alloc(device_t dmadev, bus_size_t size, ena_mem_handle_t *dma,
 			 ((struct ena_bus*)bus)->reg_bar_h,		\
 			 (bus_size_t)(offset))
 
+#define ENA_DB_SYNC_WRITE(mem_handle) bus_dmamap_sync(			\
+	(mem_handle)->tag, (mem_handle)->map, BUS_DMASYNC_PREWRITE)
+#define ENA_DB_SYNC_PREREAD(mem_handle) bus_dmamap_sync(		\
+	(mem_handle)->tag, (mem_handle)->map, BUS_DMASYNC_PREREAD)
+#define ENA_DB_SYNC_POSTREAD(mem_handle) bus_dmamap_sync(		\
+	(mem_handle)->tag, (mem_handle)->map, BUS_DMASYNC_POSTREAD)
+#define ENA_DB_SYNC(mem_handle) ENA_DB_SYNC_WRITE(mem_handle)
+
 #define time_after(a,b)	((long)((unsigned long)(b) - (unsigned long)(a)) < 0)
 
 #define VLAN_HLEN 	sizeof(struct ether_vlan_header)
 #define CSUM_OFFLOAD 	(CSUM_IP|CSUM_TCP|CSUM_UDP)
 
-#if defined(__i386__) || defined(__amd64__)
-static __inline
-void prefetch(void *x)
-{
-	__asm volatile("prefetcht0 %0" :: "m" (*(unsigned long *)x));
-}
-#else
-#define prefetch(x)
-#endif
+#define prefetch(x)	(void)(x)
+#define prefetchw(x)	(void)(x)
 
 /* DMA buffers access */
 #define	dma_unmap_addr(p, name)			((p)->dma->name)
@@ -359,6 +364,9 @@ void prefetch(void *x)
 #define ATOMIC32_SET(I32_PTR, VAL) 	atomic_store_rel_int(I32_PTR, VAL)
 
 #define	barrier() __asm__ __volatile__("": : :"memory")
+#define dma_rmb() barrier()
+#define mmiowb() barrier()
+
 #define	ACCESS_ONCE(x) (*(volatile __typeof(x) *)&(x))
 #define READ_ONCE(x)  ({			\
 			__typeof(x) __var;	\
@@ -367,10 +375,15 @@ void prefetch(void *x)
 			barrier();		\
 			__var;			\
 		})
+#define READ_ONCE8(x) READ_ONCE(x)
+#define READ_ONCE16(x) READ_ONCE(x)
+#define READ_ONCE32(x) READ_ONCE(x)
 
-#include "ena_common_defs.h"
-#include "ena_admin_defs.h"
-#include "ena_eth_io_defs.h"
-#include "ena_regs_defs.h"
+#define upper_32_bits(n) ((uint32_t)(((n) >> 16) >> 16))
+#define lower_32_bits(n) ((uint32_t)(n))
+
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+
+#include "ena_defs/ena_includes.h"
 
 #endif /* ENA_PLAT_H_ */

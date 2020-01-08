@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -39,15 +41,12 @@ __FBSDID("$FreeBSD$");
 #include "namespace.h"
 #include <unistd.h>
 #include <stdio.h>
-#include <sys/cdefs.h>
 #include "un-namespace.h"
 #include "libc_private.h"
 #include "local.h"
 
-__warn_references(gets, "warning: this program uses gets(), which is unsafe.");
-
 char *
-gets(char *buf)
+__gets_unsafe(char *buf)
 {
 	int c;
 	char *s, *ret;
@@ -62,13 +61,13 @@ gets(char *buf)
 		warned = 1;
 	}
 	for (s = buf; (c = __sgetc(stdin)) != '\n'; ) {
-		if (c == EOF)
+		if (c == EOF) {
 			if (s == buf) {
 				ret = NULL;
 				goto end;
 			} else
 				break;
-		else
+		} else
 			*s++ = c;
 	}
 	*s = 0;
@@ -77,3 +76,4 @@ end:
 	FUNLOCKFILE_CANCELSAFE();
 	return (ret);
 }
+__sym_compat(gets, __gets_unsafe, FBSD_1.0);

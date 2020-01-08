@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2002 Benno Rice.  All rights reserved.
  * Copyright (c) 2002 David E. O'Brien.  All rights reserved.
  *
@@ -42,7 +44,7 @@
 #define	SYSCALL(name)						\
 	.text;							\
 	.align 2;						\
-2:	b	PIC_PLT(CNAME(HIDENAME(cerror)));		\
+2:	b	CNAME(HIDENAME(cerror));			\
 ENTRY(__sys_##name);						\
 	WEAK_REFERENCE(__sys_##name, name);			\
 	WEAK_REFERENCE(__sys_##name, _##name);			\
@@ -56,15 +58,14 @@ ENTRY(__sys_##name);						\
 	WEAK_REFERENCE(__sys_##name, _##name);			\
 	_SYSCALL(name);						\
 	bnslr;							\
-	b	PIC_PLT(CNAME(HIDENAME(cerror)))
+	b	CNAME(HIDENAME(cerror))
 
 #define	RSYSCALL(name)						\
 	.text;							\
 	.align 2;						\
-2:	b	PIC_PLT(CNAME(HIDENAME(cerror)));		\
 ENTRY(__sys_##name);						\
 	WEAK_REFERENCE(__sys_##name, name);			\
 	WEAK_REFERENCE(__sys_##name, _##name);			\
 	_SYSCALL(name);						\
 	bnslr;							\
-	b	PIC_PLT(CNAME(HIDENAME(cerror)))
+	b	CNAME(HIDENAME(cerror))

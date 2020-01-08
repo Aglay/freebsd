@@ -33,6 +33,12 @@
 #ifndef DEV_MMC_HOST_DWMMC_VAR_H
 #define DEV_MMC_HOST_DWMMC_VAR_H
 
+#ifdef EXT_RESOURCES
+#include <dev/extres/clk/clk.h>
+#include <dev/extres/hwreset/hwreset.h>
+#include <dev/extres/regulator/regulator.h>
+#endif
+
 enum {
 	HWTYPE_NONE,
 	HWTYPE_ALTERA,
@@ -55,6 +61,11 @@ struct dwmmc_softc {
 	uint32_t		use_pio;
 	uint32_t		pwren_inverted;
 	u_int			desc_count;
+	device_t		child;
+	struct task		card_task;	/* Card presence check task */
+	struct timeout_task	card_delayed_task;/* Card insert delayed task */
+
+	int			(*update_ios)(struct dwmmc_softc *sc, struct mmc_ios *ios);
 
 	bus_dma_tag_t		desc_tag;
 	bus_dmamap_t		desc_map;
@@ -67,15 +78,25 @@ struct dwmmc_softc {
 	uint32_t		dto_rcvd;
 	uint32_t		acd_rcvd;
 	uint32_t		cmd_done;
-	uint32_t		bus_hz;
+	uint64_t		bus_hz;
+	uint32_t		max_hz;
 	uint32_t		fifo_depth;
 	uint32_t		num_slots;
 	uint32_t		sdr_timing;
 	uint32_t		ddr_timing;
+
+#ifdef EXT_RESOURCES
+	clk_t			biu;
+	clk_t			ciu;
+	hwreset_t		hwreset;
+	regulator_t		vmmc;
+	regulator_t		vqmmc;
+#endif
 };
 
-extern driver_t dwmmc_driver;
+DECLARE_CLASS(dwmmc_driver);
 
 int dwmmc_attach(device_t);
+int dwmmc_detach(device_t);
 
 #endif

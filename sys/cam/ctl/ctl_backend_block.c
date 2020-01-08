@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2003 Silicon Graphics International Corp.
  * Copyright (c) 2009-2011 Spectra Logic Corporation
  * Copyright (c) 2012 The FreeBSD Foundation
@@ -76,6 +78,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/sdt.h>
 #include <sys/devicestat.h>
 #include <sys/sysctl.h>
+#include <sys/nv.h>
+#include <sys/dnv.h>
 
 #include <geom/geom.h>
 
@@ -576,9 +580,7 @@ ctl_be_block_flush_file(struct ctl_be_block_lun *be_lun,
 	DPRINTF("entered\n");
 
 	binuptime(&beio->ds_t0);
-	mtx_lock(&be_lun->io_lock);
 	devstat_start_transaction(beio->lun->disk_stats, &beio->ds_t0);
-	mtx_unlock(&be_lun->io_lock);
 
 	(void) vn_start_write(be_lun->vn, &mountpoint, V_WAIT);
 
@@ -590,7 +592,7 @@ ctl_be_block_flush_file(struct ctl_be_block_lun *be_lun,
 	vn_lock(be_lun->vn, lock_flags | LK_RETRY);
 	error = VOP_FSYNC(be_lun->vn, beio->io_arg ? MNT_NOWAIT : MNT_WAIT,
 	    curthread);
-	VOP_UNLOCK(be_lun->vn, 0);
+	VOP_UNLOCK(be_lun->vn);
 
 	vn_finished_write(mountpoint);
 
@@ -659,9 +661,7 @@ ctl_be_block_dispatch_file(struct ctl_be_block_lun *be_lun,
 	}
 
 	binuptime(&beio->ds_t0);
-	mtx_lock(&be_lun->io_lock);
 	devstat_start_transaction(beio->lun->disk_stats, &beio->ds_t0);
-	mtx_unlock(&be_lun->io_lock);
 
 	if (beio->bio_cmd == BIO_READ) {
 		vn_lock(be_lun->vn, LK_SHARED | LK_RETRY);
@@ -685,7 +685,7 @@ ctl_be_block_dispatch_file(struct ctl_be_block_lun *be_lun,
 		 */
 		error = VOP_READ(be_lun->vn, &xuio, flags, file_data->cred);
 
-		VOP_UNLOCK(be_lun->vn, 0);
+		VOP_UNLOCK(be_lun->vn);
 		SDT_PROBE0(cbb, , read, file_done);
 		if (error == 0 && xuio.uio_resid > 0) {
 			/*
@@ -732,7 +732,7 @@ ctl_be_block_dispatch_file(struct ctl_be_block_lun *be_lun,
 		 * cache before returning.
 		 */
 		error = VOP_WRITE(be_lun->vn, &xuio, flags, file_data->cred);
-		VOP_UNLOCK(be_lun->vn, 0);
+		VOP_UNLOCK(be_lun->vn);
 
 		vn_finished_write(mountpoint);
 		SDT_PROBE0(cbb, , write, file_done);
@@ -810,7 +810,7 @@ ctl_be_block_gls_file(struct ctl_be_block_lun *be_lun,
 			off = be_lun->size_bytes;
 		}
 	}
-	VOP_UNLOCK(be_lun->vn, 0);
+	VOP_UNLOCK(be_lun->vn);
 
 	data = (struct scsi_get_lba_status_data *)io->scsiio.kern_data_ptr;
 	scsi_u64to8b(lbalen->lba, data->descr[0].addr);
@@ -839,13 +839,13 @@ ctl_be_block_getattr_file(struct ctl_be_block_lun *be_lun, const char *attrname)
 			val = vattr.va_bytes / be_lun->cbe_lun.blocksize;
 	}
 	if (strcmp(attrname, "blocksavail") == 0 &&
-	    (be_lun->vn->v_iflag & VI_DOOMED) == 0) {
+	    !VN_IS_DOOMED(be_lun->vn)) {
 		error = VFS_STATFS(be_lun->vn->v_mount, &statfs);
 		if (error == 0)
 			val = statfs.f_bavail * statfs.f_bsize /
 			    be_lun->cbe_lun.blocksize;
 	}
-	VOP_UNLOCK(be_lun->vn, 0);
+	VOP_UNLOCK(be_lun->vn);
 	return (val);
 }
 
@@ -890,9 +890,7 @@ ctl_be_block_dispatch_zvol(struct ctl_be_block_lun *be_lun,
 	}
 
 	binuptime(&beio->ds_t0);
-	mtx_lock(&be_lun->io_lock);
 	devstat_start_transaction(beio->lun->disk_stats, &beio->ds_t0);
-	mtx_unlock(&be_lun->io_lock);
 
 	csw = devvn_refthread(be_lun->vn, &dev, &ref);
 	if (csw) {
@@ -1030,9 +1028,7 @@ ctl_be_block_flush_dev(struct ctl_be_block_lun *be_lun,
 	beio->send_complete = 1;
 
 	binuptime(&beio->ds_t0);
-	mtx_lock(&be_lun->io_lock);
 	devstat_start_transaction(be_lun->disk_stats, &beio->ds_t0);
-	mtx_unlock(&be_lun->io_lock);
 
 	csw = devvn_refthread(be_lun->vn, &dev, &ref);
 	if (csw) {
@@ -1103,9 +1099,7 @@ ctl_be_block_unmap_dev(struct ctl_be_block_lun *be_lun,
 	DPRINTF("entered\n");
 
 	binuptime(&beio->ds_t0);
-	mtx_lock(&be_lun->io_lock);
 	devstat_start_transaction(be_lun->disk_stats, &beio->ds_t0);
-	mtx_unlock(&be_lun->io_lock);
 
 	if (beio->io_offset == -1) {
 		beio->io_len = 0;
@@ -1182,11 +1176,9 @@ ctl_be_block_dispatch_dev(struct ctl_be_block_lun *be_lun,
 			beio->num_bios_sent++;
 		}
 	}
-	binuptime(&beio->ds_t0);
-	mtx_lock(&be_lun->io_lock);
-	devstat_start_transaction(be_lun->disk_stats, &beio->ds_t0);
 	beio->send_complete = 1;
-	mtx_unlock(&be_lun->io_lock);
+	binuptime(&beio->ds_t0);
+	devstat_start_transaction(be_lun->disk_stats, &beio->ds_t0);
 
 	/*
 	 * Fire off all allocated requests!
@@ -1815,7 +1807,7 @@ ctl_be_block_open_file(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 	struct ctl_be_lun *cbe_lun;
 	struct ctl_be_block_filedata *file_data;
 	struct ctl_lun_create_params *params;
-	char			     *value;
+	const char		     *value;
 	struct vattr		      vattr;
 	off_t			      ps, pss, po, pos, us, uss, uo, uos;
 	int			      error;
@@ -1865,10 +1857,10 @@ ctl_be_block_open_file(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 	us = ps = vattr.va_blocksize;
 	uo = po = 0;
 
-	value = ctl_get_opt(&cbe_lun->options, "pblocksize");
+	value = dnvlist_get_string(cbe_lun->options, "pblocksize", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &ps);
-	value = ctl_get_opt(&cbe_lun->options, "pblockoffset");
+	value = dnvlist_get_string(cbe_lun->options, "pblockoffset", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &po);
 	pss = ps / cbe_lun->blocksize;
@@ -1879,10 +1871,10 @@ ctl_be_block_open_file(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 		cbe_lun->pblockoff = (pss - pos) % pss;
 	}
 
-	value = ctl_get_opt(&cbe_lun->options, "ublocksize");
+	value = dnvlist_get_string(cbe_lun->options, "ublocksize", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &us);
-	value = ctl_get_opt(&cbe_lun->options, "ublockoffset");
+	value = dnvlist_get_string(cbe_lun->options, "ublockoffset", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &uo);
 	uss = us / cbe_lun->blocksize;
@@ -1915,7 +1907,7 @@ ctl_be_block_open_dev(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 	struct ctl_lun_create_params *params;
 	struct cdevsw		     *csw;
 	struct cdev		     *dev;
-	char			     *value;
+	const char		     *value;
 	int			      error, atomic, maxio, ref, unmap, tmp;
 	off_t			      ps, pss, po, pos, us, uss, uo, uos, otmp;
 
@@ -2031,10 +2023,10 @@ ctl_be_block_open_dev(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 	us = ps;
 	uo = po;
 
-	value = ctl_get_opt(&cbe_lun->options, "pblocksize");
+	value = dnvlist_get_string(cbe_lun->options, "pblocksize", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &ps);
-	value = ctl_get_opt(&cbe_lun->options, "pblockoffset");
+	value = dnvlist_get_string(cbe_lun->options, "pblockoffset", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &po);
 	pss = ps / cbe_lun->blocksize;
@@ -2045,10 +2037,10 @@ ctl_be_block_open_dev(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 		cbe_lun->pblockoff = (pss - pos) % pss;
 	}
 
-	value = ctl_get_opt(&cbe_lun->options, "ublocksize");
+	value = dnvlist_get_string(cbe_lun->options, "ublocksize", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &us);
-	value = ctl_get_opt(&cbe_lun->options, "ublockoffset");
+	value = dnvlist_get_string(cbe_lun->options, "ublockoffset", NULL);
 	if (value != NULL)
 		ctl_expand_number(value, &uo);
 	uss = us / cbe_lun->blocksize;
@@ -2073,7 +2065,7 @@ ctl_be_block_open_dev(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 		    curthread);
 		unmap = (error == 0) ? arg.value.i : 0;
 	}
-	value = ctl_get_opt(&cbe_lun->options, "unmap");
+	value = dnvlist_get_string(cbe_lun->options, "unmap", NULL);
 	if (value != NULL)
 		unmap = (strcmp(value, "on") == 0);
 	if (unmap)
@@ -2123,7 +2115,7 @@ ctl_be_block_open(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 {
 	struct ctl_be_lun *cbe_lun = &be_lun->cbe_lun;
 	struct nameidata nd;
-	char		*value;
+	const char	*value;
 	int		 error, flags;
 
 	error = 0;
@@ -2134,7 +2126,7 @@ ctl_be_block_open(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 	}
 	pwd_ensure_dirs();
 
-	value = ctl_get_opt(&cbe_lun->options, "file");
+	value = dnvlist_get_string(cbe_lun->options, "file", NULL);
 	if (value == NULL) {
 		snprintf(req->error_str, sizeof(req->error_str),
 			 "no file argument specified");
@@ -2144,7 +2136,7 @@ ctl_be_block_open(struct ctl_be_block_lun *be_lun, struct ctl_lun_req *req)
 	be_lun->dev_path = strdup(value, M_CTLBLK);
 
 	flags = FREAD;
-	value = ctl_get_opt(&cbe_lun->options, "readonly");
+	value = dnvlist_get_string(cbe_lun->options, "readonly", NULL);
 	if (value != NULL) {
 		if (strcmp(value, "on") != 0)
 			flags |= FWRITE;
@@ -2196,14 +2188,14 @@ again:
 		snprintf(req->error_str, sizeof(req->error_str),
 			 "%s is not a disk or plain file", be_lun->dev_path);
 	}
-	VOP_UNLOCK(be_lun->vn, 0);
+	VOP_UNLOCK(be_lun->vn);
 
 	if (error != 0)
 		ctl_be_block_close(be_lun);
 	cbe_lun->serseq = CTL_LUN_SERSEQ_OFF;
 	if (be_lun->dispatch != ctl_be_block_dispatch_dev)
 		cbe_lun->serseq = CTL_LUN_SERSEQ_READ;
-	value = ctl_get_opt(&cbe_lun->options, "serseq");
+	value = dnvlist_get_string(cbe_lun->options, "serseq", NULL);
 	if (value != NULL && strcmp(value, "on") == 0)
 		cbe_lun->serseq = CTL_LUN_SERSEQ_ON;
 	else if (value != NULL && strcmp(value, "read") == 0)
@@ -2221,7 +2213,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 	struct ctl_lun_create_params *params;
 	char num_thread_str[16];
 	char tmpstr[32];
-	char *value;
+	const char *value;
 	int retval, num_threads;
 	int tmp_num_threads;
 
@@ -2241,8 +2233,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 	sprintf(be_lun->lunname, "cblk%d", softc->num_luns);
 	mtx_init(&be_lun->io_lock, "cblk io lock", NULL, MTX_DEF);
 	mtx_init(&be_lun->queue_lock, "cblk queue lock", NULL, MTX_DEF);
-	ctl_init_opts(&cbe_lun->options,
-	    req->num_be_args, req->kern_be_args);
+	cbe_lun->options = nvlist_clone(req->args_nvl);
 	be_lun->lun_zone = uma_zcreate(be_lun->lunname, CTLBLK_MAX_SEG,
 	    NULL, NULL, NULL, NULL, /*align*/ 0, /*flags*/0);
 	if (be_lun->lun_zone == NULL) {
@@ -2257,7 +2248,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 		cbe_lun->lun_type = T_DIRECT;
 	be_lun->flags = CTL_BE_BLOCK_LUN_UNCONFIGURED;
 	cbe_lun->flags = 0;
-	value = ctl_get_opt(&cbe_lun->options, "ha_role");
+	value = dnvlist_get_string(cbe_lun->options, "ha_role", NULL);
 	if (value != NULL) {
 		if (strcmp(value, "primary") == 0)
 			cbe_lun->flags |= CTL_LUN_FLAG_PRIMARY;
@@ -2290,7 +2281,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 		num_threads = 1;
 	}
 
-	value = ctl_get_opt(&cbe_lun->options, "num_threads");
+	value = dnvlist_get_string(cbe_lun->options, "num_threads", NULL);
 	if (value != NULL) {
 		tmp_num_threads = strtol(value, NULL, 0);
 
@@ -2324,7 +2315,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 	cbe_lun->be = &ctl_be_block_driver;
 
 	if ((params->flags & CTL_LUN_FLAG_SERIAL_NUM) == 0) {
-		snprintf(tmpstr, sizeof(tmpstr), "MYSERIAL%4d",
+		snprintf(tmpstr, sizeof(tmpstr), "MYSERIAL%04d",
 			 softc->num_luns);
 		strncpy((char *)cbe_lun->serial_num, tmpstr,
 			MIN(sizeof(cbe_lun->serial_num), sizeof(tmpstr)));
@@ -2338,7 +2329,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 			sizeof(params->serial_num)));
 	}
 	if ((params->flags & CTL_LUN_FLAG_DEVID) == 0) {
-		snprintf(tmpstr, sizeof(tmpstr), "MYDEVID%4d", softc->num_luns);
+		snprintf(tmpstr, sizeof(tmpstr), "MYDEVID%04d", softc->num_luns);
 		strncpy((char *)cbe_lun->device_id, tmpstr,
 			MIN(sizeof(cbe_lun->device_id), sizeof(tmpstr)));
 
@@ -2378,7 +2369,7 @@ ctl_be_block_create(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 	 */
 	retval = taskqueue_start_threads(&be_lun->io_taskqueue,
 					 /*num threads*/num_threads,
-					 /*priority*/PWAIT,
+					 /*priority*/PUSER,
 					 /*thread name*/
 					 "%s taskq", be_lun->lunname);
 
@@ -2455,7 +2446,7 @@ bailout_error:
 		free(be_lun->dev_path, M_CTLBLK);
 	if (be_lun->lun_zone != NULL)
 		uma_zdestroy(be_lun->lun_zone);
-	ctl_free_opts(&cbe_lun->options);
+	nvlist_destroy(cbe_lun->options);
 	mtx_destroy(&be_lun->queue_lock);
 	mtx_destroy(&be_lun->io_lock);
 	free(be_lun, M_CTLBLK);
@@ -2539,7 +2530,7 @@ ctl_be_block_rm(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 
 	uma_zdestroy(be_lun->lun_zone);
 
-	ctl_free_opts(&cbe_lun->options);
+	nvlist_destroy(cbe_lun->options);
 	free(be_lun->dev_path, M_CTLBLK);
 	mtx_destroy(&be_lun->queue_lock);
 	mtx_destroy(&be_lun->io_lock);
@@ -2559,7 +2550,7 @@ ctl_be_block_modify(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 	struct ctl_lun_modify_params *params;
 	struct ctl_be_block_lun *be_lun;
 	struct ctl_be_lun *cbe_lun;
-	char *value;
+	const char *value;
 	uint64_t oldsize;
 	int error, wasprim;
 
@@ -2581,10 +2572,12 @@ ctl_be_block_modify(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 
 	if (params->lun_size_bytes != 0)
 		be_lun->params.lun_size_bytes = params->lun_size_bytes;
-	ctl_update_opts(&cbe_lun->options, req->num_be_args, req->kern_be_args);
+
+	nvlist_destroy(cbe_lun->options);
+	cbe_lun->options = nvlist_clone(req->args_nvl);
 
 	wasprim = (cbe_lun->flags & CTL_LUN_FLAG_PRIMARY);
-	value = ctl_get_opt(&cbe_lun->options, "ha_role");
+	value = dnvlist_get_string(cbe_lun->options, "ha_role", NULL);
 	if (value != NULL) {
 		if (strcmp(value, "primary") == 0)
 			cbe_lun->flags |= CTL_LUN_FLAG_PRIMARY;
@@ -2611,7 +2604,7 @@ ctl_be_block_modify(struct ctl_be_block_softc *softc, struct ctl_lun_req *req)
 		else if (be_lun->vn->v_type == VREG) {
 			vn_lock(be_lun->vn, LK_SHARED | LK_RETRY);
 			error = ctl_be_block_open_file(be_lun, req);
-			VOP_UNLOCK(be_lun->vn, 0);
+			VOP_UNLOCK(be_lun->vn);
 		} else
 			error = EINVAL;
 		if ((cbe_lun->flags & CTL_LUN_FLAG_NO_MEDIA) &&

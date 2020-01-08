@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012-2015 Ian Lepore
  * Copyright (c) 2010 Mark Tinguely
  * Copyright (c) 2004 Olivier Houchard
@@ -50,7 +52,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/uio.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/vm_map.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_kern.h>
@@ -337,16 +341,27 @@ cacheline_bounce(bus_dmamap_t map, bus_addr_t addr, bus_size_t size)
  *
  * Note that the addr argument might be either virtual or physical.  It doesn't
  * matter because we only look at the low-order bits, which are the same in both
- * address spaces.
+ * address spaces and maximum alignment of generic buffer is limited up to page
+ * size.
+ * Bouncing of buffers allocated by bus_dmamem_alloc()is not necessary, these
+ * always comply with the required rules (alignment, boundary, and address
+ * range).
  */
 static __inline int
 might_bounce(bus_dma_tag_t dmat, bus_dmamap_t map, bus_addr_t addr,
     bus_size_t size)
 {
 
-	return ((dmat->flags & BUS_DMA_EXCL_BOUNCE) ||
+	KASSERT(map->flags & DMAMAP_DMAMEM_ALLOC ||
+	    dmat->alignment <= PAGE_SIZE,
+	    ("%s: unsupported alignment (0x%08lx) for buffer not "
+	    "allocated by bus_dmamem_alloc()",
+	    __func__, dmat->alignment));
+
+	return (!(map->flags & DMAMAP_DMAMEM_ALLOC) &&
+	    ((dmat->flags & BUS_DMA_EXCL_BOUNCE) ||
 	    alignment_bounce(dmat, addr) ||
-	    cacheline_bounce(map, addr, size));
+	    cacheline_bounce(map, addr, size)));
 }
 
 /*
@@ -560,6 +575,64 @@ bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 	return (error);
 }
 
+void
+bus_dma_template_init(bus_dma_tag_template_t *t, bus_dma_tag_t parent)
+{
+
+	if (t == NULL)
+		return;
+
+	t->parent = parent;
+	t->alignment = 1;
+	t->boundary = 0;
+	t->lowaddr = t->highaddr = BUS_SPACE_MAXADDR;
+	t->maxsize = t->maxsegsize = BUS_SPACE_MAXSIZE;
+	t->nsegments = BUS_SPACE_UNRESTRICTED;
+	t->lockfunc = NULL;
+	t->lockfuncarg = NULL;
+	t->flags = 0;
+}
+
+int
+bus_dma_template_tag(bus_dma_tag_template_t *t, bus_dma_tag_t *dmat)
+{
+
+	if (t == NULL || dmat == NULL)
+		return (EINVAL);
+
+	return (bus_dma_tag_create(t->parent, t->alignment, t->boundary,
+	    t->lowaddr, t->highaddr, NULL, NULL, t->maxsize,
+	    t->nsegments, t->maxsegsize, t->flags, t->lockfunc, t->lockfuncarg,
+	    dmat));
+}
+
+void
+bus_dma_template_clone(bus_dma_tag_template_t *t, bus_dma_tag_t dmat)
+{
+
+	if (t == NULL || dmat == NULL)
+		return;
+
+	t->parent = dmat->parent;
+	t->alignment = dmat->alignment;
+	t->boundary = dmat->boundary;
+	t->lowaddr = dmat->lowaddr;
+	t->highaddr = dmat->highaddr;
+	t->maxsize = dmat->maxsize;
+	t->nsegments = dmat->nsegments;
+	t->maxsegsize = dmat->maxsegsz;
+	t->flags = dmat->flags;
+	t->lockfunc = dmat->lockfunc;
+	t->lockfuncarg = dmat->lockfuncarg;
+}
+
+int
+bus_dma_tag_set_domain(bus_dma_tag_t dmat, int domain)
+{
+
+	return (0);
+}
+
 int
 bus_dma_tag_destroy(bus_dma_tag_t dmat)
 {
@@ -662,6 +735,7 @@ allocate_map(bus_dma_tag_t dmat, int mflags)
 		return (NULL);
 	}
 	map->segments = (bus_dma_segment_t *)((uintptr_t)map + mapsize);
+	STAILQ_INIT(&map->bpages);
 	return (map);
 }
 
@@ -803,12 +877,11 @@ bus_dmamem_alloc(bus_dma_tag_t dmat, void **vaddr, int flags,
 	    howmany(dmat->maxsize, MIN(dmat->maxsegsz, PAGE_SIZE)) &&
 	    dmat->alignment <= PAGE_SIZE &&
 	    (dmat->boundary % PAGE_SIZE) == 0) {
-		*vaddr = (void *)kmem_alloc_attr(kernel_arena, dmat->maxsize,
-		    mflags, 0, dmat->lowaddr, memattr);
+		*vaddr = (void *)kmem_alloc_attr(dmat->maxsize, mflags, 0,
+		    dmat->lowaddr, memattr);
 	} else {
-		*vaddr = (void *)kmem_alloc_contig(kernel_arena, dmat->maxsize,
-		    mflags, 0, dmat->lowaddr, dmat->alignment, dmat->boundary,
-		    memattr);
+		*vaddr = (void *)kmem_alloc_contig(dmat->maxsize, mflags, 0,
+		    dmat->lowaddr, dmat->alignment, dmat->boundary, memattr);
 	}
 	if (*vaddr == NULL) {
 		CTR4(KTR_BUSDMA, "%s: tag %p tag flags 0x%x error %d",
@@ -850,7 +923,7 @@ bus_dmamem_free(bus_dma_tag_t dmat, void *vaddr, bus_dmamap_t map)
 	    !exclusion_bounce(dmat))
 		uma_zfree(bufzone->umazone, vaddr);
 	else
-		kmem_free(kernel_arena, (vm_offset_t)vaddr, dmat->maxsize);
+		kmem_free((vm_offset_t)vaddr, dmat->maxsize);
 
 	dmat->map_count--;
 	if (map->flags & DMAMAP_COHERENT)

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1980, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -36,14 +38,14 @@ static const char rcsid[] =
 #endif /* not lint */
 
 /*
- * Make all the .h files for the optional entries
+ * This used to generate a bunch of hearders files related to devices when
+ * device counters were supported. Support for that was removed in 2005.
+ * Since then, all we've done is to report unknown devices in this file.
+ * It's kept its historical name, despite no longer generating headers.
  */
 
-#include <ctype.h>
 #include <err.h>
 #include <stdio.h>
-#include <string.h>
-#include <sys/param.h>
 #include "config.h"
 #include "y.tab.h"
 

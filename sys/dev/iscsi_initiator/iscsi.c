@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005-2011 Daniel Braniss <danny@cs.huji.ac.il>
  * All rights reserved.
  *
@@ -35,6 +37,9 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/capsicum.h>
+#ifdef DO_EVENTHANDLER
+#include <sys/eventhandler.h>
+#endif
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/conf.h>

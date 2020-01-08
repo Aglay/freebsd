@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004-2009 University of Zagreb
  * Copyright (c) 2006-2009 FreeBSD Foundation
  * All rights reserved.
@@ -169,14 +171,14 @@ static MALLOC_DEFINE(M_VNET_DATA, "vnet_data", "VNET data");
  * we want the virtualized global variable space to be page-sized, we may
  * have more space than that in practice.
  */
-#define	VNET_MODMIN	8192
+#define	VNET_MODMIN	(8 * PAGE_SIZE)
 #define	VNET_SIZE	roundup2(VNET_BYTES, PAGE_SIZE)
 
 /*
  * Space to store virtualized global variables from loadable kernel modules,
  * and the free list to manage it.
  */
-static VNET_DEFINE(char, modspace[VNET_MODMIN]);
+VNET_DEFINE_STATIC(char, modspace[VNET_MODMIN] __aligned(__alignof(void *)));
 
 /*
  * Global lists of subsystem constructor and destructors for vnets.  They are
@@ -233,7 +235,6 @@ vnet_alloc(void)
 	SDT_PROBE1(vnet, functions, vnet_alloc, entry, __LINE__);
 	vnet = malloc(sizeof(struct vnet), M_VNET, M_WAITOK | M_ZERO);
 	vnet->vnet_magic_n = VNET_MAGIC_N;
-	vnet->vnet_state = 0;
 	SDT_PROBE2(vnet, functions, vnet_alloc, alloc, __LINE__, vnet);
 
 	/*
@@ -312,9 +313,8 @@ static void
 vnet0_init(void *arg __unused)
 {
 
-	/* Warn people before take off - in case we crash early. */
-	printf("WARNING: VIMAGE (virtualized network stack) is a highly "
-	    "experimental feature.\n");
+	if (bootverbose)
+		printf("VIMAGE (virtualized network stack) enabled\n");
 
 	/*
 	 * We MUST clear curvnet in vi_init_done() before going SMP,
@@ -348,17 +348,17 @@ vnet_data_startup(void *dummy __unused)
 	TAILQ_INSERT_HEAD(&vnet_data_free_head, df, vnd_link);
 	sx_init(&vnet_data_free_lock, "vnet_data alloc lock");
 }
-SYSINIT(vnet_data, SI_SUB_KLD, SI_ORDER_FIRST, vnet_data_startup, 0);
+SYSINIT(vnet_data, SI_SUB_KLD, SI_ORDER_FIRST, vnet_data_startup, NULL);
 
-/* Dummy VNET_SYSINIT to make sure we always reach the final end state. */
 static void
-vnet_sysinit_done(void *unused __unused)
+vnet_sysuninit_shutdown(void *unused __unused)
 {
 
-	return;
+	/* Signal that VNET is being shutdown. */
+	curvnet->vnet_shutdown = 1;
 }
-VNET_SYSINIT(vnet_sysinit_done, SI_SUB_VNET_DONE, SI_ORDER_ANY,
-    vnet_sysinit_done, NULL);
+VNET_SYSUNINIT(vnet_sysuninit_shutdown, SI_SUB_VNET_DONE, SI_ORDER_FIRST,
+    vnet_sysuninit_shutdown, NULL);
 
 /*
  * When a module is loaded and requires storage for a virtualized global
@@ -572,10 +572,8 @@ vnet_sysinit(void)
 	struct vnet_sysinit *vs;
 
 	VNET_SYSINIT_RLOCK();
-	TAILQ_FOREACH(vs, &vnet_constructors, link) {
-		curvnet->vnet_state = vs->subsystem;
+	TAILQ_FOREACH(vs, &vnet_constructors, link)
 		vs->func(vs->arg);
-	}
 	VNET_SYSINIT_RUNLOCK();
 }
 
@@ -591,10 +589,8 @@ vnet_sysuninit(void)
 
 	VNET_SYSINIT_RLOCK();
 	TAILQ_FOREACH_REVERSE(vs, &vnet_destructors, vnet_sysuninit_head,
-	    link) {
-		curvnet->vnet_state = vs->subsystem;
+	    link)
 		vs->func(vs->arg);
-	}
 	VNET_SYSINIT_RUNLOCK();
 }
 
@@ -708,7 +704,7 @@ db_vnet_print(struct vnet *vnet)
 	db_printf(" vnet_data_mem  = %p\n", vnet->vnet_data_mem);
 	db_printf(" vnet_data_base = %#jx\n",
 	    (uintmax_t)vnet->vnet_data_base);
-	db_printf(" vnet_state     = %#08x\n", vnet->vnet_state);
+	db_printf(" vnet_shutdown  = %#08x\n", vnet->vnet_shutdown);
 	db_printf("\n");
 }
 

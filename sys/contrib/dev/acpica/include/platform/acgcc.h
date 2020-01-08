@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -193,5 +193,9 @@ typedef __builtin_va_list       va_list;
 /* GCC supports __VA_ARGS__ in macros */
 
 #define COMPILER_VA_MACRO               1
+
+/* GCC supports native multiply/shift on 32-bit platforms */
+
+#define ACPI_USE_NATIVE_MATH64
 
 #endif /* __ACGCC_H__ */

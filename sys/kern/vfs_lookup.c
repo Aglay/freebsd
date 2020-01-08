@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -90,9 +92,9 @@ static int
 crossmp_vop_lock1(struct vop_lock1_args *ap)
 {
 	struct vnode *vp;
-	struct lock *lk;
-	const char *file;
-	int flags, line;
+	struct lock *lk __unused;
+	const char *file __unused;
+	int flags, line __unused;
 
 	vp = ap->a_vp;
 	lk = vp->v_vnlock;
@@ -116,15 +118,11 @@ static int
 crossmp_vop_unlock(struct vop_unlock_args *ap)
 {
 	struct vnode *vp;
-	struct lock *lk;
-	int flags;
+	struct lock *lk __unused;
 
 	vp = ap->a_vp;
 	lk = vp->v_vnlock;
-	flags = ap->a_flags;
 
-	if ((flags & LK_INTERLOCK) != 0)
-		VI_UNLOCK(vp);
 	WITNESS_UNLOCK(&lk->lock_object, 0, LOCK_FILE, LOCK_LINE);
 	LOCK_LOG_LOCK("SUNLOCK", &lk->lock_object, 0, 0, LOCK_FILE,
 	    LOCK_LINE);
@@ -137,6 +135,10 @@ static struct vop_vector crossmp_vnodeops = {
 	.vop_lock1 =		crossmp_vop_lock1,
 	.vop_unlock =		crossmp_vop_unlock,
 };
+/*
+ * VFS_VOP_VECTOR_REGISTER(crossmp_vnodeops) is not used here since the vnode
+ * gets allocated early. See nameiinit for the direct call below.
+ */
 
 struct nameicap_tracker {
 	struct vnode *dp;
@@ -154,13 +156,10 @@ nameiinit(void *dummy __unused)
 	    UMA_ALIGN_PTR, 0);
 	nt_zone = uma_zcreate("rentr", sizeof(struct nameicap_tracker),
 	    NULL, NULL, NULL, NULL, UMA_ALIGN_PTR, 0);
+	vfs_vector_op_register(&crossmp_vnodeops);
 	getnewvnode("crossmp", NULL, &crossmp_vnodeops, &vp_crossmp);
 }
 SYSINIT(vfs, SI_SUB_VFS, SI_ORDER_SECOND, nameiinit, NULL);
-
-static int lookup_shared = 1;
-SYSCTL_INT(_vfs, OID_AUTO, lookup_shared, CTLFLAG_RWTUN, &lookup_shared, 0,
-    "enables shared locks for path name translation");
 
 static int lookup_cap_dotdot = 1;
 SYSCTL_INT(_vfs, OID_AUTO, lookup_cap_dotdot, CTLFLAG_RWTUN,
@@ -179,6 +178,13 @@ nameicap_tracker_add(struct nameidata *ndp, struct vnode *dp)
 
 	if ((ndp->ni_lcf & NI_LCF_CAP_DOTDOT) == 0 || dp->v_type != VDIR)
 		return;
+	if ((ndp->ni_lcf & (NI_LCF_BENEATH_ABS | NI_LCF_BENEATH_LATCHED)) ==
+	    NI_LCF_BENEATH_ABS) {
+		MPASS((ndp->ni_lcf & NI_LCF_LATCH) != 0);
+		if (dp != ndp->ni_beneath_latch)
+			return;
+		ndp->ni_lcf |= NI_LCF_BENEATH_LATCHED;
+	}
 	nt = uma_zalloc(nt_zone, M_WAITOK);
 	vhold(dp);
 	nt->dp = dp;
@@ -186,7 +192,7 @@ nameicap_tracker_add(struct nameidata *ndp, struct vnode *dp)
 }
 
 static void
-nameicap_cleanup(struct nameidata *ndp)
+nameicap_cleanup(struct nameidata *ndp, bool clean_latch)
 {
 	struct nameicap_tracker *nt, *nt1;
 
@@ -196,6 +202,10 @@ nameicap_cleanup(struct nameidata *ndp)
 		TAILQ_REMOVE(&ndp->ni_cap_tracker, nt, nm_link);
 		vdrop(nt->dp);
 		uma_zfree(nt_zone, nt);
+	}
+	if (clean_latch && (ndp->ni_lcf & NI_LCF_LATCH) != 0) {
+		ndp->ni_lcf &= ~NI_LCF_LATCH;
+		vrele(ndp->ni_beneath_latch);
 	}
 }
 
@@ -224,6 +234,11 @@ nameicap_check_dotdot(struct nameidata *ndp, struct vnode *dp)
 		if (dp == nt->dp)
 			return (0);
 	}
+	if ((ndp->ni_lcf & NI_LCF_BENEATH_ABS) != 0) {
+		ndp->ni_lcf &= ~NI_LCF_BENEATH_LATCHED;
+		nameicap_cleanup(ndp, false);
+		return (0);
+	}
 	return (ENOTCAPABLE);
 }
 
@@ -250,6 +265,11 @@ namei_handle_root(struct nameidata *ndp, struct vnode **dpp)
 			ktrcapfail(CAPFAIL_LOOKUP, NULL, NULL);
 #endif
 		return (ENOTCAPABLE);
+	}
+	if ((cnp->cn_flags & BENEATH) != 0) {
+		ndp->ni_lcf |= NI_LCF_BENEATH_ABS;
+		ndp->ni_lcf &= ~NI_LCF_BENEATH_LATCHED;
+		nameicap_cleanup(ndp, false);
 	}
 	while (*(cnp->cn_nameptr) == '/') {
 		cnp->cn_nameptr++;
@@ -291,6 +311,7 @@ namei(struct nameidata *ndp)
 	struct thread *td;
 	struct proc *p;
 	cap_rights_t rights;
+	struct filecaps dirfd_caps;
 	struct uio auio;
 	int error, linklen, startdir_used;
 
@@ -305,8 +326,6 @@ namei(struct nameidata *ndp)
 	    ("namei: flags contaminated with nameiops"));
 	MPASS(ndp->ni_startdir == NULL || ndp->ni_startdir->v_type == VDIR ||
 	    ndp->ni_startdir->v_type == VBAD);
-	if (!lookup_shared)
-		cnp->cn_flags &= ~LOCKSHARED;
 	fdp = p->p_fd;
 	TAILQ_INIT(&ndp->ni_cap_tracker);
 	ndp->ni_lcf = 0;
@@ -392,6 +411,7 @@ namei(struct nameidata *ndp)
 	dp = NULL;
 	cnp->cn_nameptr = cnp->cn_pnbuf;
 	if (cnp->cn_pnbuf[0] == '/') {
+		ndp->ni_resflags |= NIRES_ABS;
 		error = namei_handle_root(ndp, &dp);
 	} else {
 		if (ndp->ni_startdir != NULL) {
@@ -430,6 +450,23 @@ namei(struct nameidata *ndp)
 		if (error == 0 && dp->v_type != VDIR)
 			error = ENOTDIR;
 	}
+	if (error == 0 && (cnp->cn_flags & BENEATH) != 0) {
+		if (ndp->ni_dirfd == AT_FDCWD) {
+			ndp->ni_beneath_latch = fdp->fd_cdir;
+			vrefact(ndp->ni_beneath_latch);
+		} else {
+			rights = ndp->ni_rightsneeded;
+			cap_rights_set(&rights, CAP_LOOKUP);
+			error = fgetvp_rights(td, ndp->ni_dirfd, &rights,
+			    &dirfd_caps, &ndp->ni_beneath_latch);
+			if (error == 0 && dp->v_type != VDIR) {
+				vrele(ndp->ni_beneath_latch);
+				error = ENOTDIR;
+			}
+		}
+		if (error == 0)
+			ndp->ni_lcf |= NI_LCF_LATCH;
+	}
 	FILEDESC_SUNLOCK(fdp);
 	if (ndp->ni_startdir != NULL && !startdir_used)
 		vrele(ndp->ni_startdir);
@@ -438,8 +475,12 @@ namei(struct nameidata *ndp)
 			vrele(dp);
 		goto out;
 	}
-	if ((ndp->ni_lcf & NI_LCF_STRICTRELATIVE) != 0 &&
-	    lookup_cap_dotdot != 0)
+	MPASS((ndp->ni_lcf & (NI_LCF_BENEATH_ABS | NI_LCF_LATCH)) !=
+	    NI_LCF_BENEATH_ABS);
+	if (((ndp->ni_lcf & NI_LCF_STRICTRELATIVE) != 0 &&
+	    lookup_cap_dotdot != 0) ||
+	    ((ndp->ni_lcf & NI_LCF_STRICTRELATIVE) == 0 &&
+	    (cnp->cn_flags & BENEATH) != 0))
 		ndp->ni_lcf |= NI_LCF_CAP_DOTDOT;
 	SDT_PROBE3(vfs, namei, lookup, entry, dp, cnp->cn_pnbuf,
 	    cnp->cn_flags);
@@ -457,9 +498,15 @@ namei(struct nameidata *ndp)
 				namei_cleanup_cnp(cnp);
 			} else
 				cnp->cn_flags |= HASBUF;
-			nameicap_cleanup(ndp);
-			SDT_PROBE2(vfs, namei, lookup, return, 0, ndp->ni_vp);
-			return (0);
+			if ((ndp->ni_lcf & (NI_LCF_BENEATH_ABS |
+			    NI_LCF_BENEATH_LATCHED)) == NI_LCF_BENEATH_ABS) {
+				NDFREE(ndp, 0);
+				error = ENOTCAPABLE;
+			}
+			nameicap_cleanup(ndp, true);
+			SDT_PROBE2(vfs, namei, lookup, return, error,
+			    (error == 0 ? ndp->ni_vp : NULL));
+			return (error);
 		}
 		if (ndp->ni_loopcnt++ >= MAXSYMLINKS) {
 			error = ELOOP;
@@ -499,7 +546,7 @@ namei(struct nameidata *ndp)
 			error = ENOENT;
 			break;
 		}
-		if (linklen + ndp->ni_pathlen >= MAXPATHLEN) {
+		if (linklen + ndp->ni_pathlen > MAXPATHLEN) {
 			if (ndp->ni_pathlen > 1)
 				uma_zfree(namei_zone, cp);
 			error = ENAMETOOLONG;
@@ -530,8 +577,9 @@ namei(struct nameidata *ndp)
 	vrele(ndp->ni_dvp);
 out:
 	vrele(ndp->ni_rootdir);
+	MPASS(error != 0);
 	namei_cleanup_cnp(cnp);
-	nameicap_cleanup(ndp);
+	nameicap_cleanup(ndp, true);
 	SDT_PROBE2(vfs, namei, lookup, return, error, NULL);
 	return (error);
 }
@@ -658,10 +706,7 @@ lookup(struct nameidata *ndp)
 	 * We use shared locks until we hit the parent of the last cn then
 	 * we adjust based on the requesting flags.
 	 */
-	if (lookup_shared)
-		cnp->cn_lkflags = LK_SHARED;
-	else
-		cnp->cn_lkflags = LK_EXCLUSIVE;
+	cnp->cn_lkflags = LK_SHARED;
 	dp = ndp->ni_startdir;
 	ndp->ni_startdir = NULLVP;
 	vn_lock(dp,
@@ -762,7 +807,7 @@ dirloop:
 			AUDIT_ARG_VNODE2(dp);
 
 		if (!(cnp->cn_flags & (LOCKPARENT | LOCKLEAF)))
-			VOP_UNLOCK(dp, 0);
+			VOP_UNLOCK(dp);
 		/* XXX This should probably move to the top of function. */
 		if (cnp->cn_flags & SAVESTART)
 			panic("lookup: SAVESTART");
@@ -823,7 +868,7 @@ dirloop:
 			}
 			if ((dp->v_vflag & VV_ROOT) == 0)
 				break;
-			if (dp->v_iflag & VI_DOOMED) {	/* forced unmount */
+			if (VN_IS_DOOMED(dp)) {	/* forced unmount */
 				error = ENOENT;
 				goto bad;
 			}
@@ -867,7 +912,7 @@ unionlookup:
 	if ((cnp->cn_flags & LOCKPARENT) && (cnp->cn_flags & ISLASTCN) &&
 	    dp != vp_crossmp && VOP_ISLOCKED(dp) == LK_SHARED)
 		vn_lock(dp, LK_UPGRADE|LK_RETRY);
-	if ((dp->v_iflag & VI_DOOMED) != 0) {
+	if (VN_IS_DOOMED(dp)) {
 		error = ENOENT;
 		goto bad;
 	}
@@ -931,7 +976,7 @@ unionlookup:
 			goto bad;
 		}
 		if ((cnp->cn_flags & LOCKPARENT) == 0)
-			VOP_UNLOCK(dp, 0);
+			VOP_UNLOCK(dp);
 		/*
 		 * We return with ni_vp NULL to indicate that the entry
 		 * doesn't currently exist, leaving a pointer to the
@@ -984,7 +1029,7 @@ good:
 	    ((cnp->cn_flags & FOLLOW) || (cnp->cn_flags & TRAILINGSLASH) ||
 	     *ndp->ni_next == '/')) {
 		cnp->cn_flags |= ISSYMLINK;
-		if (dp->v_iflag & VI_DOOMED) {
+		if (VN_IS_DOOMED(dp)) {
 			/*
 			 * We can't know whether the directory was mounted with
 			 * NOSYMFOLLOW, so we can't follow safely.
@@ -1000,7 +1045,7 @@ good:
 		 * Symlink code always expects an unlocked dvp.
 		 */
 		if (ndp->ni_dvp != ndp->ni_vp) {
-			VOP_UNLOCK(ndp->ni_dvp, 0);
+			VOP_UNLOCK(ndp->ni_dvp);
 			ni_dvp_unlocked = 1;
 		}
 		goto success;
@@ -1072,7 +1117,7 @@ nextname:
 		else
 			vrele(ndp->ni_dvp);
 	} else if ((cnp->cn_flags & LOCKPARENT) == 0 && ndp->ni_dvp != dp) {
-		VOP_UNLOCK(ndp->ni_dvp, 0);
+		VOP_UNLOCK(ndp->ni_dvp);
 		ni_dvp_unlocked = 1;
 	}
 
@@ -1082,16 +1127,16 @@ nextname:
 		AUDIT_ARG_VNODE2(dp);
 
 	if ((cnp->cn_flags & LOCKLEAF) == 0)
-		VOP_UNLOCK(dp, 0);
+		VOP_UNLOCK(dp);
 success:
 	/*
-	 * Because of lookup_shared we may have the vnode shared locked, but
+	 * Because of shared lookup we may have the vnode shared locked, but
 	 * the caller may want it to be exclusively locked.
 	 */
 	if (needs_exclusive_leaf(dp->v_mount, cnp->cn_flags) &&
 	    VOP_ISLOCKED(dp) != LK_EXCLUSIVE) {
 		vn_lock(dp, LK_UPGRADE | LK_RETRY);
-		if (dp->v_iflag & VI_DOOMED) {
+		if (VN_IS_DOOMED(dp)) {
 			error = ENOENT;
 			goto bad2;
 		}
@@ -1162,7 +1207,7 @@ relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 		KASSERT(dp->v_type == VDIR, ("dp is not a directory"));
 
 		if (!(cnp->cn_flags & LOCKLEAF))
-			VOP_UNLOCK(dp, 0);
+			VOP_UNLOCK(dp);
 		*vpp = dp;
 		/* XXX This should probably move to the top of function. */
 		if (cnp->cn_flags & SAVESTART)
@@ -1195,7 +1240,7 @@ relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 		if (cnp->cn_flags & SAVESTART)
 			VREF(dvp);
 		if ((cnp->cn_flags & LOCKPARENT) == 0)
-			VOP_UNLOCK(dp, 0);
+			VOP_UNLOCK(dp);
 		/*
 		 * We return with ni_vp NULL to indicate that the entry
 		 * doesn't currently exist, leaving a pointer to the
@@ -1223,7 +1268,7 @@ relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 	 */
 	if ((cnp->cn_flags & LOCKPARENT) == 0 && dvp != dp) {
 		if (wantparent)
-			VOP_UNLOCK(dvp, 0);
+			VOP_UNLOCK(dvp);
 		else
 			vput(dvp);
 	} else if (!wantparent)
@@ -1239,7 +1284,7 @@ relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 		VREF(dvp);
 	
 	if ((cnp->cn_flags & LOCKLEAF) == 0)
-		VOP_UNLOCK(dp, 0);
+		VOP_UNLOCK(dp);
 	return (0);
 bad:
 	vput(dp);
@@ -1259,12 +1304,13 @@ NDINIT_ALL(struct nameidata *ndp, u_long op, u_long flags, enum uio_seg segflg,
 	ndp->ni_dirp = namep;
 	ndp->ni_dirfd = dirfd;
 	ndp->ni_startdir = startdir;
+	ndp->ni_resflags = 0;
+	filecaps_init(&ndp->ni_filecaps);
+	ndp->ni_cnd.cn_thread = td;
 	if (rightsp != NULL)
 		ndp->ni_rightsneeded = *rightsp;
 	else
 		cap_rights_init(&ndp->ni_rightsneeded);
-	filecaps_init(&ndp->ni_filecaps);
-	ndp->ni_cnd.cn_thread = td;
 }
 
 /*
@@ -1287,6 +1333,10 @@ NDFREE(struct nameidata *ndp, const u_int flags)
 	if (!(flags & NDF_NO_VP_UNLOCK) &&
 	    (ndp->ni_cnd.cn_flags & LOCKLEAF) && ndp->ni_vp)
 		unlock_vp = 1;
+	if (!(flags & NDF_NO_DVP_UNLOCK) &&
+	    (ndp->ni_cnd.cn_flags & LOCKPARENT) &&
+	    ndp->ni_dvp != ndp->ni_vp)
+		unlock_dvp = 1;
 	if (!(flags & NDF_NO_VP_RELE) && ndp->ni_vp) {
 		if (unlock_vp) {
 			vput(ndp->ni_vp);
@@ -1296,11 +1346,7 @@ NDFREE(struct nameidata *ndp, const u_int flags)
 		ndp->ni_vp = NULL;
 	}
 	if (unlock_vp)
-		VOP_UNLOCK(ndp->ni_vp, 0);
-	if (!(flags & NDF_NO_DVP_UNLOCK) &&
-	    (ndp->ni_cnd.cn_flags & LOCKPARENT) &&
-	    ndp->ni_dvp != ndp->ni_vp)
-		unlock_dvp = 1;
+		VOP_UNLOCK(ndp->ni_vp);
 	if (!(flags & NDF_NO_DVP_RELE) &&
 	    (ndp->ni_cnd.cn_flags & (LOCKPARENT|WANTPARENT))) {
 		if (unlock_dvp) {
@@ -1311,7 +1357,7 @@ NDFREE(struct nameidata *ndp, const u_int flags)
 		ndp->ni_dvp = NULL;
 	}
 	if (unlock_dvp)
-		VOP_UNLOCK(ndp->ni_dvp, 0);
+		VOP_UNLOCK(ndp->ni_dvp);
 	if (!(flags & NDF_NO_STARTDIR_RELE) &&
 	    (ndp->ni_cnd.cn_flags & SAVESTART)) {
 		vrele(ndp->ni_startdir);
@@ -1390,13 +1436,13 @@ kern_alternate_path(struct thread *td, const char *prefix, const char *path,
 		for (cp = &ptr[len] - 1; *cp != '/'; cp--);
 		*cp = '\0';
 
-		NDINIT(&nd, LOOKUP, FOLLOW, UIO_SYSSPACE, buf, td);
+		NDINIT(&nd, LOOKUP, NOFOLLOW, UIO_SYSSPACE, buf, td);
 		error = namei(&nd);
 		*cp = '/';
 		if (error != 0)
 			goto keeporig;
 	} else {
-		NDINIT(&nd, LOOKUP, FOLLOW, UIO_SYSSPACE, buf, td);
+		NDINIT(&nd, LOOKUP, NOFOLLOW, UIO_SYSSPACE, buf, td);
 
 		error = namei(&nd);
 		if (error != 0)

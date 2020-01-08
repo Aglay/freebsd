@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -106,13 +108,11 @@ struct	direct {
  * The DIRSIZ macro gives the minimum record length which will hold
  * the directory entry.  This requires the amount of space in struct direct
  * without the d_name field, plus enough space for the name with a terminating
- * null byte (dp->d_namlen+1), rounded up to a 4 byte boundary.
- *
- * 
+ * null byte (dp->d_namlen + 1), rounded up to a 4 byte boundary.
  */
-#define	DIRECTSIZ(namlen)						\
-	((__offsetof(struct direct, d_name) +				\
-	  ((namlen)+1)*sizeof(((struct direct *)0)->d_name[0]) + 3) & ~3)
+#define	DIR_ROUNDUP	4	/* Directory name roundup size */
+#define	DIRECTSIZ(namlen) \
+    (roundup2(__offsetof(struct direct, d_name) + (namlen) + 1, DIR_ROUNDUP))
 #if (BYTE_ORDER == LITTLE_ENDIAN)
 #define	DIRSIZ(oldfmt, dp) \
     ((oldfmt) ? DIRECTSIZ((dp)->d_type) : DIRECTSIZ((dp)->d_namlen))

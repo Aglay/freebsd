@@ -12,7 +12,7 @@
  * LIMITATION, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
  * FOR A PARTICULAR PURPOSE.
  *
- * Original code by Hannes Gredler (hannes@juniper.net)
+ * Original code by Hannes Gredler (hannes@gredler.at)
  */
 
 /* \summary: Resource ReSerVation Protocol (RSVP) printer */
@@ -499,6 +499,7 @@ rsvp_intserv_print(netdissect_options *ndo,
 
     if (obj_tlen < 4)
         return 0;
+    ND_TCHECK_8BITS(tptr);
     parameter_id = *(tptr);
     ND_TCHECK2(*(tptr + 2), 2);
     parameter_length = EXTRACT_16BITS(tptr+2)<<2; /* convert wordcount to bytecount */
@@ -1205,6 +1206,17 @@ rsvp_obj_print(netdissect_options *ndo,
 		/* read variable length subobjects */
 		total_subobj_len = obj_tlen;
                 while(total_subobj_len > 0) {
+                    /* If RFC 3476 Section 3.1 defined that a sub-object of the
+                     * GENERALIZED_UNI RSVP object must have the Length field as
+                     * a multiple of 4, instead of the check below it would be
+                     * better to test total_subobj_len only once before the loop.
+                     * So long as it does not define it and this while loop does
+                     * not implement such a requirement, let's accept that within
+                     * each iteration subobj_len may happen to be a multiple of 1
+                     * and test it and total_subobj_len respectively.
+                     */
+                    if (total_subobj_len < 4)
+                        goto invalid;
                     subobj_len  = EXTRACT_16BITS(obj_tptr);
                     subobj_type = (EXTRACT_16BITS(obj_tptr+2))>>8;
                     af = (EXTRACT_16BITS(obj_tptr+2))&0x00FF;
@@ -1216,7 +1228,13 @@ rsvp_obj_print(netdissect_options *ndo,
                            tok2str(af_values, "Unknown", af), af,
                            subobj_len));
 
-                    if(subobj_len == 0)
+                    /* In addition to what is explained above, the same spec does not
+                     * explicitly say that the same Length field includes the 4-octet
+                     * sub-object header, but as long as this while loop implements it
+                     * as it does include, let's keep the check below consistent with
+                     * the rest of the code.
+                     */
+                    if(subobj_len < 4 || subobj_len > total_subobj_len)
                         goto invalid;
 
                     switch(subobj_type) {
@@ -1472,12 +1490,12 @@ rsvp_obj_print(netdissect_options *ndo,
         case RSVP_OBJ_FASTREROUTE:
             /* the differences between c-type 1 and 7 are minor */
             obj_ptr.rsvp_obj_frr = (const struct rsvp_obj_frr_t *)obj_tptr;
-            bw.i = EXTRACT_32BITS(obj_ptr.rsvp_obj_frr->bandwidth);
 
             switch(rsvp_obj_ctype) {
             case RSVP_CTYPE_1: /* new style */
                 if (obj_tlen < sizeof(struct rsvp_obj_frr_t))
                     return-1;
+                bw.i = EXTRACT_32BITS(obj_ptr.rsvp_obj_frr->bandwidth);
                 ND_PRINT((ndo, "%s  Setup Priority: %u, Holding Priority: %u, Hop-limit: %u, Bandwidth: %.10g Mbps",
                        ident,
                        (int)obj_ptr.rsvp_obj_frr->setup_prio,
@@ -1496,6 +1514,7 @@ rsvp_obj_print(netdissect_options *ndo,
             case RSVP_CTYPE_TUNNEL_IPV4: /* old style */
                 if (obj_tlen < 16)
                     return-1;
+                bw.i = EXTRACT_32BITS(obj_ptr.rsvp_obj_frr->bandwidth);
                 ND_PRINT((ndo, "%s  Setup Priority: %u, Holding Priority: %u, Hop-limit: %u, Bandwidth: %.10g Mbps",
                        ident,
                        (int)obj_ptr.rsvp_obj_frr->setup_prio,
@@ -1536,6 +1555,7 @@ rsvp_obj_print(netdissect_options *ndo,
         case RSVP_OBJ_CLASSTYPE_OLD: /* fall through */
             switch(rsvp_obj_ctype) {
             case RSVP_CTYPE_1:
+                ND_TCHECK_32BITS(obj_tptr);
                 ND_PRINT((ndo, "%s  CT: %u",
                        ident,
                        EXTRACT_32BITS(obj_tptr) & 0x7));

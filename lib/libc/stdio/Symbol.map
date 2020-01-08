@@ -167,6 +167,14 @@ FBSD_1.4 {
 	fopencookie;
 };
 
+FBSD_1.5 {
+	gets_s;
+};
+
+FBSD_1.6 {
+	mkostempsat;
+};
+
 FBSDprivate_1.0 {
 	_flockfile;
 	_flockfile_debug_stub;

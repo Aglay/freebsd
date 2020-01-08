@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2002 Poul-Henning Kamp
  * Copyright (c) 2002 Networks Associates Technology, Inc.
  * All rights reserved.
@@ -51,7 +53,9 @@ __FBSDID("$FreeBSD$");
 #include <sys/mutex.h>
 #include <sys/errno.h>
 #include <sys/sbuf.h>
+#include <sys/sdt.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/geom_int.h>
 #include <machine/stdarg.h>
 
@@ -62,6 +66,8 @@ __FBSDID("$FreeBSD$");
 #ifdef KDB
 #include <sys/kdb.h>
 #endif
+
+SDT_PROVIDER_DEFINE(geom);
 
 struct class_list_head g_classes = LIST_HEAD_INITIALIZER(g_classes);
 static struct g_tailq_head geoms = TAILQ_HEAD_INITIALIZER(geoms);
@@ -74,6 +80,44 @@ struct g_hh00 {
 	int			error;
 	int			post;
 };
+
+void
+g_dbg_printf(const char *classname, int lvl, struct bio *bp,
+    const char *format,
+    ...)
+{
+#ifndef PRINTF_BUFR_SIZE
+#define PRINTF_BUFR_SIZE 64
+#endif
+	char bufr[PRINTF_BUFR_SIZE];
+	struct sbuf sb, *sbp __unused;
+	va_list ap;
+
+	sbp = sbuf_new(&sb, bufr, sizeof(bufr), SBUF_FIXEDLEN);
+	KASSERT(sbp != NULL, ("sbuf_new misused?"));
+
+	sbuf_set_drain(&sb, sbuf_printf_drain, NULL);
+
+	sbuf_cat(&sb, classname);
+	if (lvl >= 0)
+		sbuf_printf(&sb, "[%d]", lvl);
+	
+	va_start(ap, format);
+	sbuf_vprintf(&sb, format, ap);
+	va_end(ap);
+
+	if (bp != NULL) {
+		sbuf_putc(&sb, ' ');
+		g_format_bio(&sb, bp);
+	}
+
+	/* Terminate the debug line with a single '\n'. */
+	sbuf_nl_terminate(&sb);
+
+	/* Flush line to printf. */
+	sbuf_finish(&sb);
+	sbuf_delete(&sb);
+}
 
 /*
  * This event offers a new class a chance to taste all preexisting providers.
@@ -347,6 +391,7 @@ g_new_geomf(struct g_class *mp, const char *fmt, ...)
 	gp->rank = 1;
 	LIST_INIT(&gp->consumer);
 	LIST_INIT(&gp->provider);
+	LIST_INIT(&gp->aliases);
 	LIST_INSERT_HEAD(&mp->geom, gp, geom);
 	TAILQ_INSERT_HEAD(&geoms, gp, geoms);
 	strcpy(gp->name, sbuf_data(sb));
@@ -367,6 +412,7 @@ g_new_geomf(struct g_class *mp, const char *fmt, ...)
 void
 g_destroy_geom(struct g_geom *gp)
 {
+	struct g_geom_alias *gap, *gaptmp;
 
 	g_topology_assert();
 	G_VALID_GEOM(gp);
@@ -380,6 +426,8 @@ g_destroy_geom(struct g_geom *gp)
 	g_cancel_event(gp);
 	LIST_REMOVE(gp, geom);
 	TAILQ_REMOVE(&geoms, gp, geoms);
+	LIST_FOREACH_SAFE(gap, &gp->aliases, ga_next, gaptmp)
+		g_free(gap);
 	g_free(gp->name);
 	g_free(gp);
 }
@@ -627,6 +675,14 @@ g_resize_provider_event(void *arg, int flag)
 	LIST_FOREACH_SAFE(cp, &pp->consumers, consumers, cp2) {
 		gp = cp->geom;
 		if (gp->resize == NULL && size < pp->mediasize) {
+			/*
+			 * XXX: g_dev_orphan method does deferred destroying
+			 * and it is possible, that other event could already
+			 * call the orphan method. Check consumer's flags to
+			 * do not schedule it twice.
+			 */
+			if (cp->flags & G_CF_ORPHAN)
+				continue;
 			cp->flags |= G_CF_ORPHAN;
 			cp->geom->orphan(cp);
 		}
@@ -816,6 +872,7 @@ g_attach(struct g_consumer *cp, struct g_provider *pp)
 	g_trace(G_T_TOPOLOGY, "g_attach(%p, %p)", cp, pp);
 	KASSERT(cp->provider == NULL, ("attach but attached"));
 	cp->provider = pp;
+	cp->flags &= ~G_CF_ORPHAN;
 	LIST_INSERT_HEAD(&pp->consumers, cp, consumers);
 	error = redo_rank(cp->geom);
 	if (error) {
@@ -861,7 +918,11 @@ int
 g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 {
 	struct g_provider *pp;
-	int pr,pw,pe;
+	struct g_geom *gp;
+	int pw, pe;
+#ifdef INVARIANTS
+	int sr, sw, se;
+#endif
 	int error;
 
 	g_topology_assert();
@@ -869,6 +930,7 @@ g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 	pp = cp->provider;
 	KASSERT(pp != NULL, ("access but not attached"));
 	G_VALID_PROVIDER(pp);
+	gp = pp->geom;
 
 	g_trace(G_T_ACCESS, "g_access(%p(%s), %d, %d, %d)",
 	    cp, pp->name, dcr, dcw, dce);
@@ -877,7 +939,10 @@ g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 	KASSERT(cp->acw + dcw >= 0, ("access resulting in negative acw"));
 	KASSERT(cp->ace + dce >= 0, ("access resulting in negative ace"));
 	KASSERT(dcr != 0 || dcw != 0 || dce != 0, ("NOP access request"));
-	KASSERT(pp->geom->access != NULL, ("NULL geom->access"));
+	KASSERT(cp->acr + dcr != 0 || cp->acw + dcw != 0 ||
+	    cp->ace + dce != 0 || cp->nstart == cp->nend,
+	    ("Last close with active requests"));
+	KASSERT(gp->access != NULL, ("NULL geom->access"));
 
 	/*
 	 * If our class cares about being spoiled, and we have been, we
@@ -889,10 +954,30 @@ g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 		return (ENXIO);
 
 	/*
+	 * A number of GEOM classes either need to perform an I/O on the first
+	 * open or to acquire a different subsystem's lock.  To do that they
+	 * may have to drop the topology lock.
+	 * Other GEOM classes perform special actions when opening a lower rank
+	 * geom for the first time.  As a result, more than one thread may
+	 * end up performing the special actions.
+	 * So, we prevent concurrent "first" opens by marking the consumer with
+	 * special flag.
+	 *
+	 * Note that if the geom's access method never drops the topology lock,
+	 * then we will never see G_GEOM_IN_ACCESS here.
+	 */
+	while ((gp->flags & G_GEOM_IN_ACCESS) != 0) {
+		g_trace(G_T_ACCESS,
+		    "%s: race on geom %s via provider %s and consumer of %s",
+		    __func__, gp->name, pp->name, cp->geom->name);
+		gp->flags |= G_GEOM_ACCESS_WAIT;
+		g_topology_sleep(gp, 0);
+	}
+
+	/*
 	 * Figure out what counts the provider would have had, if this
 	 * consumer had (r0w0e0) at this time.
 	 */
-	pr = pp->acr - cp->acr;
 	pw = pp->acw - cp->acw;
 	pe = pp->ace - cp->ace;
 
@@ -904,7 +989,7 @@ g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 	    pp, pp->name);
 
 	/* If foot-shooting is enabled, any open on rank#1 is OK */
-	if ((g_debugflags & 16) && pp->geom->rank == 1)
+	if ((g_debugflags & G_F_FOOTSHOOTING) && gp->rank == 1)
 		;
 	/* If we try exclusive but already write: fail */
 	else if (dce > 0 && pw > 0)
@@ -914,18 +999,34 @@ g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 		return (EPERM);
 	/* If we try to open more but provider is error'ed: fail */
 	else if ((dcr > 0 || dcw > 0 || dce > 0) && pp->error != 0) {
-		printf("%s(%d): provider %s has error\n",
-		       __func__, __LINE__, pp->name);
+		printf("%s(%d): provider %s has error %d set\n",
+		    __func__, __LINE__, pp->name, pp->error);
 		return (pp->error);
 	}
 
 	/* Ok then... */
 
-	error = pp->geom->access(pp, dcr, dcw, dce);
+#ifdef INVARIANTS
+	sr = cp->acr;
+	sw = cp->acw;
+	se = cp->ace;
+#endif
+	gp->flags |= G_GEOM_IN_ACCESS;
+	error = gp->access(pp, dcr, dcw, dce);
 	KASSERT(dcr > 0 || dcw > 0 || dce > 0 || error == 0,
 	    ("Geom provider %s::%s dcr=%d dcw=%d dce=%d error=%d failed "
-	    "closing ->access()", pp->geom->class->name, pp->name, dcr, dcw,
+	    "closing ->access()", gp->class->name, pp->name, dcr, dcw,
 	    dce, error));
+
+	g_topology_assert();
+	gp->flags &= ~G_GEOM_IN_ACCESS;
+	KASSERT(cp->acr == sr && cp->acw == sw && cp->ace == se,
+	    ("Access counts changed during geom->access"));
+	if ((gp->flags & G_GEOM_ACCESS_WAIT) != 0) {
+		gp->flags &= ~G_GEOM_ACCESS_WAIT;
+		wakeup(gp);
+	}
+
 	if (!error) {
 		/*
 		 * If we open first write, spoil any partner consumers.
@@ -935,7 +1036,7 @@ g_access(struct g_consumer *cp, int dcr, int dcw, int dce)
 		if (pp->acw == 0 && dcw != 0)
 			g_spoil(pp, cp);
 		else if (pp->acw != 0 && pp->acw == -dcw && pp->error == 0 &&
-		    !(pp->geom->flags & G_GEOM_WITHER))
+		    !(gp->flags & G_GEOM_WITHER))
 			g_post_event(g_new_provider_event, pp, M_WAITOK, 
 			    pp, NULL);
 
@@ -994,16 +1095,16 @@ g_handleattr(struct bio *bp, const char *attribute, const void *val, int len)
 		bzero(bp->bio_data, bp->bio_length);
 		if (strlcpy(bp->bio_data, val, bp->bio_length) >=
 		    bp->bio_length) {
-			printf("%s: %s bio_length %jd len %zu -> EFAULT\n",
-			    __func__, bp->bio_to->name,
+			printf("%s: %s %s bio_length %jd strlen %zu -> EFAULT\n",
+			    __func__, bp->bio_to->name, attribute,
 			    (intmax_t)bp->bio_length, strlen(val));
 			error = EFAULT;
 		}
 	} else if (bp->bio_length == len) {
 		bcopy(val, bp->bio_data, len);
 	} else {
-		printf("%s: %s bio_length %jd len %d -> EFAULT\n", __func__,
-		    bp->bio_to->name, (intmax_t)bp->bio_length, len);
+		printf("%s: %s %s bio_length %jd len %d -> EFAULT\n", __func__,
+		    bp->bio_to->name, attribute, (intmax_t)bp->bio_length, len);
 		error = EFAULT;
 	}
 	if (error == 0)
@@ -1212,6 +1313,18 @@ g_compare_names(const char *namea, const char *nameb)
 	return (0);
 }
 
+void
+g_geom_add_alias(struct g_geom *gp, const char *alias)
+{
+	struct g_geom_alias *gap;
+
+	gap = (struct g_geom_alias *)g_malloc(
+		sizeof(struct g_geom_alias) + strlen(alias) + 1, M_WAITOK);
+	strcpy((char *)(gap + 1), alias);
+	gap->ga_alias = (const char *)(gap + 1);
+	LIST_INSERT_HEAD(&gp->aliases, gap, ga_next);
+}
+
 #if defined(DIAGNOSTIC) || defined(DDB)
 /*
  * This function walks the mesh and returns a non-zero integer if it
@@ -1316,8 +1429,10 @@ db_show_geom_consumer(int indent, struct g_consumer *cp)
 		}
 		gprintln("  access:   r%dw%de%d", cp->acr, cp->acw, cp->ace);
 		gprintln("  flags:    0x%04x", cp->flags);
+#ifdef INVARIANTS
 		gprintln("  nstart:   %u", cp->nstart);
 		gprintln("  nend:     %u", cp->nend);
+#endif
 	} else {
 		gprintf("consumer: %p (%s), access=r%dw%de%d", cp,
 		    cp->provider != NULL ? cp->provider->name : "none",
@@ -1341,16 +1456,14 @@ db_show_geom_provider(int indent, struct g_provider *pp)
 		gprintln("  geom:         %s (%p)", pp->geom->name, pp->geom);
 		gprintln("  mediasize:    %jd", (intmax_t)pp->mediasize);
 		gprintln("  sectorsize:   %u", pp->sectorsize);
-		gprintln("  stripesize:   %u", pp->stripesize);
-		gprintln("  stripeoffset: %u", pp->stripeoffset);
+		gprintln("  stripesize:   %ju", (uintmax_t)pp->stripesize);
+		gprintln("  stripeoffset: %ju", (uintmax_t)pp->stripeoffset);
 		gprintln("  access:       r%dw%de%d", pp->acr, pp->acw,
 		    pp->ace);
 		gprintln("  flags:        %s (0x%04x)",
 		    provider_flags_to_string(pp, flags, sizeof(flags)),
 		    pp->flags);
 		gprintln("  error:        %d", pp->error);
-		gprintln("  nstart:       %u", pp->nstart);
-		gprintln("  nend:         %u", pp->nend);
 		if (LIST_EMPTY(&pp->consumers))
 			gprintln("  consumers:    none");
 	} else {

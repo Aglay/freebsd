@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000-2001 Boris Popov
  * All rights reserved.
  *
@@ -112,6 +114,7 @@ struct vop_vector smbfs_vnodeops = {
 	.vop_symlink =		smbfs_symlink,
 	.vop_write =		smbfs_write,
 };
+VFS_VOP_VECTOR_REGISTER(smbfs_vnodeops);
 
 static int
 smbfs_access(ap)
@@ -893,18 +896,25 @@ smbfs_pathconf (ap)
 {
 	struct smbmount *smp = VFSTOSMBFS(VTOVFS(ap->a_vp));
 	struct smb_vc *vcp = SSTOVC(smp->sm_share);
-	register_t *retval = ap->a_retval;
+	long *retval = ap->a_retval;
 	int error = 0;
 	
 	switch (ap->a_name) {
-	    case _PC_LINK_MAX:
-		*retval = 0;
+	    case _PC_FILESIZEBITS:
+		if (vcp->vc_sopt.sv_caps & (SMB_CAP_LARGE_READX |
+		    SMB_CAP_LARGE_WRITEX))
+		    *retval = 64;
+		else
+		    *retval = 32;
 		break;
 	    case _PC_NAME_MAX:
 		*retval = (vcp->vc_hflags2 & SMB_FLAGS2_KNOWS_LONG_NAMES) ? 255 : 12;
 		break;
 	    case _PC_PATH_MAX:
 		*retval = 800;	/* XXX: a correct one ? */
+		break;
+	    case _PC_NO_TRUNC:
+		*retval = 1;
 		break;
 	    default:
 		error = vop_stdpathconf(ap);
@@ -1111,8 +1121,8 @@ smbfs_advlock(ap)
 static int
 smbfs_pathcheck(struct smbmount *smp, const char *name, int nmlen, int nameiop)
 {
-	static const char *badchars = "*/:<>;?";
-	static const char *badchars83 = " +|,[]=";
+	static const char *badchars = "*/:<>?";
+	static const char *badchars83 = " +|,[]=;";
 	const char *cp;
 	int i, error;
 
@@ -1328,7 +1338,7 @@ smbfs_lookup(ap)
 		error = vfs_busy(mp, MBF_NOWAIT);
 		if (error != 0) {
 			vfs_ref(mp);
-			VOP_UNLOCK(dvp, 0);
+			VOP_UNLOCK(dvp);
 			error = vfs_busy(mp, 0);
 			vn_lock(dvp, LK_EXCLUSIVE | LK_RETRY);
 			vfs_rel(mp);
@@ -1336,17 +1346,17 @@ smbfs_lookup(ap)
 				error = ENOENT;
 				goto out;
 			}
-			if ((dvp->v_iflag & VI_DOOMED) != 0) {
+			if (VN_IS_DOOMED(dvp)) {
 				vfs_unbusy(mp);
 				error = ENOENT;
 				goto out;
 			}
 		}	
-		VOP_UNLOCK(dvp, 0);
+		VOP_UNLOCK(dvp);
 		error = smbfs_nget(mp, dvp, name, nmlen, NULL, &vp);
 		vfs_unbusy(mp);
 		vn_lock(dvp, LK_EXCLUSIVE | LK_RETRY);
-		if ((dvp->v_iflag & VI_DOOMED) != 0) {
+		if (VN_IS_DOOMED(dvp)) {
 			if (error == 0)
 				vput(vp);
 			error = ENOENT;

@@ -21,7 +21,6 @@ SUBDIR=	adduser \
 	dconschat \
 	devctl \
 	devinfo \
-	digictl \
 	diskinfo \
 	dumpcis \
 	etcupdate \
@@ -60,12 +59,15 @@ SUBDIR=	adduser \
 	nologin \
 	pciconf \
 	periodic \
+	pnfsdscopymr \
+	pnfsdsfile \
+	pnfsdskill \
 	powerd \
-	procctl \
 	prometheus_sysctl_exporter \
 	pstat \
 	pw \
 	pwd_mkdb \
+	pwm \
 	quot \
 	rarpd \
 	rmt \
@@ -74,6 +76,7 @@ SUBDIR=	adduser \
 	rpc.statd \
 	rpc.umntall \
 	rtprio \
+	rwhod \
 	service \
 	services_mkdb \
 	sesutil \
@@ -82,16 +85,18 @@ SUBDIR=	adduser \
 	setpmac \
 	smbmsg \
 	snapinfo \
+	spi \
 	spray \
 	syslogd \
 	sysrc \
 	tcpdrop \
 	tcpdump \
 	traceroute \
+	trim \
 	trpt \
 	tzsetup \
-	uefisign \
 	ugidfw \
+	valectl \
 	vigr \
 	vipw \
 	wake \
@@ -114,18 +119,21 @@ SUBDIR.${MK_AUDIT}+=	auditreduce
 SUBDIR.${MK_AUDIT}+=	praudit
 SUBDIR.${MK_AUTHPF}+=	authpf
 SUBDIR.${MK_AUTOFS}+=	autofs
-.if ${MK_BLACKLIST} != "no"
 SUBDIR.${MK_BLACKLIST}+=	blacklistctl
 SUBDIR.${MK_BLACKLIST}+=	blacklistd
-.endif
 SUBDIR.${MK_BLUETOOTH}+=	bluetooth
 SUBDIR.${MK_BOOTPARAMD}+=	bootparamd
 SUBDIR.${MK_BSDINSTALL}+=	bsdinstall
 SUBDIR.${MK_BSNMP}+=	bsnmpd
-SUBDIR.${MK_CTM}+=	ctm
+.if ${MK_CAROOT} != "no"
+SUBDIR.${MK_OPENSSL}+=	certctl
+.endif
 SUBDIR.${MK_CXGBETOOL}+=	cxgbetool
 SUBDIR.${MK_DIALOG}+=	bsdconfig
-SUBDIR.${MK_EFI}+=	efivar efidp
+SUBDIR.${MK_EFI}+=	efivar efidp efibootmgr
+.if ${MK_OPENSSL} != "no"
+SUBDIR.${MK_EFI}+=	uefisign
+.endif
 SUBDIR.${MK_FLOPPY}+=	fdcontrol
 SUBDIR.${MK_FLOPPY}+=	fdformat
 SUBDIR.${MK_FLOPPY}+=	fdread
@@ -134,6 +142,7 @@ SUBDIR.${MK_FMTREE}+=	fmtree
 SUBDIR.${MK_FREEBSD_UPDATE}+=	freebsd-update
 SUBDIR.${MK_GSSAPI}+=	gssd
 SUBDIR.${MK_GPIO}+=	gpioctl
+SUBDIR.${MK_HTTPD}+=	simple_httpd
 SUBDIR.${MK_INET6}+=	ip6addrctl
 SUBDIR.${MK_INET6}+=	mld6query
 SUBDIR.${MK_INET6}+=	ndp
@@ -161,10 +170,8 @@ SUBDIR.${MK_NS_CACHING}+=	nscd
 .endif
 SUBDIR.${MK_LPR}+=	lpr
 SUBDIR.${MK_MAN_UTILS}+=	manctl
-SUBDIR.${MK_NAND}+=	nandsim
-SUBDIR.${MK_NAND}+=	nandtool
+SUBDIR.${MK_MLX5TOOL}+=	mlx5tool
 SUBDIR.${MK_NETGRAPH}+=	flowctl
-SUBDIR.${MK_NETGRAPH}+=	lmcconfig
 SUBDIR.${MK_NETGRAPH}+=	ngctl
 SUBDIR.${MK_NETGRAPH}+=	nghook
 SUBDIR.${MK_NIS}+=	rpc.yppasswdd
@@ -179,19 +186,17 @@ SUBDIR.${MK_NIS}+=	ypserv
 SUBDIR.${MK_NIS}+=	ypset
 SUBDIR.${MK_NTP}+=	ntp
 SUBDIR.${MK_OPENSSL}+=	keyserv
-SUBDIR.${MK_PC_SYSINSTALL}+=	pc-sysinstall
 SUBDIR.${MK_PF}+=	ftp-proxy
 SUBDIR.${MK_PKGBOOTSTRAP}+=	pkg
-SUBDIR.${MK_PMC}+=	pmcannotate
-SUBDIR.${MK_PMC}+=	pmccontrol
-SUBDIR.${MK_PMC}+=	pmcstat
-SUBDIR.${MK_PMC}+=	pmcstudy
+.if ${COMPILER_FEATURES:Mc++11}
+SUBDIR.${MK_PMC}+=	pmc
+.endif
+SUBDIR.${MK_PMC}+=	pmcannotate pmccontrol pmcstat pmcstudy
 SUBDIR.${MK_PORTSNAP}+=	portsnap
 SUBDIR.${MK_PPP}+=	ppp
 SUBDIR.${MK_QUOTAS}+=	edquota
 SUBDIR.${MK_QUOTAS}+=	quotaon
 SUBDIR.${MK_QUOTAS}+=	repquota
-SUBDIR.${MK_RCMDS}+=	rwhod
 SUBDIR.${MK_SENDMAIL}+=	editmap
 SUBDIR.${MK_SENDMAIL}+=	mailstats
 SUBDIR.${MK_SENDMAIL}+=	makemap
@@ -199,7 +204,6 @@ SUBDIR.${MK_SENDMAIL}+=	praliases
 SUBDIR.${MK_SENDMAIL}+=	sendmail
 SUBDIR.${MK_TCP_WRAPPERS}+=	tcpdchk
 SUBDIR.${MK_TCP_WRAPPERS}+=	tcpdmatch
-SUBDIR.${MK_TIMED}+=	timed
 SUBDIR.${MK_TOOLCHAIN}+=	config
 SUBDIR.${MK_TOOLCHAIN}+=	crunch
 SUBDIR.${MK_UNBOUND}+=	unbound

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1995-1998 Søren Schmidt
  * All rights reserved.
  *
@@ -167,11 +169,14 @@ typedef struct sc_vtb {
 	int		vtb_tail;	/* valid for VTB_RINGBUFFER only */
 } sc_vtb_t;
 
-/* text cursor attributes */
+/* text and some mouse cursor attributes */
 struct cursor_attr {
-	int		flags;
-	int		base;
-	int		height;
+	u_char		flags;
+	u_char		base;
+	u_char		height;
+	u_char		bg[3];
+	u_char		mouse_ba;
+	u_char		mouse_ia;
 };
 
 /* softc */
@@ -212,8 +217,7 @@ typedef struct sc_softc {
 #define	SC_INIT_DONE	(1 << 16)
 #define	SC_SPLASH_SCRN	(1 << 17)
 
-	int		keyboard;		/* -1 if unavailable */
-	struct keyboard	*kbd;
+	struct keyboard	*kbd;			/* NULL if unavailable. */
 
 	int		adapter;
 	struct video_adapter *adp;
@@ -313,7 +317,7 @@ typedef struct scr_stat {
 	int		cursor_pos;		/* cursor buffer position */
 	int		cursor_oldpos;		/* cursor old buffer position */
 	struct cursor_attr dflt_curs_attr;
-	struct cursor_attr curr_curs_attr;
+	struct cursor_attr base_curs_attr;
 	struct cursor_attr curs_attr;
 
 	int		mouse_pos;		/* mouse buffer position */
@@ -373,7 +377,7 @@ typedef struct sc_ttysoftc {
 /* terminal emulator */
 
 #ifndef SC_DFLT_TERM
-#define SC_DFLT_TERM	"*"			/* any */
+#define SC_DFLT_TERM	"scteken"
 #endif
 
 typedef int	sc_term_init_t(scr_stat *scp, void **tcp, int code);
@@ -516,8 +520,6 @@ typedef struct sc_renderer {
 		       SI_SUB_DRIVERS, SI_ORDER_MIDDLE)
 
 typedef struct {
-	int		cursor_start;
-	int		cursor_end;
 	int		shift_state;
 	int		bell_pitch;
 } bios_values_t;

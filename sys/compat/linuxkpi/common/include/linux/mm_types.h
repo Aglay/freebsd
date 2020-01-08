@@ -35,6 +35,8 @@
 
 #include <asm/atomic.h>
 
+typedef int vm_fault_t;
+
 struct vm_area_struct;
 struct task_struct;
 
@@ -60,6 +62,12 @@ mmput(struct mm_struct *mm)
 {
 	if (__predict_false(atomic_dec_and_test(&mm->mm_users)))
 		mmdrop(mm);
+}
+
+static inline void
+mmgrab(struct mm_struct *mm)
+{
+	atomic_inc(&mm->mm_count);
 }
 
 extern struct mm_struct *linux_get_task_mm(struct task_struct *);

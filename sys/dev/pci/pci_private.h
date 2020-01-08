@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1997, Stefan Esser <se@freebsd.org>
  * Copyright (c) 2000, Michael Smith <msmith@freebsd.org>
  * Copyright (c) 2000, BSDi
@@ -56,7 +58,9 @@ void		pci_add_resources(device_t bus, device_t dev, int force,
 		    uint32_t prefetchmask);
 void		pci_add_resources_ea(device_t bus, device_t dev, int alloc_iov);
 struct pci_devinfo *pci_alloc_devinfo_method(device_t dev);
+int		pci_attach(device_t dev);
 int		pci_attach_common(device_t dev);
+int		pci_detach(device_t dev);
 int		pci_rescan_method(device_t dev);
 void		pci_driver_added(device_t dev, driver_t *driver);
 int		pci_ea_is_enabled(device_t dev, int rid);
@@ -88,10 +92,16 @@ int		pci_enable_io_method(device_t dev, device_t child, int space);
 int		pci_disable_io_method(device_t dev, device_t child, int space);
 int		pci_find_cap_method(device_t dev, device_t child,
 		    int capability, int *capreg);
+int		pci_find_next_cap_method(device_t dev, device_t child,
+		    int capability, int start, int *capreg);
 int		pci_find_extcap_method(device_t dev, device_t child,
 		    int capability, int *capreg);
+int		pci_find_next_extcap_method(device_t dev, device_t child,
+		    int capability, int start, int *capreg);
 int		pci_find_htcap_method(device_t dev, device_t child,
 		    int capability, int *capreg);
+int		pci_find_next_htcap_method(device_t dev, device_t child,
+		    int capability, int start, int *capreg);
 int		pci_alloc_msi_method(device_t dev, device_t child, int *count);
 int		pci_alloc_msix_method(device_t dev, device_t child, int *count);
 void		pci_enable_msi_method(device_t dev, device_t child,

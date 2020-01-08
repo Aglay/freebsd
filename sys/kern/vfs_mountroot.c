@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2010 Marcel Moolenaar
  * Copyright (c) 1999-2004 Poul-Henning Kamp
  * Copyright (c) 1999 Michael Smith
@@ -43,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/conf.h>
 #include <sys/cons.h>
+#include <sys/eventhandler.h>
 #include <sys/fcntl.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
@@ -108,19 +111,20 @@ char *rootdevnames[2] = {NULL, NULL};
 struct mtx root_holds_mtx;
 MTX_SYSINIT(root_holds, &root_holds_mtx, "root_holds", MTX_DEF);
 
-struct root_hold_token {
-	const char			*who;
-	LIST_ENTRY(root_hold_token)	list;
-};
-
-static LIST_HEAD(, root_hold_token)	root_holds =
-    LIST_HEAD_INITIALIZER(root_holds);
+static TAILQ_HEAD(, root_hold_token)	root_holds =
+    TAILQ_HEAD_INITIALIZER(root_holds);
 
 enum action {
 	A_CONTINUE,
 	A_PANIC,
 	A_REBOOT,
 	A_RETRY
+};
+
+enum rh_flags {
+	RH_FREE,
+	RH_ALLOC,
+	RH_ARG,
 };
 
 static enum action root_mount_onfail = A_CONTINUE;
@@ -152,8 +156,8 @@ sysctl_vfs_root_mount_hold(SYSCTL_HANDLER_ARGS)
 	sbuf_new(&sb, NULL, 256, SBUF_AUTOEXTEND | SBUF_INCLUDENUL);
 
 	mtx_lock(&root_holds_mtx);
-	LIST_FOREACH(h, &root_holds, list) {
-		if (h != LIST_FIRST(&root_holds))
+	TAILQ_FOREACH(h, &root_holds, list) {
+		if (h != TAILQ_FIRST(&root_holds))
 			sbuf_putc(&sb, ' ');
 		sbuf_printf(&sb, "%s", h->who);
 	}
@@ -172,24 +176,54 @@ root_mount_hold(const char *identifier)
 	struct root_hold_token *h;
 
 	h = malloc(sizeof *h, M_DEVBUF, M_ZERO | M_WAITOK);
+	h->flags = RH_ALLOC;
 	h->who = identifier;
 	mtx_lock(&root_holds_mtx);
-	LIST_INSERT_HEAD(&root_holds, h, list);
+	TSHOLD("root mount");
+	TAILQ_INSERT_TAIL(&root_holds, h, list);
 	mtx_unlock(&root_holds_mtx);
 	return (h);
+}
+
+void
+root_mount_hold_token(const char *identifier, struct root_hold_token *h)
+{
+#ifdef INVARIANTS
+	struct root_hold_token *t;
+#endif
+
+	h->flags = RH_ARG;
+	h->who = identifier;
+	mtx_lock(&root_holds_mtx);
+#ifdef INVARIANTS
+	TAILQ_FOREACH(t, &root_holds, list) {
+		if (t == h) {
+			panic("Duplicate mount hold by '%s' on %p",
+			    identifier, h);
+		}
+	}
+#endif
+	TSHOLD("root mount");
+	TAILQ_INSERT_TAIL(&root_holds, h, list);
+	mtx_unlock(&root_holds_mtx);
 }
 
 void
 root_mount_rel(struct root_hold_token *h)
 {
 
-	KASSERT(h != NULL, ("%s: NULL token", __func__));
+	if (h == NULL || h->flags == RH_FREE)
+		return;
 
 	mtx_lock(&root_holds_mtx);
-	LIST_REMOVE(h, list);
+	TAILQ_REMOVE(&root_holds, h, list);
+	TSRELEASE("root mount");
 	wakeup(&root_holds);
 	mtx_unlock(&root_holds_mtx);
-	free(h, M_DEVBUF);
+	if (h->flags == RH_ALLOC) {
+		free(h, M_DEVBUF);
+	} else
+		h->flags = RH_FREE;
 }
 
 int
@@ -206,9 +240,9 @@ set_rootvnode(void)
 	struct proc *p;
 
 	if (VFS_ROOT(TAILQ_FIRST(&mountlist), LK_EXCLUSIVE, &rootvnode))
-		panic("Cannot find root vnode");
+		panic("set_rootvnode: Cannot find root vnode");
 
-	VOP_UNLOCK(rootvnode, 0);
+	VOP_UNLOCK(rootvnode);
 
 	p = curthread->td_proc;
 	FILEDESC_XLOCK(p->p_fd);
@@ -257,6 +291,11 @@ vfs_mountroot_devfs(struct thread *td, struct mount **mpp)
 		if (error)
 			return (error);
 
+		error = VFS_STATFS(mp, &mp->mnt_stat);
+		KASSERT(error == 0, ("VFS_STATFS(devfs) failed %d", error));
+		if (error)
+			return (error);
+
 		opts = malloc(sizeof(struct vfsoptlist), M_MOUNT, M_WAITOK);
 		TAILQ_INIT(opts);
 		mp->mnt_opt = opts;
@@ -267,6 +306,7 @@ vfs_mountroot_devfs(struct thread *td, struct mount **mpp)
 
 		*mpp = mp;
 		rootdevmp = mp;
+		vfs_op_exit(mp);
 	}
 
 	set_rootvnode();
@@ -304,7 +344,8 @@ vfs_mountroot_shuffle(struct thread *td, struct mount *mpdevfs)
 	if (mporoot != mpdevfs)
 		cache_purgevfs(mpdevfs, true);
 
-	VFS_ROOT(mporoot, LK_EXCLUSIVE, &vporoot);
+	if (VFS_ROOT(mporoot, LK_EXCLUSIVE, &vporoot))
+		panic("vfs_mountroot_shuffle: Cannot find root vnode");
 
 	VI_LOCK(vporoot);
 	vporoot->v_iflag &= ~VI_MOUNT;
@@ -343,7 +384,7 @@ vfs_mountroot_shuffle(struct thread *td, struct mount *mpdevfs)
 				vp->v_mountedhere = mporoot;
 				strlcpy(mporoot->mnt_stat.f_mntonname,
 				    fspath, MNAMELEN);
-				VOP_UNLOCK(vp, 0);
+				VOP_UNLOCK(vp);
 			} else
 				vput(vp);
 		}
@@ -371,7 +412,7 @@ vfs_mountroot_shuffle(struct thread *td, struct mount *mpdevfs)
 			}
 			mpdevfs->mnt_vnodecovered = vp;
 			vp->v_mountedhere = mpdevfs;
-			VOP_UNLOCK(vp, 0);
+			VOP_UNLOCK(vp);
 		} else
 			vput(vp);
 	}
@@ -383,8 +424,8 @@ vfs_mountroot_shuffle(struct thread *td, struct mount *mpdevfs)
 	if (mporoot == mpdevfs) {
 		vfs_unbusy(mpdevfs);
 		/* Unlink the no longer needed /dev/dev -> / symlink */
-		error = kern_unlinkat(td, AT_FDCWD, "/dev/dev",
-		    UIO_SYSSPACE, 0);
+		error = kern_funlinkat(td, AT_FDCWD, "/dev/dev", FD_NONE,
+		    UIO_SYSSPACE, 0, 0);
 		if (error)
 			printf("mountroot: unable to unlink /dev/dev "
 			    "(error %d)\n", error);
@@ -503,7 +544,7 @@ parse_dir_ask(char **conf)
 	printf("      and with the specified (optional) option list.\n");
 	printf("\n");
 	printf("    eg. ufs:/dev/da0s1a\n");
-	printf("        zfs:tank\n");
+	printf("        zfs:zroot/ROOT/default\n");
 	printf("        cd9660:/dev/cd0 ro\n");
 	printf("          (which is equivalent to: ");
 	printf("mount -t cd9660 -o ro /dev/cd0 /)\n");
@@ -574,9 +615,7 @@ parse_dir_md(char **conf)
 
 	if (root_mount_mddev != -1) {
 		mdio->md_unit = root_mount_mddev;
-		DROP_GIANT();
-		error = kern_ioctl(td, fd, MDIOCDETACH, (void *)mdio);
-		PICKUP_GIANT();
+		(void)kern_ioctl(td, fd, MDIOCDETACH, (void *)mdio);
 		/* Ignore errors. We don't care. */
 		root_mount_mddev = -1;
 	}
@@ -585,9 +624,7 @@ parse_dir_md(char **conf)
 	mdio->md_options = MD_AUTOUNIT | MD_READONLY;
 	mdio->md_mediasize = sb.st_size;
 	mdio->md_unit = 0;
-	DROP_GIANT();
 	error = kern_ioctl(td, fd, MDIOCATTACH, (void *)mdio);
-	PICKUP_GIANT();
 	if (error)
 		goto out;
 
@@ -596,9 +633,7 @@ parse_dir_md(char **conf)
 		mdio->md_file = NULL;
 		mdio->md_options = 0;
 		mdio->md_mediasize = 0;
-		DROP_GIANT();
 		error = kern_ioctl(td, fd, MDIOCDETACH, (void *)mdio);
-		PICKUP_GIANT();
 		/* Ignore errors. We don't care. */
 		error = ERANGE;
 		goto out;
@@ -709,7 +744,7 @@ parse_mount(char **conf)
 	char *errmsg;
 	struct mntarg *ma;
 	char *dev, *fs, *opts, *tok;
-	int error;
+	int delay, error, timeout;
 
 	error = parse_token(conf, &tok);
 	if (error)
@@ -750,15 +785,31 @@ parse_mount(char **conf)
 	if (error != 0)
 		goto out;
 
-	ma = NULL;
-	ma = mount_arg(ma, "fstype", fs, -1);
-	ma = mount_arg(ma, "fspath", "/", -1);
-	ma = mount_arg(ma, "from", dev, -1);
-	ma = mount_arg(ma, "errmsg", errmsg, ERRMSGL);
-	ma = mount_arg(ma, "ro", NULL, 0);
-	ma = parse_mountroot_options(ma, opts);
-	error = kernel_mount(ma, MNT_ROOTFS);
+	delay = hz / 10;
+	timeout = root_mount_timeout * hz;
 
+	for (;;) {
+		ma = NULL;
+		ma = mount_arg(ma, "fstype", fs, -1);
+		ma = mount_arg(ma, "fspath", "/", -1);
+		ma = mount_arg(ma, "from", dev, -1);
+		ma = mount_arg(ma, "errmsg", errmsg, ERRMSGL);
+		ma = mount_arg(ma, "ro", NULL, 0);
+		ma = parse_mountroot_options(ma, opts);
+
+		error = kernel_mount(ma, MNT_ROOTFS);
+		if (error == 0 || timeout <= 0)
+			break;
+
+		if (root_mount_timeout * hz == timeout ||
+		    (bootverbose && timeout % hz == 0)) {
+			printf("Mounting from %s:%s failed with error %d; "
+			    "retrying for %d more second%s\n", fs, dev, error,
+			    timeout / hz, (timeout / hz > 1) ? "s" : "");
+		}
+		pause("rmretry", delay);
+		timeout -= delay;
+	}
  out:
 	if (error) {
 		printf("Mounting from %s:%s failed with error %d",
@@ -923,7 +974,7 @@ vfs_mountroot_readconf(struct thread *td, struct sbuf *sb)
 		ofs += len - resid;
 	}
 
-	VOP_UNLOCK(nd.ni_vp, 0);
+	VOP_UNLOCK(nd.ni_vp);
 	vn_close(nd.ni_vp, FREAD, td->td_ucred, td);
 	return (error);
 }
@@ -935,25 +986,29 @@ vfs_mountroot_wait(void)
 	struct timeval lastfail;
 	int curfail;
 
+	TSENTER();
+
 	curfail = 0;
 	while (1) {
-		DROP_GIANT();
 		g_waitidle();
-		PICKUP_GIANT();
 		mtx_lock(&root_holds_mtx);
-		if (LIST_EMPTY(&root_holds)) {
+		if (TAILQ_EMPTY(&root_holds)) {
 			mtx_unlock(&root_holds_mtx);
 			break;
 		}
 		if (ppsratecheck(&lastfail, &curfail, 1)) {
 			printf("Root mount waiting for:");
-			LIST_FOREACH(h, &root_holds, list)
+			TAILQ_FOREACH(h, &root_holds, list)
 				printf(" %s", h->who);
 			printf("\n");
 		}
+		TSWAIT("root mount");
 		msleep(&root_holds, &root_holds_mtx, PZERO | PDROP, "roothold",
 		    hz);
+		TSUNWAIT("root mount");
 	}
+
+	TSEXIT();
 }
 
 static int
@@ -977,9 +1032,7 @@ vfs_mountroot_wait_if_neccessary(const char *fs, const char *dev)
 	 * Note that we must wait for GEOM to finish reconfiguring itself,
 	 * eg for geom_part(4) to finish tasting.
 	 */
-	DROP_GIANT();
 	g_waitidle();
-	PICKUP_GIANT();
 	if (parse_mount_dev_present(dev))
 		return (0);
 
@@ -1010,6 +1063,10 @@ vfs_mountroot(void)
 	struct thread *td;
 	time_t timebase;
 	int error;
+	
+	mtx_assert(&Giant, MA_NOTOWNED);
+
+	TSENTER();
 
 	td = curthread;
 
@@ -1059,6 +1116,8 @@ vfs_mountroot(void)
 	mtx_unlock(&root_holds_mtx);
 
 	EVENTHANDLER_INVOKE(mountroot);
+
+	TSEXIT();
 }
 
 static struct mntarg *

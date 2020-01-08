@@ -1,6 +1,8 @@
 /*	$OpenBSD: proc.h,v 1.2 1998/09/15 10:50:12 pefo Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -53,7 +55,7 @@ struct mdthread {
 #else
 	int		md_upte[KSTACK_PAGES];
 #endif
-	int		md_ss_addr;	/* single step address for ptrace */
+	uintptr_t	md_ss_addr;	/* single step address for ptrace */
 	int		md_ss_instr;	/* single step instruction for ptrace */
 	register_t	md_saved_intr;
 	u_int		md_spinlock_count;
@@ -77,7 +79,8 @@ struct mdthread {
 #define	MDTD_COP2USED	0x0002		/* Process used the COP2 */
 
 struct mdproc {
-	/* empty */
+	/* Avoid empty structs because they are undefined behavior. */
+	long	md_spare;
 };
 
 struct syscall_args {

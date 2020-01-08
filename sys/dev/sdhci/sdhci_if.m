@@ -1,6 +1,5 @@
 #-
-# Copyright (c) 2006 M. Warner Losh
-# All rights reserved.
+# Copyright (c) 2006 M. Warner Losh <imp@FreeBSD.org>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -58,10 +57,13 @@
 # that mmc/sd card drivers call to make requests.
 #
 
+#include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/types.h>
-#include <sys/bus.h>
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
+
+#include <machine/bus.h>
 
 #include <dev/mmc/bridge.h>
 #include <dev/sdhci/sdhci.h>

@@ -48,7 +48,7 @@ extern const char *cloudabi64_syscallnames[];
 extern struct sysent cloudabi64_sysent[];
 
 static int
-cloudabi64_fixup_tcb(register_t **stack_base, struct image_params *imgp)
+cloudabi64_fixup_tcb(uintptr_t *stack_base, struct image_params *imgp)
 {
 	int error;
 	register_t tcbptr;
@@ -64,12 +64,13 @@ cloudabi64_fixup_tcb(register_t **stack_base, struct image_params *imgp)
 	 * containing a pointer to the TCB. %fs base will point to this.
 	 */
 	tcbptr = (register_t)*stack_base;
-	return (copyout(&tcbptr, --*stack_base, sizeof(tcbptr)));
+	*stack_base -= sizeof(tcbptr);
+	return (copyout(&tcbptr, (void *)*stack_base, sizeof(tcbptr)));
 }
 
 static void
 cloudabi64_proc_setregs(struct thread *td, struct image_params *imgp,
-    unsigned long stack)
+    uintptr_t stack)
 {
 	struct trapframe *regs;
 
@@ -83,7 +84,7 @@ cloudabi64_proc_setregs(struct thread *td, struct image_params *imgp,
 	regs = td->td_frame;
 	regs->tf_rdi = stack + sizeof(register_t) +
 	    roundup(sizeof(cloudabi64_tcb_t), sizeof(register_t));
-	(void)cpu_set_user_tls(td, (void *)stack);
+	(void)cpu_set_user_tls(td, TO_PTR(stack));
 }
 
 static int
@@ -188,7 +189,7 @@ cloudabi64_thread_setregs(struct thread *td,
 	frame->tf_rdi = td->td_tid;
 	frame->tf_rsi = attr->argument;
 
-	return (cpu_set_user_tls(td, (void *)tcbptr));
+	return (cpu_set_user_tls(td, TO_PTR(tcbptr)));
 }
 
 static struct sysentvec cloudabi64_elf_sysvec = {
@@ -197,9 +198,9 @@ static struct sysentvec cloudabi64_elf_sysvec = {
 	.sv_fixup		= cloudabi64_fixup_tcb,
 	.sv_name		= "CloudABI ELF64",
 	.sv_coredump		= elf64_coredump,
-	.sv_pagesize		= PAGE_SIZE,
 	.sv_minuser		= VM_MIN_ADDRESS,
-	.sv_maxuser		= VM_MAXUSER_ADDRESS,
+	/* Keep top page reserved to work around AMD Ryzen stability issues. */
+	.sv_maxuser		= VM_MAXUSER_ADDRESS - PAGE_SIZE,
 	.sv_stackprot		= VM_PROT_READ | VM_PROT_WRITE,
 	.sv_copyout_strings	= cloudabi64_copyout_strings,
 	.sv_setregs		= cloudabi64_proc_setregs,

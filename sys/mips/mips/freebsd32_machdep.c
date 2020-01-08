@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Juli Mallett <jmallett@FreeBSD.org>
  * All rights reserved.
  *
@@ -30,8 +32,6 @@
  * Based on nwhitehorn's COMPAT_FREEBSD32 support code for PowerPC64.
  */
 
-#include "opt_compat.h"
-
 #define __ELF_WORD_SIZE 32
 
 #include <sys/types.h>
@@ -41,6 +41,7 @@
 #include <sys/sysent.h>
 #include <sys/exec.h>
 #include <sys/imgact.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/proc.h>
 #include <sys/namei.h>
@@ -67,7 +68,8 @@
 #include <compat/freebsd32/freebsd32_util.h>
 #include <compat/freebsd32/freebsd32_proto.h>
 
-static void freebsd32_exec_setregs(struct thread *, struct image_params *, u_long);
+static void freebsd32_exec_setregs(struct thread *, struct image_params *,
+    uintptr_t);
 static int get_mcontext32(struct thread *, mcontext32_t *, int);
 static int set_mcontext32(struct thread *, mcontext32_t *);
 static void freebsd32_sendsig(sig_t, ksiginfo_t *, sigset_t *);
@@ -77,7 +79,6 @@ extern const char *freebsd32_syscallnames[];
 struct sysentvec elf32_freebsd_sysvec = {
 	.sv_size	= SYS_MAXSYSCALL,
 	.sv_table	= freebsd32_sysent,
-	.sv_mask	= 0,
 	.sv_errsize	= 0,
 	.sv_errtbl	= NULL,
 	.sv_transtrap	= NULL,
@@ -89,12 +90,12 @@ struct sysentvec elf32_freebsd_sysvec = {
 	.sv_coredump	= __elfN(coredump),
 	.sv_imgact_try	= NULL,
 	.sv_minsigstksz	= MINSIGSTKSZ,
-	.sv_pagesize	= PAGE_SIZE,
 	.sv_minuser	= VM_MIN_ADDRESS,
 	.sv_maxuser	= ((vm_offset_t)0x80000000),
 	.sv_usrstack	= FREEBSD32_USRSTACK,
 	.sv_psstrings	= FREEBSD32_PS_STRINGS,
 	.sv_stackprot	= VM_PROT_ALL,
+	.sv_copyout_auxargs = __elfN(freebsd_copyout_auxargs),
 	.sv_copyout_strings = freebsd32_copyout_strings,
 	.sv_setregs	= freebsd32_exec_setregs,
 	.sv_fixlimit	= NULL,
@@ -118,7 +119,7 @@ static Elf32_Brandinfo freebsd_brand_info = {
 	.sysvec		= &elf32_freebsd_sysvec,
 	.interp_newpath	= "/libexec/ld-elf32.so.1",
 	.brand_note	= &elf32_freebsd_brandnote,
-	.flags		= BI_BRAND_NOTE
+	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
 SYSINIT(elf32, SI_SUB_EXEC, SI_ORDER_FIRST,
@@ -126,7 +127,8 @@ SYSINIT(elf32, SI_SUB_EXEC, SI_ORDER_FIRST,
     &freebsd_brand_info);
 
 static void
-freebsd32_exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+freebsd32_exec_setregs(struct thread *td, struct image_params *imgp,
+    uintptr_t stack)
 {
 	exec_setregs(td, imgp, stack);
 
@@ -294,6 +296,7 @@ freebsd32_getcontext(struct thread *td, struct freebsd32_getcontext_args *uap)
 	if (uap->ucp == NULL)
 		ret = EINVAL;
 	else {
+		bzero(&uc, sizeof(uc));
 		get_mcontext32(td, &uc.uc_mcontext, GET_MC_CLEAR_RET);
 		PROC_LOCK(td->td_proc);
 		uc.uc_sigmask = td->td_sigmask;
@@ -333,6 +336,7 @@ freebsd32_swapcontext(struct thread *td, struct freebsd32_swapcontext_args *uap)
 	if (uap->oucp == NULL || uap->ucp == NULL)
 		ret = EINVAL;
 	else {
+		bzero(&uc, sizeof(uc));
 		get_mcontext32(td, &uc.uc_mcontext, GET_MC_CLEAR_RET);
 		PROC_LOCK(td->td_proc);
 		uc.uc_sigmask = td->td_sigmask;

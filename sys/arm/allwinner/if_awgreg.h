@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2016 Jared McNeill <jmcneill@invisible.ca>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -115,9 +114,9 @@
 #define	EMAC_MII_DATA		0x4c
 #define	EMAC_ADDR_HIGH(n)	(0x50 + (n) * 8)
 #define	EMAC_ADDR_LOW(n)	(0x54 + (n) * 8)
-#define	EMAC_TX_DMA_STA		0x80
-#define	EMAC_TX_DMA_CUR_DESC	0x84
-#define	EMAC_TX_DMA_CUR_BUF	0x88
+#define	EMAC_TX_DMA_STA		0xb0
+#define	EMAC_TX_DMA_CUR_DESC	0xb4
+#define	EMAC_TX_DMA_CUR_BUF	0xb8
 #define	EMAC_RX_DMA_STA		0xc0
 #define	EMAC_RX_DMA_CUR_DESC	0xc4
 #define	EMAC_RX_DMA_CUR_BUF	0xc8

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD AND BSD-4-Clause
+ *
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -130,6 +132,8 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_extern.h>
+#include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/vm_pageout.h>
 #include <vm/uma.h>
 
@@ -287,6 +291,7 @@ boolean_t moea_is_referenced(mmu_t, vm_page_t);
 int moea_ts_referenced(mmu_t, vm_page_t);
 vm_offset_t moea_map(mmu_t, vm_offset_t *, vm_paddr_t, vm_paddr_t, int);
 boolean_t moea_page_exists_quick(mmu_t, pmap_t, vm_page_t);
+void moea_page_init(mmu_t, vm_page_t);
 int moea_page_wired_mappings(mmu_t, vm_page_t);
 void moea_pinit(mmu_t, pmap_t);
 void moea_pinit0(mmu_t, pmap_t);
@@ -317,6 +322,11 @@ void moea_dumpsys_map(mmu_t mmu, vm_paddr_t pa, size_t sz, void **va);
 void moea_scan_init(mmu_t mmu);
 vm_offset_t moea_quick_enter_page(mmu_t mmu, vm_page_t m);
 void moea_quick_remove_page(mmu_t mmu, vm_offset_t addr);
+static int moea_map_user_ptr(mmu_t mmu, pmap_t pm,
+    volatile const void *uaddr, void **kaddr, size_t ulen, size_t *klen);
+static int moea_decode_kernel_ptr(mmu_t mmu, vm_offset_t addr,
+    int *is_user, vm_offset_t *decoded_addr);
+
 
 static mmu_method_t moea_methods[] = {
 	MMUMETHOD(mmu_clear_modify,	moea_clear_modify),
@@ -334,6 +344,7 @@ static mmu_method_t moea_methods[] = {
 	MMUMETHOD(mmu_ts_referenced,	moea_ts_referenced),
 	MMUMETHOD(mmu_map,     		moea_map),
 	MMUMETHOD(mmu_page_exists_quick,moea_page_exists_quick),
+	MMUMETHOD(mmu_page_init,	moea_page_init),
 	MMUMETHOD(mmu_page_wired_mappings,moea_page_wired_mappings),
 	MMUMETHOD(mmu_pinit,		moea_pinit),
 	MMUMETHOD(mmu_pinit0,		moea_pinit0),
@@ -366,6 +377,8 @@ static mmu_method_t moea_methods[] = {
 	MMUMETHOD(mmu_dev_direct_mapped,moea_dev_direct_mapped),
 	MMUMETHOD(mmu_scan_init,	moea_scan_init),
 	MMUMETHOD(mmu_dumpsys_map,	moea_dumpsys_map),
+	MMUMETHOD(mmu_map_user_ptr,	moea_map_user_ptr),
+	MMUMETHOD(mmu_decode_kernel_ptr, moea_decode_kernel_ptr),
 
 	{ 0, 0 }
 };
@@ -738,7 +751,7 @@ moea_bootstrap(mmu_t mmup, vm_offset_t kernelstart, vm_offset_t kernelend)
 		} while (pa < end);
 	}
 
-	if (sizeof(phys_avail)/sizeof(phys_avail[0]) < regions_sz)
+	if (PHYS_AVAIL_ENTRIES < regions_sz)
 		panic("moea_bootstrap: phys_avail too small");
 
 	phys_avail_count = 0;
@@ -1113,7 +1126,7 @@ moea_enter(mmu_t mmu, pmap_t pmap, vm_offset_t va, vm_page_t m, vm_prot_t prot,
 		if ((flags & PMAP_ENTER_NOSLEEP) != 0)
 			return (KERN_RESOURCE_SHORTAGE);
 		VM_OBJECT_ASSERT_UNLOCKED(m->object);
-		VM_WAIT;
+		vm_wait(NULL);
 	}
 }
 
@@ -1136,8 +1149,12 @@ moea_enter_locked(pmap_t pmap, vm_offset_t va, vm_page_t m, vm_prot_t prot,
 	if (pmap_bootstrapped)
 		rw_assert(&pvh_global_lock, RA_WLOCKED);
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
-	if ((m->oflags & VPO_UNMANAGED) == 0 && !vm_page_xbusied(m))
-		VM_OBJECT_ASSERT_LOCKED(m->object);
+	if ((m->oflags & VPO_UNMANAGED) == 0) {
+		if ((flags & PMAP_ENTER_QUICK_LOCKED) == 0)
+			VM_PAGE_OBJECT_BUSY_ASSERT(m);
+		else
+			VM_OBJECT_ASSERT_LOCKED(m->object);
+	}
 
 	if ((m->oflags & VPO_UNMANAGED) != 0 || !moea_initialized) {
 		pvo_head = &moea_pvo_kunmanaged;
@@ -1205,7 +1222,8 @@ moea_enter_object(mmu_t mmu, pmap_t pm, vm_offset_t start, vm_offset_t end,
 	PMAP_LOCK(pm);
 	while (m != NULL && (diff = m->pindex - m_start->pindex) < psize) {
 		moea_enter_locked(pm, start + ptoa(diff), m, prot &
-		    (VM_PROT_READ | VM_PROT_EXECUTE), 0, 0);
+		    (VM_PROT_READ | VM_PROT_EXECUTE), PMAP_ENTER_QUICK_LOCKED,
+		    0);
 		m = TAILQ_NEXT(m, listq);
 	}
 	rw_wunlock(&pvh_global_lock);
@@ -1220,7 +1238,7 @@ moea_enter_quick(mmu_t mmu, pmap_t pm, vm_offset_t va, vm_page_t m,
 	rw_wlock(&pvh_global_lock);
 	PMAP_LOCK(pm);
 	moea_enter_locked(pm, va, m, prot & (VM_PROT_READ | VM_PROT_EXECUTE),
-	    0, 0);
+	    PMAP_ENTER_QUICK_LOCKED, 0);
 	rw_wunlock(&pvh_global_lock);
 	PMAP_UNLOCK(pm);
 }
@@ -1251,22 +1269,17 @@ moea_extract_and_hold(mmu_t mmu, pmap_t pmap, vm_offset_t va, vm_prot_t prot)
 {
 	struct	pvo_entry *pvo;
 	vm_page_t m;
-        vm_paddr_t pa;
 
 	m = NULL;
-	pa = 0;
 	PMAP_LOCK(pmap);
-retry:
 	pvo = moea_pvo_find_va(pmap, va & ~ADDR_POFF, NULL);
 	if (pvo != NULL && (pvo->pvo_pte.pte.pte_hi & PTE_VALID) &&
 	    ((pvo->pvo_pte.pte.pte_lo & PTE_PP) == PTE_RW ||
 	     (prot & VM_PROT_WRITE) == 0)) {
-		if (vm_page_pa_tryrelock(pmap, pvo->pvo_pte.pte.pte_lo & PTE_RPGN, &pa))
-			goto retry;
 		m = PHYS_TO_VM_PAGE(pvo->pvo_pte.pte.pte_lo & PTE_RPGN);
-		vm_page_hold(m);
+		if (!vm_page_wire_mapped(m))
+			m = NULL;
 	}
-	PA_UNLOCK_COND(pa);
 	PMAP_UNLOCK(pmap);
 	return (m);
 }
@@ -1306,13 +1319,11 @@ moea_is_modified(mmu_t mmu, vm_page_t m)
 	    ("moea_is_modified: page %p is not managed", m));
 
 	/*
-	 * If the page is not exclusive busied, then PGA_WRITEABLE cannot be
-	 * concurrently set while the object is locked.  Thus, if PGA_WRITEABLE
-	 * is clear, no PTEs can have PTE_CHG set.
+	 * If the page is not busied then this check is racy.
 	 */
-	VM_OBJECT_ASSERT_WLOCKED(m->object);
-	if (!vm_page_xbusied(m) && (m->aflags & PGA_WRITEABLE) == 0)
+	if (!pmap_page_is_write_mapped(m))
 		return (FALSE);
+
 	rw_wlock(&pvh_global_lock);
 	rv = moea_query_bit(m, PTE_CHG);
 	rw_wunlock(&pvh_global_lock);
@@ -1338,16 +1349,9 @@ moea_clear_modify(mmu_t mmu, vm_page_t m)
 
 	KASSERT((m->oflags & VPO_UNMANAGED) == 0,
 	    ("moea_clear_modify: page %p is not managed", m));
-	VM_OBJECT_ASSERT_WLOCKED(m->object);
-	KASSERT(!vm_page_xbusied(m),
-	    ("moea_clear_modify: page %p is exclusive busy", m));
+	vm_page_assert_busied(m);
 
-	/*
-	 * If the page is not PGA_WRITEABLE, then no PTEs can have PTE_CHG
-	 * set.  If the object containing the page is locked and the page is
-	 * not exclusive busied, then PGA_WRITEABLE cannot be concurrently set.
-	 */
-	if ((m->aflags & PGA_WRITEABLE) == 0)
+	if (!pmap_page_is_write_mapped(m))
 		return;
 	rw_wlock(&pvh_global_lock);
 	moea_clear_bit(m, PTE_CHG);
@@ -1367,14 +1371,9 @@ moea_remove_write(mmu_t mmu, vm_page_t m)
 
 	KASSERT((m->oflags & VPO_UNMANAGED) == 0,
 	    ("moea_remove_write: page %p is not managed", m));
+	vm_page_assert_busied(m);
 
-	/*
-	 * If the page is not exclusive busied, then PGA_WRITEABLE cannot be
-	 * set by another thread while the object is locked.  Thus,
-	 * if PGA_WRITEABLE is clear, no page table entries need updating.
-	 */
-	VM_OBJECT_ASSERT_WLOCKED(m->object);
-	if (!vm_page_xbusied(m) && (m->aflags & PGA_WRITEABLE) == 0)
+	if (!pmap_page_is_write_mapped(m))
 		return;
 	rw_wlock(&pvh_global_lock);
 	lo = moea_attr_fetch(m);
@@ -1541,6 +1540,70 @@ moea_kremove(mmu_t mmu, vm_offset_t va)
 }
 
 /*
+ * Provide a kernel pointer corresponding to a given userland pointer.
+ * The returned pointer is valid until the next time this function is
+ * called in this thread. This is used internally in copyin/copyout.
+ */
+int
+moea_map_user_ptr(mmu_t mmu, pmap_t pm, volatile const void *uaddr,
+    void **kaddr, size_t ulen, size_t *klen)
+{
+	size_t l;
+	register_t vsid;
+
+	*kaddr = (char *)USER_ADDR + ((uintptr_t)uaddr & ~SEGMENT_MASK);
+	l = ((char *)USER_ADDR + SEGMENT_LENGTH) - (char *)(*kaddr);
+	if (l > ulen)
+		l = ulen;
+	if (klen)
+		*klen = l;
+	else if (l != ulen)
+		return (EFAULT);
+
+	vsid = va_to_vsid(pm, (vm_offset_t)uaddr);
+ 
+	/* Mark segment no-execute */
+	vsid |= SR_N;
+ 
+	/* If we have already set this VSID, we can just return */
+	if (curthread->td_pcb->pcb_cpu.aim.usr_vsid == vsid)
+		return (0);
+ 
+	__asm __volatile("isync");
+	curthread->td_pcb->pcb_cpu.aim.usr_segm =
+	    (uintptr_t)uaddr >> ADDR_SR_SHFT;
+	curthread->td_pcb->pcb_cpu.aim.usr_vsid = vsid;
+	__asm __volatile("mtsr %0,%1; isync" :: "n"(USER_SR), "r"(vsid));
+
+	return (0);
+}
+
+/*
+ * Figure out where a given kernel pointer (usually in a fault) points
+ * to from the VM's perspective, potentially remapping into userland's
+ * address space.
+ */
+static int
+moea_decode_kernel_ptr(mmu_t mmu, vm_offset_t addr, int *is_user,
+    vm_offset_t *decoded_addr)
+{
+	vm_offset_t user_sr;
+
+	if ((addr >> ADDR_SR_SHFT) == (USER_ADDR >> ADDR_SR_SHFT)) {
+		user_sr = curthread->td_pcb->pcb_cpu.aim.usr_segm;
+		addr &= ADDR_PIDX | ADDR_POFF;
+		addr |= user_sr << ADDR_SR_SHFT;
+		*decoded_addr = addr;
+		*is_user = 1;
+	} else {
+		*decoded_addr = addr;
+		*is_user = 0;
+	}
+
+	return (0);
+}
+
+/*
  * Map a range of physical addresses into kernel virtual address space.
  *
  * The value passed in *virt is a suggested virtual address for the mapping.
@@ -1592,6 +1655,15 @@ moea_page_exists_quick(mmu_t mmu, pmap_t pmap, vm_page_t m)
 	}
 	rw_wunlock(&pvh_global_lock);
 	return (rv);
+}
+
+void
+moea_page_init(mmu_t mmu __unused, vm_page_t m)
+{
+
+	m->md.mdpg_attrs = 0;
+	m->md.mdpg_cache_attrs = VM_MEMATTR_DEFAULT;
+	LIST_INIT(&m->md.mdpg_pvoh);
 }
 
 /*
@@ -1834,7 +1906,7 @@ moea_remove_all(mmu_t mmu, vm_page_t m)
 		moea_pvo_remove(pvo, -1);
 		PMAP_UNLOCK(pmap);
 	}
-	if ((m->aflags & PGA_WRITEABLE) && moea_query_bit(m, PTE_CHG)) {
+	if ((m->a.flags & PGA_WRITEABLE) && moea_query_bit(m, PTE_CHG)) {
 		moea_attr_clear(m, PTE_CHG);
 		vm_page_dirty(m);
 	}
@@ -2036,23 +2108,26 @@ moea_pvo_remove(struct pvo_entry *pvo, int pteidx)
 		pvo->pvo_pmap->pm_stats.wired_count--;
 
 	/*
+	 * Remove this PVO from the PV and pmap lists.
+	 */
+	LIST_REMOVE(pvo, pvo_vlink);
+	RB_REMOVE(pvo_tree, &pvo->pvo_pmap->pmap_pvo, pvo);
+
+	/*
 	 * Save the REF/CHG bits into their cache if the page is managed.
+	 * Clear PGA_WRITEABLE if all mappings of the page have been removed.
 	 */
 	if ((pvo->pvo_vaddr & PVO_MANAGED) == PVO_MANAGED) {
-		struct	vm_page *pg;
+		struct vm_page *pg;
 
 		pg = PHYS_TO_VM_PAGE(pvo->pvo_pte.pte.pte_lo & PTE_RPGN);
 		if (pg != NULL) {
 			moea_attr_save(pg, pvo->pvo_pte.pte.pte_lo &
 			    (PTE_REF | PTE_CHG));
+			if (LIST_EMPTY(&pg->md.mdpg_pvoh))
+				vm_page_aflag_clear(pg, PGA_WRITEABLE);
 		}
 	}
-
-	/*
-	 * Remove this PVO from the PV and pmap lists.
-	 */
-	LIST_REMOVE(pvo, pvo_vlink);
-	RB_REMOVE(pvo_tree, &pvo->pvo_pmap->pmap_pvo, pvo);
 
 	/*
 	 * Remove this from the overflow list and return it to the pool

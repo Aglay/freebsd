@@ -40,28 +40,28 @@
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/workqueue.h>
-#include <linux/sysfs.h>
 #include <linux/kdev_t.h>
 #include <asm/atomic.h>
 
 #include <sys/bus.h>
 
-enum irqreturn	{ IRQ_NONE = 0, IRQ_HANDLED, IRQ_WAKE_THREAD, };
-typedef enum irqreturn	irqreturn_t;
-
 struct device;
+struct fwnode_handle;
 
 struct class {
 	const char	*name;
 	struct module	*owner;
 	struct kobject	kobj;
 	devclass_t	bsdclass;
+	const struct dev_pm_ops *pm;
+	const struct attribute_group **dev_groups;
 	void		(*class_release)(struct class *class);
 	void		(*dev_release)(struct device *dev);
 	char *		(*devnode)(struct device *dev, umode_t *mode);
 };
 
 struct dev_pm_ops {
+	int (*prepare)(struct device *dev);
 	int (*suspend)(struct device *dev);
 	int (*suspend_late)(struct device *dev);
 	int (*resume)(struct device *dev);
@@ -106,13 +106,17 @@ struct device {
 	struct class	*class;
 	void		(*release)(struct device *dev);
 	struct kobject	kobj;
-	uint64_t	*dma_mask;
+	void		*dma_priv;
 	void		*driver_data;
 	unsigned int	irq;
 #define	LINUX_IRQ_INVALID	65535
-	unsigned int	msix;
-	unsigned int	msix_max;
+	unsigned int	irq_start;
+	unsigned int	irq_end;
 	const struct attribute_group **groups;
+	struct fwnode_handle *fwnode;
+
+	spinlock_t	devres_lock;
+	struct list_head devres_head;
 };
 
 extern struct device linux_root_device;
@@ -121,10 +125,10 @@ extern const struct kobj_type linux_dev_ktype;
 extern const struct kobj_type linux_class_ktype;
 
 struct class_attribute {
-        struct attribute attr;
-        ssize_t (*show)(struct class *, struct class_attribute *, char *);
-        ssize_t (*store)(struct class *, struct class_attribute *, const char *, size_t);
-        const void *(*namespace)(struct class *, const struct class_attribute *);
+	struct attribute attr;
+	ssize_t (*show)(struct class *, struct class_attribute *, char *);
+	ssize_t (*store)(struct class *, struct class_attribute *, const char *, size_t);
+	const void *(*namespace)(struct class *, const struct class_attribute *);
 };
 
 #define	CLASS_ATTR(_name, _mode, _show, _store)				\
@@ -142,7 +146,13 @@ struct device_attribute {
 
 #define	DEVICE_ATTR(_name, _mode, _show, _store)			\
 	struct device_attribute dev_attr_##_name =			\
-	    { { #_name, NULL, _mode }, _show, _store }
+	    __ATTR(_name, _mode, _show, _store)
+#define	DEVICE_ATTR_RO(_name)						\
+	struct device_attribute dev_attr_##_name = __ATTR_RO(_name)
+#define	DEVICE_ATTR_WO(_name)						\
+	struct device_attribute dev_attr_##_name = __ATTR_WO(_name)
+#define	DEVICE_ATTR_RW(_name)						\
+	struct device_attribute dev_attr_##_name = __ATTR_RW(_name)
 
 /* Simple class attribute that is just a static string */
 struct class_attribute_string {
@@ -170,8 +180,17 @@ show_class_attr_string(struct class *class,
 #define	dev_warn(dev, fmt, ...)	device_printf((dev)->bsddev, fmt, ##__VA_ARGS__)
 #define	dev_info(dev, fmt, ...)	device_printf((dev)->bsddev, fmt, ##__VA_ARGS__)
 #define	dev_notice(dev, fmt, ...)	device_printf((dev)->bsddev, fmt, ##__VA_ARGS__)
+#define	dev_dbg(dev, fmt, ...)	do { } while (0)
 #define	dev_printk(lvl, dev, fmt, ...)					\
 	    device_printf((dev)->bsddev, fmt, ##__VA_ARGS__)
+
+#define	dev_err_once(dev, ...) do {		\
+	static bool __dev_err_once;		\
+	if (!__dev_err_once) {			\
+		__dev_err_once = 1;		\
+		dev_err(dev, __VA_ARGS__);	\
+	}					\
+} while (0)
 
 #define	dev_err_ratelimited(dev, ...) do {	\
 	static linux_ratelimit_t __ratelimited;	\
@@ -213,7 +232,7 @@ static inline char *
 dev_name(const struct device *dev)
 {
 
- 	return kobject_name(&dev->kobj);
+	return kobject_name(&dev->kobj);
 }
 
 #define	dev_set_name(_dev, _fmt, ...)					\
@@ -284,6 +303,9 @@ device_initialize(struct device *dev)
 	dev->bsddev = bsddev;
 	MPASS(dev->bsddev != NULL);
 	kobject_init(&dev->kobj, &linux_dev_ktype);
+
+	spin_lock_init(&dev->devres_lock);
+	INIT_LIST_HEAD(&dev->devres_head);
 }
 
 static inline int
@@ -294,6 +316,10 @@ device_add(struct device *dev)
 			dev->devt = makedev(0, device_get_unit(dev->bsddev));
 	}
 	kobject_add(&dev->kobj, &dev->class->kobj, dev_name(dev));
+
+	if (dev->groups)
+		return (sysfs_create_groups(&dev->kobj, dev->groups));
+
 	return (0);
 }
 
@@ -399,6 +425,8 @@ done:
 	kobject_init(&dev->kobj, &linux_dev_ktype);
 	kobject_add(&dev->kobj, &dev->class->kobj, dev_name(dev));
 
+	sysfs_create_groups(&dev->kobj, dev->class->dev_groups);
+
 	return (0);
 }
 
@@ -406,6 +434,8 @@ static inline void
 device_unregister(struct device *dev)
 {
 	device_t bsddev;
+
+	sysfs_remove_groups(&dev->kobj, dev->class->dev_groups);
 
 	bsddev = dev->bsddev;
 	dev->bsddev = NULL;
@@ -447,6 +477,9 @@ device_destroy(struct class *class, dev_t devt)
 	if (bsddev != NULL)
 		device_unregister(device_get_softc(bsddev));
 }
+
+#define	dev_pm_set_driver_flags(dev, flags) do { \
+} while (0)
 
 static inline void
 linux_class_kfree(struct class *class)
@@ -520,7 +553,7 @@ class_remove_file(struct class *class, const struct class_attribute *attr)
 static inline int
 dev_to_node(struct device *dev)
 {
-                return -1;
+	return -1;
 }
 
 char *kvasprintf(gfp_t, const char *, va_list);

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -36,7 +38,9 @@
 #ifndef _SYS_SYSCTL_H_
 #define	_SYS_SYSCTL_H_
 
+#ifdef _KERNEL
 #include <sys/queue.h>
+#endif
 
 struct thread;
 /*
@@ -83,6 +87,7 @@ struct ctlname {
 #define	CTLFLAG_RD	0x80000000	/* Allow reads of variable */
 #define	CTLFLAG_WR	0x40000000	/* Allow writes to the variable */
 #define	CTLFLAG_RW	(CTLFLAG_RD|CTLFLAG_WR)
+#define	CTLFLAG_DORMANT	0x20000000	/* This sysctl is not active yet */
 #define	CTLFLAG_ANYBODY	0x10000000	/* All users can set this var */
 #define	CTLFLAG_SECURE	0x08000000	/* Permit set only if securelevel<=0 */
 #define	CTLFLAG_PRISON	0x04000000	/* Prisoned roots can fiddle */
@@ -144,7 +149,7 @@ struct ctlname {
 #define	REQ_WIRED	2
 
 /* definitions for sysctl_req 'flags' member */
-#if defined(__amd64__) || defined(__powerpc64__) ||\
+#if defined(__aarch64__) || defined(__amd64__) || defined(__powerpc64__) ||\
     (defined(__mips__) && defined(__mips_n64))
 #define	SCTL_MASK32	1	/* 32 bit emulation */
 #endif
@@ -160,7 +165,7 @@ struct sysctl_req {
 	size_t		 oldlen;
 	size_t		 oldidx;
 	int		(*oldfunc)(struct sysctl_req *, const void *, size_t);
-	void		*newptr;
+	const void		*newptr;
 	size_t		 newlen;
 	size_t		 newidx;
 	int		(*newfunc)(struct sysctl_req *, void *, size_t);
@@ -211,6 +216,10 @@ int sysctl_handle_counter_u64_array(SYSCTL_HANDLER_ARGS);
 int sysctl_handle_uma_zone_max(SYSCTL_HANDLER_ARGS);
 int sysctl_handle_uma_zone_cur(SYSCTL_HANDLER_ARGS);
 
+int sysctl_msec_to_sbintime(SYSCTL_HANDLER_ARGS);
+int sysctl_usec_to_sbintime(SYSCTL_HANDLER_ARGS);
+int sysctl_sec_to_timeval(SYSCTL_HANDLER_ARGS);
+
 int sysctl_dpcpu_int(SYSCTL_HANDLER_ARGS);
 int sysctl_dpcpu_long(SYSCTL_HANDLER_ARGS);
 int sysctl_dpcpu_quad(SYSCTL_HANDLER_ARGS);
@@ -219,6 +228,8 @@ int sysctl_dpcpu_quad(SYSCTL_HANDLER_ARGS);
  * These functions are used to add/remove an oid from the mib.
  */
 void sysctl_register_oid(struct sysctl_oid *oidp);
+void sysctl_register_disabled_oid(struct sysctl_oid *oidp);
+void sysctl_enable_oid(struct sysctl_oid *oidp);
 void sysctl_unregister_oid(struct sysctl_oid *oidp);
 
 /* Declare a static oid to allow child oids to be added to it. */
@@ -341,6 +352,25 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_STRING);	\
 	sysctl_add_oid(ctx, parent, nbr, name, CTLTYPE_STRING|(access),	\
 	    __arg, len, sysctl_handle_string, "A", __DESCR(descr),	\
+	    NULL); \
+})
+
+/* Oid for a constant '\0' terminated string. */
+#define	SYSCTL_CONST_STRING(parent, nbr, name, access, arg, descr)	\
+	SYSCTL_OID(parent, nbr, name, CTLTYPE_STRING|(access),		\
+	    __DECONST(char *, arg), 0, sysctl_handle_string, "A", descr); \
+	CTASSERT(!(access & CTLFLAG_WR));				\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_STRING)
+
+#define	SYSCTL_ADD_CONST_STRING(ctx, parent, nbr, name, access, arg, descr) \
+({									\
+	char *__arg = __DECONST(char *, arg);				\
+	CTASSERT(!(access & CTLFLAG_WR));				\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_STRING);	\
+	sysctl_add_oid(ctx, parent, nbr, name, CTLTYPE_STRING|(access),	\
+	    __arg, 0, sysctl_handle_string, "A", __DESCR(descr),	\
 	    NULL); \
 })
 
@@ -669,7 +699,7 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 /* Oid for a 64-bit unsigned counter(9).  The pointer must be non NULL. */
 #define	SYSCTL_COUNTER_U64(parent, nbr, name, access, ptr, descr)	\
 	SYSCTL_OID(parent, nbr, name,					\
-	    CTLTYPE_U64 | CTLFLAG_MPSAFE | (access),			\
+	    CTLTYPE_U64 | CTLFLAG_MPSAFE | CTLFLAG_STATS | (access),	\
 	    (ptr), 0, sysctl_handle_counter_u64, "QU", descr);		\
 	CTASSERT((((access) & CTLTYPE) == 0 ||				\
 	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_U64) &&	\
@@ -682,7 +712,7 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 	CTASSERT(((access) & CTLTYPE) == 0 ||				\
 	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_U64);		\
 	sysctl_add_oid(ctx, parent, nbr, name,				\
-	    CTLTYPE_U64 | CTLFLAG_MPSAFE | (access),			\
+	    CTLTYPE_U64 | CTLFLAG_MPSAFE | CTLFLAG_STATS | (access),	\
 	    __ptr, 0, sysctl_handle_counter_u64, "QU", __DESCR(descr),	\
 	    NULL);							\
 })
@@ -690,7 +720,7 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 /* Oid for an array of counter(9)s.  The pointer and length must be non zero. */
 #define	SYSCTL_COUNTER_U64_ARRAY(parent, nbr, name, access, ptr, len, descr) \
 	SYSCTL_OID(parent, nbr, name,					\
-	    CTLTYPE_OPAQUE | CTLFLAG_MPSAFE | (access),			\
+	    CTLTYPE_OPAQUE | CTLFLAG_MPSAFE | CTLFLAG_STATS | (access),	\
 	    (ptr), (len), sysctl_handle_counter_u64_array, "S", descr);	\
 	CTASSERT((((access) & CTLTYPE) == 0 ||				\
 	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_OPAQUE) &&	\
@@ -704,7 +734,7 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 	CTASSERT(((access) & CTLTYPE) == 0 ||				\
 	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_OPAQUE);	\
 	sysctl_add_oid(ctx, parent, nbr, name,				\
-	    CTLTYPE_OPAQUE | CTLFLAG_MPSAFE | (access),			\
+	    CTLTYPE_OPAQUE | CTLFLAG_MPSAFE | CTLFLAG_STATS | (access),	\
 	    __ptr, len, sysctl_handle_counter_u64_array, "S",		\
 	    __DESCR(descr), NULL);					\
 })
@@ -792,6 +822,60 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 	    NULL);							\
 })
 
+/* OID expressing a sbintime_t as microseconds */
+#define	SYSCTL_SBINTIME_USEC(parent, nbr, name, access, ptr, descr)	\
+	SYSCTL_OID(parent, nbr, name,					\
+	    CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RD | (access),	\
+	    (ptr), 0, sysctl_usec_to_sbintime, "Q", descr);		\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_S64)
+#define	SYSCTL_ADD_SBINTIME_USEC(ctx, parent, nbr, name, access, ptr, descr) \
+({									\
+	sbintime_t *__ptr = (ptr);					\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_S64);		\
+	sysctl_add_oid(ctx, parent, nbr, name,				\
+	    CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RD | (access),	\
+	    __ptr, 0, sysctl_usec_to_sbintime, "Q", __DESCR(descr),	\
+	    NULL);							\
+})
+
+/* OID expressing a sbintime_t as milliseconds */
+#define	SYSCTL_SBINTIME_MSEC(parent, nbr, name, access, ptr, descr)	\
+	SYSCTL_OID(parent, nbr, name,					\
+	    CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RD | (access),	\
+	    (ptr), 0, sysctl_msec_to_sbintime, "Q", descr);		\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_S64)
+#define	SYSCTL_ADD_SBINTIME_MSEC(ctx, parent, nbr, name, access, ptr, descr) \
+({									\
+	sbintime_t *__ptr = (ptr);					\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_S64);		\
+	sysctl_add_oid(ctx, parent, nbr, name,				\
+	    CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RD | (access),	\
+	    __ptr, 0, sysctl_msec_to_sbintime, "Q", __DESCR(descr),	\
+	    NULL);							\
+})
+
+/* OID expressing a struct timeval as seconds */
+#define	SYSCTL_TIMEVAL_SEC(parent, nbr, name, access, ptr, descr)	\
+	SYSCTL_OID(parent, nbr, name,					\
+	    CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RD | (access),	\
+	    (ptr), 0, sysctl_sec_to_timeval, "I", descr);		\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_INT)
+#define	SYSCTL_ADD_TIMEVAL_SEC(ctx, parent, nbr, name, access, ptr, descr) \
+({									\
+	struct timeval *__ptr = (ptr);					\
+	CTASSERT(((access) & CTLTYPE) == 0 ||				\
+	    ((access) & SYSCTL_CT_ASSERT_MASK) == CTLTYPE_INT);		\
+	sysctl_add_oid(ctx, parent, nbr, name,				\
+	    CTLTYPE_INT | CTLFLAG_MPSAFE | CTLFLAG_RD | (access),	\
+	    __ptr, 0, sysctl_sec_to_timeval, "I", __DESCR(descr),	\
+	    NULL);							\
+})
+
 /*
  * A macro to generate a read-only sysctl to indicate the presence of optional
  * kernel features.
@@ -805,7 +889,7 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 /*
  * Top-level identifiers
  */
-#define	CTL_UNSPEC	0		/* unused */
+#define	CTL_SYSCTL	0		/* "magic" numbers */
 #define	CTL_KERN	1		/* "high kernel": proc, limits */
 #define	CTL_VM		2		/* virtual memory */
 #define	CTL_VFS		3		/* filesystem, mount type is next */
@@ -815,6 +899,17 @@ TAILQ_HEAD(sysctl_ctx_list, sysctl_ctx_entry);
 #define	CTL_MACHDEP	7		/* machine dependent */
 #define	CTL_USER	8		/* user-level */
 #define	CTL_P1003_1B	9		/* POSIX 1003.1B */
+
+/*
+ * CTL_SYSCTL identifiers
+ */
+#define	CTL_SYSCTL_DEBUG	0	/* printf all nodes */
+#define	CTL_SYSCTL_NAME		1	/* string name of OID */
+#define	CTL_SYSCTL_NEXT		2	/* next OID */
+#define	CTL_SYSCTL_NAME2OID	3	/* int array of name */
+#define	CTL_SYSCTL_OIDFMT	4	/* OID's kind and format */
+#define	CTL_SYSCTL_OIDDESCR	5	/* OID's description */
+#define	CTL_SYSCTL_OIDLABEL	6	/* aggregation label */
 
 /*
  * CTL_KERN identifiers
@@ -999,14 +1094,12 @@ SYSCTL_DECL(_hw_bus);
 SYSCTL_DECL(_hw_bus_devices);
 SYSCTL_DECL(_hw_bus_info);
 SYSCTL_DECL(_machdep);
+SYSCTL_DECL(_machdep_mitigations);
 SYSCTL_DECL(_user);
 SYSCTL_DECL(_compat);
 SYSCTL_DECL(_regression);
 SYSCTL_DECL(_security);
 SYSCTL_DECL(_security_bsd);
-#ifdef EXT_RESOURCES
-SYSCTL_DECL(_clock);
-#endif
 
 extern char	machine[];
 extern char	osrelease[];
@@ -1040,13 +1133,16 @@ int	kernel_sysctlbyname(struct thread *td, char *name, void *old,
 	    size_t *oldlenp, void *new, size_t newlen, size_t *retval,
 	    int flags);
 int	userland_sysctl(struct thread *td, int *name, u_int namelen, void *old,
-	    size_t *oldlenp, int inkernel, void *new, size_t newlen,
+	    size_t *oldlenp, int inkernel, const void *new, size_t newlen,
 	    size_t *retval, int flags);
 int	sysctl_find_oid(int *name, u_int namelen, struct sysctl_oid **noid,
 	    int *nindx, struct sysctl_req *req);
 void	sysctl_wlock(void);
 void	sysctl_wunlock(void);
 int	sysctl_wire_old_buffer(struct sysctl_req *req, size_t len);
+int	kern___sysctlbyname(struct thread *td, const char *name,
+	    size_t namelen, void *old, size_t *oldlenp, void *new,
+	    size_t newlen, size_t *retval, int flags, bool inkernel);
 
 struct sbuf;
 struct sbuf *sbuf_new_for_sysctl(struct sbuf *, char *, int,

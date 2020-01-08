@@ -1,6 +1,8 @@
 /*	$FreeBSD$	*/
 /* $NetBSD: ieee80211_rssadapt.c,v 1.9 2005/02/26 22:45:09 perry Exp $ */
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2010 Rui Paulo <rpaulo@FreeBSD.org>
  * Copyright (c) 2003, 2004 David Young.  All rights reserved.
  *
@@ -115,12 +117,13 @@ static void
 rssadapt_setinterval(const struct ieee80211vap *vap, int msecs)
 {
 	struct ieee80211_rssadapt *rs = vap->iv_rs;
-	int t;
+
+	if (!rs)
+		return;
 
 	if (msecs < 100)
 		msecs = 100;
-	t = msecs_to_ticks(msecs);
-	rs->interval = (t < 1) ? 1 : t;
+	rs->interval = msecs_to_ticks(msecs);
 }
 
 static void
@@ -130,7 +133,8 @@ rssadapt_init(struct ieee80211vap *vap)
 
 	KASSERT(vap->iv_rs == NULL, ("%s: iv_rs already initialized",
 	    __func__));
-	
+
+	nrefs++;		/* XXX locking */
 	vap->iv_rs = rs = IEEE80211_MALLOC(sizeof(struct ieee80211_rssadapt),
 	    M_80211_RATECTL, IEEE80211_M_NOWAIT | IEEE80211_M_ZERO);
 	if (rs == NULL) {
@@ -146,6 +150,8 @@ static void
 rssadapt_deinit(struct ieee80211vap *vap)
 {
 	IEEE80211_FREE(vap->iv_rs, M_80211_RATECTL);
+	KASSERT(nrefs > 0, ("imbalanced attach/detach"));
+	nrefs--;		/* XXX locking */
 }
 
 static void
@@ -171,6 +177,12 @@ rssadapt_node_init(struct ieee80211_node *ni)
 	struct ieee80211vap *vap = ni->ni_vap;
 	struct ieee80211_rssadapt *rsa = vap->iv_rs;
 	const struct ieee80211_rateset *rs = &ni->ni_rates;
+
+	if (!rsa) {
+		if_printf(vap->iv_ifp, "ratectl structure was not allocated, "
+		    "per-node structure allocation skipped\n");
+		return;
+	}
 
 	if (ni->ni_rctls == NULL) {
 		ni->ni_rctls = ra = 
@@ -226,10 +238,18 @@ rssadapt_rate(struct ieee80211_node *ni, void *arg __unused, uint32_t iarg)
 {
 	struct ieee80211_rssadapt_node *ra = ni->ni_rctls;
 	u_int pktlen = iarg;
-	const struct ieee80211_rateset *rs = &ra->ra_rates;
+	const struct ieee80211_rateset *rs;
 	uint16_t (*thrs)[IEEE80211_RATE_SIZE];
 	int rix, rssi;
 
+	/* XXX should return -1 here, but drivers may not expect this... */
+	if (!ra)
+	{
+		ni->ni_txrate = ni->ni_rates.rs_rates[0];
+		return 0;
+	}
+
+	rs = &ra->ra_rates;
 	if ((ticks - ra->ra_ticks) > ra->ra_rs->interval) {
 		rssadapt_updatestats(ra);
 		ra->ra_ticks = ticks;
@@ -315,6 +335,9 @@ rssadapt_tx_complete(const struct ieee80211_node *ni,
 	struct ieee80211_rssadapt_node *ra = ni->ni_rctls;
 	int pktlen, rssi;
 
+	if (!ra)
+		return;
+
 	if ((status->flags &
 	    (IEEE80211_RATECTL_STATUS_PKTLEN|IEEE80211_RATECTL_STATUS_RSSI)) !=
 	    (IEEE80211_RATECTL_STATUS_PKTLEN|IEEE80211_RATECTL_STATUS_RSSI))
@@ -339,9 +362,12 @@ rssadapt_sysctl_interval(SYSCTL_HANDLER_ARGS)
 {
 	struct ieee80211vap *vap = arg1;
 	struct ieee80211_rssadapt *rs = vap->iv_rs;
-	int msecs = ticks_to_msecs(rs->interval);
-	int error;
+	int msecs, error;
 
+	if (!rs)
+		return ENOMEM;
+
+	msecs = ticks_to_msecs(rs->interval);
 	error = sysctl_handle_int(oidp, &msecs, 0, req);
 	if (error || !req->newptr)
 		return error;

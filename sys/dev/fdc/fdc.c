@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2004 Poul-Henning Kamp
  * Copyright (c) 1990 The Regents of the University of California.
  * All rights reserved.
@@ -1158,10 +1160,8 @@ fdc_thread(void *arg)
 		mtx_unlock(&fdc->fdc_mtx);
 		i = fdc_worker(fdc);
 		if (i && debugflags & 0x20) {
-			if (fdc->bp != NULL) {
-				g_print_bio(fdc->bp);
-				printf("\n");
-			}
+			if (fdc->bp != NULL)
+				g_print_bio("", fdc->bp, "");
 			printf("Retry line %d\n", retry_line);
 		}
 		fdc->retry += i;

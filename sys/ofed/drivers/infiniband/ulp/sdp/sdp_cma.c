@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0
+ *
  * Copyright (c) 2006 Mellanox Technologies Ltd.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -46,20 +48,23 @@ enum {
 static void
 sdp_qp_event_handler(struct ib_event *event, void *data)
 {
+	struct socket *sk = data;
+
+	sdp_dbg(sk, "QP Event: %s (%d)", ib_event_msg(event->event),
+	    event->event);
 }
 
 static int
 sdp_get_max_dev_sge(struct ib_device *dev)
 {
-	struct ib_device_attr attr;
+	struct ib_device_attr *device_attr;
 	static int max_sges = -1;
 
 	if (max_sges > 0)
 		goto out;
 
-	ib_query_device(dev, &attr);
-
-	max_sges = attr.max_sge;
+	device_attr = &dev->attrs;
+	max_sges = device_attr->max_sge;
 
 out:
 	return max_sges;
@@ -70,6 +75,7 @@ sdp_init_qp(struct socket *sk, struct rdma_cm_id *id)
 {
 	struct ib_qp_init_attr qp_init_attr = {
 		.event_handler = sdp_qp_event_handler,
+		.qp_context = sk,
 		.cap.max_send_wr = SDP_TX_SIZE,
 		.cap.max_recv_wr = SDP_RX_SIZE,
         	.sq_sig_type = IB_SIGNAL_REQ_WR,
@@ -438,7 +444,8 @@ sdp_cma_handler(struct rdma_cm_id *id, struct rdma_cm_event *event)
 		break;
 	}
 
-	sdp_dbg(sk, "event %d done. status %d\n", event->event, rc);
+	sdp_dbg(sk, "event %s (%d) done. status %d\n",
+	    rdma_event_msg(event->event), event->event, rc);
 
 	if (rc) {
 		SDP_WLOCK(ssk);

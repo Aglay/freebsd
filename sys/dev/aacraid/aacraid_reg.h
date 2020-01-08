@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000 Michael Smith
  * Copyright (c) 2000-2001 Scott Long
  * Copyright (c) 2000 BSDi
@@ -40,7 +42,7 @@
 /*
  * Misc. magic numbers.
  */
-#define AAC_MAX_CONTAINERS	64
+#define AAC_MAX_CONTAINERS	240
 #define AAC_BLOCK_SIZE		512
 
 /*

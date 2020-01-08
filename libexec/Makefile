@@ -8,11 +8,13 @@ SUBDIR=	${_atf} \
 	${_blacklistd-helper} \
 	${_comsat} \
 	${_dma} \
+	flua \
 	getty \
 	${_mail.local} \
 	${_makewhatis.local} \
 	${_mknetid} \
 	${_pppoed} \
+	rc \
 	revnetgroup \
 	${_rlogind} \
 	rpc.rquotad \
@@ -73,15 +75,11 @@ _tftp-proxy=	tftp-proxy
 
 .if !defined(NO_PIC) && !defined(NO_RTLD)
 _rtld-elf=	rtld-elf
+SUBDIR.${MK_LIB32}+=	rtld-elf32
 .endif
 
 .if ${MK_RBOOTD} != "no"
 SUBDIR+=	rbootd
-.endif
-
-.if ${MK_RCMDS} != "no"
-_rlogind=	rlogind
-_rshd=		rshd
 .endif
 
 .if ${MK_SENDMAIL} != "no"

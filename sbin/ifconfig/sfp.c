@@ -69,7 +69,7 @@ struct _nv {
 const char *find_value(struct _nv *x, int value);
 const char *find_zero_bit(struct _nv *x, int value, int sz);
 
-/* SFF-8472 Rev. 11.4 table 3.4: Connector values */
+/* SFF-8024 Rev. 4.6 Table 4-3: Connector Types */
 static struct _nv conn[] = {
 	{ 0x00, "Unknown" },
 	{ 0x01, "SC" },
@@ -77,17 +77,23 @@ static struct _nv conn[] = {
 	{ 0x03, "Fibre Channel Style 2 copper" },
 	{ 0x04, "BNC/TNC" },
 	{ 0x05, "Fibre Channel coaxial" },
-	{ 0x06, "FiberJack" },
+	{ 0x06, "Fiber Jack" },
 	{ 0x07, "LC" },
 	{ 0x08, "MT-RJ" },
 	{ 0x09, "MU" },
 	{ 0x0A, "SG" },
 	{ 0x0B, "Optical pigtail" },
-	{ 0x0C, "MPO Parallel Optic" },
+	{ 0x0C, "MPO 1x12 Parallel Optic" },
+	{ 0x0D, "MPO 2x16 Parallel Optic" },
 	{ 0x20, "HSSDC II" },
 	{ 0x21, "Copper pigtail" },
 	{ 0x22, "RJ45" },
-	{ 0x23, "No separate connector" }, /* SFF-8436 */
+	{ 0x23, "No separable connector" },
+	{ 0x24, "MXC 2x16" },
+	{ 0x25, "CS optical connector" },
+	{ 0x26, "Mini CS optical connector" },
+	{ 0x27, "MPO 2x12 Parallel Optic" },
+	{ 0x28, "MPO 1x16 Parallel Optic" },
 	{ 0, NULL }
 };
 
@@ -183,10 +189,69 @@ static struct _nv eth_1040g[] = {
 };
 #define	SFF_8636_EXT_COMPLIANCE	0x80
 
-/* SFF-8024 Rev. 3.4 table 4.4: Extended Specification Compliance */
+/* SFF-8024 Rev. 4.6 table 4-4: Extended Specification Compliance */
 static struct _nv eth_extended_comp[] = {
 	{ 0xFF, "Reserved" },
-	{ 0x1A, "2 lambda DWDM 100G" },
+	{ 0x55, "128GFC LW" },
+	{ 0x54, "128GFC SW" },
+	{ 0x53, "128GFC EA" },
+	{ 0x52, "64GFC LW" },
+	{ 0x51, "64GFC SW" },
+	{ 0x50, "64GFC EA" },
+	{ 0x4F, "Reserved" },
+	{ 0x4E, "Reserved" },
+	{ 0x4D, "Reserved" },
+	{ 0x4C, "Reserved" },
+	{ 0x4B, "Reserved" },
+	{ 0x4A, "Reserved" },
+	{ 0x49, "Reserved" },
+	{ 0x48, "Reserved" },
+	{ 0x47, "Reserved" },
+	{ 0x46, "200GBASE-LR4" },
+	{ 0x45, "50GBASE-LR" },
+	{ 0x44, "200G 1550nm PSM4" },
+	{ 0x43, "200GBASE-FR4" },
+	{ 0x42, "50GBASE-FR or 200GBASE-DR4" },
+	{ 0x41, "50GBASE-SR/100GBASE-SR2/200GBASE-SR4" },
+	{ 0x40, "50GBASE-CR/100GBASE-CR2/200GBASE-CR4" },
+	{ 0x3F, "Reserved" },
+	{ 0x3E, "Reserved" },
+	{ 0x3D, "Reserved" },
+	{ 0x3C, "Reserved" },
+	{ 0x3B, "Reserved" },
+	{ 0x3A, "Reserved" },
+	{ 0x39, "Reserved" },
+	{ 0x38, "Reserved" },
+	{ 0x37, "Reserved" },
+	{ 0x36, "Reserved" },
+	{ 0x35, "Reserved" },
+	{ 0x34, "Reserved" },
+	{ 0x33, "50GAUI/100GAUI-2/200GAUI-4 AOC (BER <2.6e-4)" },
+	{ 0x32, "50GAUI/100GAUI-2/200GAUI-4 ACC (BER <2.6e-4)" },
+	{ 0x31, "50GAUI/100GAUI-2/200GAUI-4 AOC (BER <1e-6)" },
+	{ 0x30, "50GAUI/100GAUI-2/200GAUI-4 ACC (BER <1e-6)" },
+	{ 0x2F, "Reserved" },
+	{ 0x2E, "Reserved" },
+	{ 0x2D, "Reserved" },
+	{ 0x2C, "Reserved" },
+	{ 0x2B, "Reserved" },
+	{ 0x2A, "Reserved" },
+	{ 0x29, "Reserved" },
+	{ 0x28, "Reserved" },
+	{ 0x27, "100G-LR" },
+	{ 0x26, "100G-FR" },
+	{ 0x25, "100GBASE-DR" },
+	{ 0x24, "4WDM-40 MSA" },
+	{ 0x23, "4WDM-20 MSA" },
+	{ 0x22, "4WDM-10 MSA" },
+	{ 0x21, "100G PAM4 BiDi" },
+	{ 0x20, "100G SWDM4" },
+	{ 0x1F, "40G SWDM4" },
+	{ 0x1E, "2.5GBASE-T" },
+	{ 0x1D, "5GBASE-T" },
+	{ 0x1C, "10GBASE-T Short Reach" },
+	{ 0x1B, "100G 1550nm WDM" },
+	{ 0x1A, "100GE-DWDM2" },
 	{ 0x19, "100G ACC or 25GAUI C2M ACC" },
 	{ 0x18, "100G AOC or 25GAUI C2M AOC" },
 	{ 0x17, "100G CLR4" },
@@ -198,23 +263,24 @@ static struct _nv eth_extended_comp[] = {
 	{ 0x11, "4 x 10GBASE-SR" },
 	{ 0x10, "40GBASE-ER4" },
 	{ 0x0F, "Reserved" },
-	{ 0x0D, "25GBASE-CR CA-N" },
-	{ 0x0C, "25GBASE-CR CA-S" },
+	{ 0x0E, "Reserved" },
+	{ 0x0D, "25GBASE-CR CA-25G-N" },
+	{ 0x0C, "25GBASE-CR CA-25G-S" },
 	{ 0x0B, "100GBASE-CR4 or 25GBASE-CR CA-L" },
 	{ 0x0A, "Reserved" },
-	{ 0x09, "100G CWDM4 MSA without FEC" },
-	{ 0x08, "100G ACC (Active Copper Cable)" },
+	{ 0x09, "Obsolete" },
+	{ 0x08, "100G ACC (Active Copper Cable) or 25GAUI C2M ACC" },
 	{ 0x07, "100G PSM4 Parallel SMF" },
-	{ 0x06, "100G CWDM4 MSA with FEC" },
+	{ 0x06, "100G CWDM4" },
 	{ 0x05, "100GBASE-SR10" },
-	{ 0x04, "100GBASE-ER4" },
-	{ 0x03, "100GBASE-LR4" },
-	{ 0x02, "100GBASE-SR4" },
-	{ 0x01, "100G AOC (Active Optical Cable) or 25GAUI C2M ACC" },
+	{ 0x04, "100GBASE-ER4 or 25GBASE-ER" },
+	{ 0x03, "100GBASE-LR4 or 25GBASE-LR" },
+	{ 0x02, "100GBASE-SR4 or 25GBASE-SR" },
+	{ 0x01, "100G AOC (Active Optical Cable) or 25GAUI C2M AOC" },
 	{ 0x00, "Unspecified" }
 };
 
-/* SFF-8636 Rev. 2.5 table 6.3: Revision compliance */
+/* SFF-8636 Rev. 2.9 table 6.3: Revision compliance */
 static struct _nv rev_compl[] = {
 	{ 0x1, "SFF-8436 rev <=4.8" },
 	{ 0x2, "SFF-8436 rev <=4.8" },
@@ -222,7 +288,8 @@ static struct _nv rev_compl[] = {
 	{ 0x4, "SFF-8636 rev <=1.4" },
 	{ 0x5, "SFF-8636 rev <=1.5" },
 	{ 0x6, "SFF-8636 rev <=2.0" },
-	{ 0x7, "SFF-8636 rev <=2.5" },
+	{ 0x7, "SFF-8636 rev <=2.7" },
+	{ 0x8, "SFF-8636 rev >=2.8" },
 	{ 0x0, "Unspecified" }
 };
 
@@ -378,17 +445,20 @@ get_sfp_transceiver_class(struct i2c_info *ii, char *buf, size_t size)
 	const char *tech_class;
 	uint8_t code;
 
-	unsigned char qbuf[8];
-	read_i2c(ii, SFF_8472_BASE, SFF_8472_TRANS_START, 8, (uint8_t *)qbuf);
-
-	/* Check 10G Ethernet/IB first */
-	read_i2c(ii, SFF_8472_BASE, SFF_8472_TRANS_START, 1, &code);
-	tech_class = find_zero_bit(eth_10g, code, 1);
-	if (tech_class == NULL) {
-		/* No match. Try Ethernet 1G */
-		read_i2c(ii, SFF_8472_BASE, SFF_8472_TRANS_START + 3,
-		    1, (caddr_t)&code);
-		tech_class = find_zero_bit(eth_compat, code, 1);
+	/* Use extended compliance code if it's valid */
+	read_i2c(ii, SFF_8472_BASE, SFF_8472_TRANS, 1, &code);
+	if (code != 0)
+		tech_class = find_value(eth_extended_comp, code);
+	else {
+		/* Next, check 10G Ethernet/IB CCs */
+		read_i2c(ii, SFF_8472_BASE, SFF_8472_TRANS_START, 1, &code);
+		tech_class = find_zero_bit(eth_10g, code, 1);
+		if (tech_class == NULL) {
+			/* No match. Try Ethernet 1G */
+			read_i2c(ii, SFF_8472_BASE, SFF_8472_TRANS_START + 3,
+			    1, (caddr_t)&code);
+			tech_class = find_zero_bit(eth_compat, code, 1);
+		}
 	}
 
 	if (tech_class == NULL)

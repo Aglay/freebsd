@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -528,25 +528,30 @@ AcpiDmFieldPredefinedDescription (
     /* Major cheat: We previously put the Tag ptr in the Node field */
 
     Tag = ACPI_CAST_PTR (char, IndexOp->Common.Node);
-    if (!Tag)
+    if (!Tag || (*Tag == 0))
     {
         return;
     }
 
-    /* Match the name in the info table */
+    /* Is the tag a predefined name? */
 
     Info = AcpiAhMatchPredefinedName (Tag);
-    if (Info)
+    if (!Info)
     {
-        AcpiOsPrintf ("  // %4.4s: %s", Tag,
-            ACPI_CAST_PTR (char, Info->Description));
+        /* Not a predefined name (does not start with underscore) */
+
+        return;
     }
 
-    /* AML buffer (String) was allocated in AcpiGetTagPathname */
+    AcpiOsPrintf ("  // %4.4s: %s", Tag,
+        ACPI_CAST_PTR (char, Info->Description));
+
+    /* String contains the prefix path, free it */
 
     ACPI_FREE (IndexOp->Common.Value.String);
-
+    IndexOp->Common.Value.String = NULL;
 #endif
+
     return;
 }
 

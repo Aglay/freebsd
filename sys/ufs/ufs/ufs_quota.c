@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1990, 1993, 1995
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -157,6 +159,7 @@ chkdq(struct inode *ip, ufs2_daddr_t change, struct ucred *cred, int flags)
 	struct vnode *vp = ITOV(ip);
 	int i, error, warn, do_check;
 
+	MPASS(cred != NOCRED || (flags & FORCE) != 0);
 	/*
 	 * Disk quotas must be turned off for system files.  Currently
 	 * snapshot and quota files.
@@ -193,7 +196,7 @@ chkdq(struct inode *ip, ufs2_daddr_t change, struct ucred *cred, int flags)
 		return (0);
 	}
 	if ((flags & FORCE) == 0 &&
-	    priv_check_cred(cred, PRIV_VFS_EXCEEDQUOTA, 0))
+	    priv_check_cred(cred, PRIV_VFS_EXCEEDQUOTA))
 		do_check = 1;
 	else
 		do_check = 0;
@@ -309,6 +312,7 @@ chkiq(struct inode *ip, int change, struct ucred *cred, int flags)
 	struct dquot *dq;
 	int i, error, warn, do_check;
 
+	MPASS(cred != NOCRED || (flags & FORCE) != 0);
 #ifdef DIAGNOSTIC
 	if ((flags & CHOWN) == 0)
 		chkdquot(ip);
@@ -332,7 +336,7 @@ chkiq(struct inode *ip, int change, struct ucred *cred, int flags)
 		return (0);
 	}
 	if ((flags & FORCE) == 0 &&
-	    priv_check_cred(cred, PRIV_VFS_EXCEEDQUOTA, 0))
+	    priv_check_cred(cred, PRIV_VFS_EXCEEDQUOTA))
 		do_check = 1;
 	else
 		do_check = 0;
@@ -531,7 +535,7 @@ quotaon(struct thread *td, struct mount *mp, int type, void *fname)
 		}
 	}
 	if (error != 0) {
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		(void) vn_close(vp, FREAD|FWRITE, td->td_ucred, td);
 		return (error);
 	}
@@ -539,7 +543,7 @@ quotaon(struct thread *td, struct mount *mp, int type, void *fname)
 	UFS_LOCK(ump);
 	if ((ump->um_qflags[type] & (QTF_OPENING|QTF_CLOSING)) != 0) {
 		UFS_UNLOCK(ump);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		(void) vn_close(vp, FREAD|FWRITE, td->td_ucred, td);
 		vfs_unbusy(mp);
 		return (EALREADY);
@@ -547,7 +551,7 @@ quotaon(struct thread *td, struct mount *mp, int type, void *fname)
 	ump->um_qflags[type] |= QTF_OPENING|QTF_CLOSING;
 	UFS_UNLOCK(ump);
 	if ((error = dqopen(vp, ump, type)) != 0) {
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		UFS_LOCK(ump);
 		ump->um_qflags[type] &= ~(QTF_OPENING|QTF_CLOSING);
 		UFS_UNLOCK(ump);
@@ -555,7 +559,7 @@ quotaon(struct thread *td, struct mount *mp, int type, void *fname)
 		vfs_unbusy(mp);
 		return (error);
 	}
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 	MNT_ILOCK(mp);
 	mp->mnt_flag |= MNT_QUOTA;
 	MNT_IUNLOCK(mp);
@@ -579,7 +583,7 @@ quotaon(struct thread *td, struct mount *mp, int type, void *fname)
 	vp->v_vflag |= VV_SYSTEM;
 	VN_LOCK_AREC(vp);
 	VN_LOCK_DSHARE(vp);
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 	*vpp = vp;
 	/*
 	 * Save the credential of the process that turned on quotas.
@@ -613,13 +617,13 @@ again:
 			MNT_VNODE_FOREACH_ALL_ABORT(mp, mvp);
 			goto again;
 		}
-		if (vp->v_type == VNON || vp->v_writecount == 0) {
-			VOP_UNLOCK(vp, 0);
+		if (vp->v_type == VNON || vp->v_writecount <= 0) {
+			VOP_UNLOCK(vp);
 			vrele(vp);
 			continue;
 		}
 		error = getinoquota(VTOI(vp));
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		vrele(vp);
 		if (error) {
 			MNT_VNODE_FOREACH_ALL_ABORT(mp, mvp);
@@ -684,7 +688,7 @@ again:
 		dq = ip->i_dquot[type];
 		ip->i_dquot[type] = NODQUOT;
 		dqrele(vp, dq);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		vrele(vp);
 	}
 
@@ -703,10 +707,38 @@ again:
 
 	vn_lock(qvp, LK_EXCLUSIVE | LK_RETRY);
 	qvp->v_vflag &= ~VV_SYSTEM;
-	VOP_UNLOCK(qvp, 0);
+	VOP_UNLOCK(qvp);
 	error = vn_close(qvp, FREAD|FWRITE, td->td_ucred, td);
 	crfree(cr);
 
+	return (error);
+}
+
+static int
+quotaoff_inchange1(struct thread *td, struct mount *mp, int type)
+{
+	int error;
+	bool need_resume;
+
+	/*
+	 * mp is already suspended on unmount.  If not, suspend it, to
+	 * avoid the situation where quotaoff operation eventually
+	 * failing due to SU structures still keeping references on
+	 * dquots, but vnode's references are already clean.  This
+	 * would cause quota accounting leak and asserts otherwise.
+	 * Note that the thread has already called vn_start_write().
+	 */
+	if (mp->mnt_susp_owner == td) {
+		need_resume = false;
+	} else {
+		error = vfs_write_suspend_umnt(mp);
+		if (error != 0)
+			return (error);
+		need_resume = true;
+	}
+	error = quotaoff1(td, mp, type);
+	if (need_resume)
+		vfs_write_resume(mp, VR_START_WRITE);
 	return (error);
 }
 
@@ -719,10 +751,9 @@ int
 quotaoff_inchange(struct thread *td, struct mount *mp, int type)
 {
 	struct ufsmount *ump;
-	int i;
-	int error;
+	int error, i;
 
-	error = quotaoff1(td, mp, type);
+	error = quotaoff_inchange1(td, mp, type);
 
 	ump = VFSTOUFS(mp);
 	UFS_LOCK(ump);

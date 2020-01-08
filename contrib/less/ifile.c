@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2019  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -24,14 +24,16 @@
 extern IFILE	curr_ifile;
 
 struct ifile {
-	struct ifile *h_next;		/* Links for command line list */
+	struct ifile *h_next;           /* Links for command line list */
 	struct ifile *h_prev;
-	char *h_filename;		/* Name of the file */
-	void *h_filestate;		/* File state (used in ch.c) */
-	int h_index;			/* Index within command line list */
-	int h_hold;			/* Hold count */
-	char h_opened;			/* Has this ifile been opened? */
-	struct scrpos h_scrpos;		/* Saved position within the file */
+	char *h_filename;               /* Name of the file */
+	void *h_filestate;              /* File state (used in ch.c) */
+	int h_index;                    /* Index within command line list */
+	int h_hold;                     /* Hold count */
+	char h_opened;                  /* Has this ifile been opened? */
+	struct scrpos h_scrpos;         /* Saved position within the file */
+	void *h_altpipe;                /* Alt pipe */
+	char *h_altfilename;            /* Alt filename */
 };
 
 /*
@@ -119,6 +121,12 @@ new_ifile(filename, prev)
 	p->h_hold = 0;
 	p->h_filestate = NULL;
 	link_ifile(p, prev);
+	/*
+	 * {{ It's dodgy to call mark.c functions from here;
+	 *    there is potentially dangerous recursion.
+	 *    Probably need to revisit this design. }}
+	 */
+	mark_check_ifile(ext_ifile(p));
 	return (p);
 }
 
@@ -196,7 +204,7 @@ getoff_ifile(ifile)
  * Return the number of ifiles.
  */
 	public int
-nifile()
+nifile(VOID_PARAM)
 {
 	return (ifiles);
 }
@@ -209,11 +217,26 @@ find_ifile(filename)
 	char *filename;
 {
 	struct ifile *p;
+	char *rfilename = lrealpath(filename);
 
 	for (p = anchor.h_next;  p != &anchor;  p = p->h_next)
-		if (strcmp(filename, p->h_filename) == 0)
-			return (p);
-	return (NULL);
+	{
+		if (strcmp(filename, p->h_filename) == 0 ||
+		    strcmp(rfilename, p->h_filename) == 0)
+		{
+			/*
+			 * If given name is shorter than the name we were
+			 * previously using for this file, adopt shorter name.
+			 */
+			if (strlen(filename) < strlen(p->h_filename))
+				strcpy(p->h_filename, filename);
+			break;
+		}
+	}
+	free(rfilename);
+	if (p == &anchor)
+		p = NULL;
+	return (p);
 }
 
 /*
@@ -328,9 +351,42 @@ set_filestate(ifile, filestate)
 	int_ifile(ifile)->h_filestate = filestate;
 }
 
+	public void
+set_altpipe(ifile, p)
+	IFILE ifile;
+	void *p;
+{
+	int_ifile(ifile)->h_altpipe = p;
+}
+
+	public void *
+get_altpipe(ifile)
+	IFILE ifile;
+{
+	return (int_ifile(ifile)->h_altpipe);
+}
+
+	public void
+set_altfilename(ifile, altfilename)
+	IFILE ifile;
+	char *altfilename;
+{
+	struct ifile *p = int_ifile(ifile);
+	if (p->h_altfilename != NULL)
+		free(p->h_altfilename);
+	p->h_altfilename = altfilename;
+}
+
+	public char *
+get_altfilename(ifile)
+	IFILE ifile;
+{
+	return (int_ifile(ifile)->h_altfilename);
+}
+
 #if 0
 	public void
-if_dump()
+if_dump(VOID_PARAM)
 {
 	struct ifile *p;
 

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2003 Marcel Moolenaar
  * All rights reserved.
  *
@@ -445,7 +447,7 @@ uart_intr(void *arg)
 
 	if (sc->sc_polled) {
 		callout_reset(&sc->sc_timer, hz / uart_poll_freq,
-		    (timeout_t *)uart_intr, sc);
+		    (callout_func_t *)uart_intr, sc);
 	}
 
 	return ((cnt == 0) ? FILTER_STRAY :
@@ -491,7 +493,7 @@ uart_bus_sysdev(device_t dev)
 }
 
 int
-uart_bus_probe(device_t dev, int regshft, int regiowidth, int rclk, int rid, int chan)
+uart_bus_probe(device_t dev, int regshft, int regiowidth, int rclk, int rid, int chan, int quirks)
 {
 	struct uart_softc *sc;
 	struct uart_devinfo *sysdev;
@@ -551,6 +553,7 @@ uart_bus_probe(device_t dev, int regshft, int regiowidth, int rclk, int rid, int
 	sc->sc_bas.regshft = regshft;
 	sc->sc_bas.regiowidth = regiowidth;
 	sc->sc_bas.rclk = (rclk == 0) ? sc->sc_class->uc_rclk : rclk;
+	sc->sc_bas.busy_detect = !!(quirks & UART_F_BUSY_DETECT);
 
 	SLIST_FOREACH(sysdev, &uart_sysdevs, next) {
 		if (chan == sysdev->bas.chan &&
@@ -709,7 +712,7 @@ uart_bus_attach(device_t dev)
 		sc->sc_polled = 1;
 		callout_init(&sc->sc_timer, 1);
 		callout_reset(&sc->sc_timer, hz / uart_poll_freq,
-		    (timeout_t *)uart_intr, sc);
+		    (callout_func_t *)uart_intr, sc);
 	}
 
 	if (bootverbose && (sc->sc_fastintr || sc->sc_polled)) {

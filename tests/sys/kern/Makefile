@@ -5,27 +5,41 @@ TESTSRC=	${SRCTOP}/contrib/netbsd-tests/kernel
 
 TESTSDIR=	${TESTSBASE}/sys/kern
 
+#ATF_TESTS_C+=	kcov
 ATF_TESTS_C+=	kern_copyin
 ATF_TESTS_C+=	kern_descrip_test
+ATF_TESTS_C+=	kill_zombie
+ATF_TESTS_C+=	memfd_test
 ATF_TESTS_C+=	ptrace_test
 TEST_METADATA.ptrace_test+=		timeout="15"
 ATF_TESTS_C+=	reaper
+ATF_TESTS_C+=	sigaltstack
 PLAIN_TESTS_C+=	subr_unit_test
-ATF_TESTS_C+=	unix_seqpacket_test
+ATF_TESTS_C+=	sys_getrandom
 ATF_TESTS_C+=	unix_passfd_test
+ATF_TESTS_C+=	unix_seqpacket_test
 TEST_METADATA.unix_seqpacket_test+=	timeout="15"
+ATF_TESTS_C+=	unix_socketpair_test
 ATF_TESTS_C+=	waitpid_nohang
+ATF_TESTS_C+=	pdeathsig
 
 ATF_TESTS_SH+=	coredump_phnum_test
 
 BINDIR=		${TESTSDIR}
 PROGS+=		coredump_phnum_helper
+PROGS+=		pdeathsig_helper
 
+CFLAGS.sys_getrandom+=			-I${SRCTOP}/sys/contrib/zstd/lib
+LIBADD.sys_getrandom+=			zstd
+LIBADD.sys_getrandom+=			c
+LIBADD.sys_getrandom+=			pthread
 LIBADD.ptrace_test+=			pthread
 LIBADD.unix_seqpacket_test+=		pthread
+LIBADD.kcov+=				pthread
 
 NETBSD_ATF_TESTS_C+=	lockf_test
 NETBSD_ATF_TESTS_C+=	mqueue_test
+NETBSD_ATF_TESTS_C+=	sysv_test
 
 CFLAGS.mqueue_test+=	-I${SRCTOP}/tests
 LIBADD.mqueue_test+=	rt
@@ -34,7 +48,6 @@ LIBADD.mqueue_test+=	rt
     ${MACHINE_ARCH} == "i386" || \
     ${MACHINE_ARCH} == "aarch64"
 ATF_TESTS_C+=	libkern_crc32
-CFLAGS.libkern_crc32+=	-DUSERSPACE_TESTING
 .if ${MACHINE_ARCH} == "amd64" || ${MACHINE_ARCH} == "i386"
 LDADD.libkern_crc32+=	${SRCTOP}/sys/libkern/x86/crc32_sse42.c
 .else

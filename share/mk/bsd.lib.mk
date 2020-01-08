@@ -3,6 +3,8 @@
 #
 
 .include <bsd.init.mk>
+.include <bsd.compiler.mk>
+.include <bsd.linker.mk>
 
 .if defined(LIB_CXX) || defined(SHLIB_CXX)
 _LD=	${CXX}
@@ -21,9 +23,11 @@ LIB_PRIVATE=	${PRIVATELIB:Dprivate}
 # SHLIB_NAME will be defined only if we are to create a shared library.
 # SHLIB_LINK will be defined only if we are to create a link to it.
 # INSTALL_PIC_ARCHIVE will be defined only if we are to create a PIC archive.
+# BUILD_NOSSP_PIC_ARCHIVE will be defined only if we are to create a PIC archive.
 .if defined(NO_PIC)
 .undef SHLIB_NAME
 .undef INSTALL_PIC_ARCHIVE
+.undef BUILD_NOSSP_PIC_ARCHIVE
 .else
 .if !defined(SHLIB) && defined(LIB)
 SHLIB=		${LIB}
@@ -62,29 +66,53 @@ TAGS+=	lib32
 
 .if defined(NO_ROOT)
 .if !defined(TAGS) || ! ${TAGS:Mpackage=*}
-TAGS+=		package=${PACKAGE:Uruntime}
+TAGS+=		package=${PACKAGE:Uutilities}
 .endif
 TAG_ARGS=	-T ${TAGS:[*]:S/ /,/g}
 .endif
 
+# ELF hardening knobs
+.if ${MK_BIND_NOW} != "no"
+LDFLAGS+= -Wl,-znow
+.endif
+.if ${MK_RETPOLINE} != "no"
+.if ${COMPILER_FEATURES:Mretpoline} && ${LINKER_FEATURES:Mretpoline}
+CFLAGS+= -mretpoline
+CXXFLAGS+= -mretpoline
+LDFLAGS+= -Wl,-zretpolineplt
+.else
+.warning Retpoline requested but not supported by compiler or linker
+.endif
+.endif
+
 .if ${MK_DEBUG_FILES} != "no" && empty(DEBUG_FLAGS:M-g) && \
     empty(DEBUG_FLAGS:M-gdwarf*)
-SHARED_CFLAGS+= -g
-SHARED_CXXFLAGS+= -g
+CFLAGS+= ${DEBUG_FILES_CFLAGS}
+CXXFLAGS+= ${DEBUG_FILES_CFLAGS}
 CTFFLAGS+= -g
+.endif
+
+# clang currently defaults to dynamic TLS for mips64 object files without -fPIC
+.if ${MACHINE_ARCH:Mmips64*} && ${COMPILER_TYPE} == "clang"
+STATIC_CFLAGS+= -ftls-model=initial-exec
+STATIC_CXXFLAGS+= -ftls-model=initial-exec
 .endif
 
 .include <bsd.libnames.mk>
 
 # prefer .s to a .c, add .po, remove stuff not used in the BSD libraries
 # .pico used for PIC object files
-.SUFFIXES: .out .o .bc .ll .po .pico .S .asm .s .c .cc .cpp .cxx .C .f .y .l .ln
+# .nossppico used for NOSSP PIC object files
+# .pieo used for PIE object files
+.SUFFIXES: .out .o .bc .ll .po .pico .nossppico .pieo .S .asm .s .c .cc .cpp .cxx .C .f .y .l .ln
 
 .if !defined(PICFLAG)
 .if ${MACHINE_CPUARCH} == "sparc64"
 PICFLAG=-fPIC
+PIEFLAG=-fPIE
 .else
 PICFLAG=-fpic
+PIEFLAG=-fpie
 .endif
 .endif
 
@@ -98,11 +126,25 @@ PO_FLAG=-pg
 	${CC} ${PICFLAG} -DPIC ${SHARED_CFLAGS} ${CFLAGS} -c ${.IMPSRC} -o ${.TARGET}
 	${CTFCONVERT_CMD}
 
+.c.nossppico:
+	${CC} ${PICFLAG} -DPIC ${SHARED_CFLAGS:C/^-fstack-protector.*$//} ${CFLAGS:C/^-fstack-protector.*$//} -c ${.IMPSRC} -o ${.TARGET}
+	${CTFCONVERT_CMD}
+
+.c.pieo:
+	${CC} ${PIEFLAG} -DPIC ${SHARED_CFLAGS} ${CFLAGS} -c ${.IMPSRC} -o ${.TARGET}
+	${CTFCONVERT_CMD}
+
 .cc.po .C.po .cpp.po .cxx.po:
 	${CXX} ${PO_FLAG} ${STATIC_CXXFLAGS} ${PO_CXXFLAGS} -c ${.IMPSRC} -o ${.TARGET}
 
 .cc.pico .C.pico .cpp.pico .cxx.pico:
 	${CXX} ${PICFLAG} -DPIC ${SHARED_CXXFLAGS} ${CXXFLAGS} -c ${.IMPSRC} -o ${.TARGET}
+
+.cc.nossppico .C.nossppico .cpp.nossppico .cxx.nossppico:
+	${CXX} ${PICFLAG} -DPIC ${SHARED_CXXFLAGS:C/^-fstack-protector.*$//} ${CXXFLAGS:C/^-fstack-protector.*$//} -c ${.IMPSRC} -o ${.TARGET}
+
+.cc.pieo .C.pieo .cpp.pieo .cxx.pieo:
+	${CXX} ${PIEFLAG} ${SHARED_CXXFLAGS} ${CXXFLAGS} -c ${.IMPSRC} -o ${.TARGET}
 
 .f.po:
 	${FC} -pg ${FFLAGS} -o ${.TARGET} -c ${.IMPSRC}
@@ -112,7 +154,11 @@ PO_FLAG=-pg
 	${FC} ${PICFLAG} -DPIC ${FFLAGS} -o ${.TARGET} -c ${.IMPSRC}
 	${CTFCONVERT_CMD}
 
-.s.po .s.pico:
+.f.nossppico:
+	${FC} ${PICFLAG} -DPIC ${FFLAGS:C/^-fstack-protector.*$//} -o ${.TARGET} -c ${.IMPSRC}
+	${CTFCONVERT_CMD}
+
+.s.po .s.pico .s.nossppico .s.pieo:
 	${AS} ${AFLAGS} -o ${.TARGET} ${.IMPSRC}
 	${CTFCONVERT_CMD}
 
@@ -126,6 +172,16 @@ PO_FLAG=-pg
 	    ${CFLAGS} ${ACFLAGS} -c ${.IMPSRC} -o ${.TARGET}
 	${CTFCONVERT_CMD}
 
+.asm.nossppico:
+	${CC:N${CCACHE_BIN}} -x assembler-with-cpp ${PICFLAG} -DPIC \
+	    ${CFLAGS:C/^-fstack-protector.*$//} ${ACFLAGS} -c ${.IMPSRC} -o ${.TARGET}
+	${CTFCONVERT_CMD}
+
+.asm.pieo:
+	${CC:N${CCACHE_BIN}} -x assembler-with-cpp ${PIEFLAG} -DPIC \
+	    ${CFLAGS} ${ACFLAGS} -c ${.IMPSRC} -o ${.TARGET}
+	${CTFCONVERT_CMD}
+
 .S.po:
 	${CC:N${CCACHE_BIN}} -DPROF ${PO_CFLAGS} ${ACFLAGS} -c ${.IMPSRC} \
 	    -o ${.TARGET}
@@ -133,6 +189,16 @@ PO_FLAG=-pg
 
 .S.pico:
 	${CC:N${CCACHE_BIN}} ${PICFLAG} -DPIC ${CFLAGS} ${ACFLAGS} \
+	    -c ${.IMPSRC} -o ${.TARGET}
+	${CTFCONVERT_CMD}
+
+.S.nossppico:
+	${CC:N${CCACHE_BIN}} ${PICFLAG} -DPIC ${CFLAGS:C/^-fstack-protector.*$//} ${ACFLAGS} \
+	    -c ${.IMPSRC} -o ${.TARGET}
+	${CTFCONVERT_CMD}
+
+.S.pieo:
+	${CC:N${CCACHE_BIN}} ${PIEFLAG} -DPIC ${CFLAGS} ${ACFLAGS} \
 	    -c ${.IMPSRC} -o ${.TARGET}
 	${CTFCONVERT_CMD}
 
@@ -168,8 +234,10 @@ LDFLAGS+=	-Wl,--version-script=${VERSION_MAP}
 .endif
 
 .if defined(LIB) && !empty(LIB) || defined(SHLIB_NAME)
-OBJS+=		${SRCS:N*.h:R:S/$/.o/}
-CLEANFILES+=	${OBJS} ${STATICOBJS}
+OBJS+=		${SRCS:N*.h:${OBJS_SRCS_FILTER:ts:}:S/$/.o/}
+BCOBJS+=	${SRCS:N*.[hsS]:N*.asm:${OBJS_SRCS_FILTER:ts:}:S/$/.bco/g}
+LLOBJS+=	${SRCS:N*.[hsS]:N*.asm:${OBJS_SRCS_FILTER:ts:}:S/$/.llo/g}
+CLEANFILES+=	${OBJS} ${BCOBJS} ${LLOBJS} ${STATICOBJS}
 .endif
 
 .if defined(LIB) && !empty(LIB)
@@ -200,15 +268,13 @@ lib${LIB_PRIVATE}${LIB}_p.a: ${POBJS}
 .endif
 
 .if defined(LLVM_LINK)
-BCOBJS=		${OBJS:.o=.bco} ${STATICOBJS:.o=.bco}
-LLOBJS=		${OBJS:.o=.llo} ${STATICOBJS:.o=.llo}
-CLEANFILES+=	${BCOBJS} ${LLOBJS}
-
 lib${LIB_PRIVATE}${LIB}.bc: ${BCOBJS}
 	${LLVM_LINK} -o ${.TARGET} ${BCOBJS}
 
 lib${LIB_PRIVATE}${LIB}.ll: ${LLOBJS}
 	${LLVM_LINK} -S -o ${.TARGET} ${LLOBJS}
+
+CLEANFILES+=	lib${LIB_PRIVATE}${LIB}.bc lib${LIB_PRIVATE}${LIB}.ll
 .endif
 
 .if defined(SHLIB_NAME) || \
@@ -221,6 +287,10 @@ CLEANFILES+=	${SOBJS}
 .if defined(SHLIB_NAME)
 _LIBS+=		${SHLIB_NAME}
 
+.if ${CFLAGS:M-fexceptions} || defined(SHLIB_CXX) || defined(LIB_CXX)
+ALLOW_MIPS_SHARED_TEXTREL=
+.endif
+
 SOLINKOPTS+=	-shared -Wl,-x
 .if defined(LD_FATAL_WARNINGS) && ${LD_FATAL_WARNINGS} == "no"
 SOLINKOPTS+=	-Wl,--no-fatal-warnings
@@ -228,6 +298,15 @@ SOLINKOPTS+=	-Wl,--no-fatal-warnings
 SOLINKOPTS+=	-Wl,--fatal-warnings
 .endif
 SOLINKOPTS+=	-Wl,--warn-shared-textrel
+
+.if defined(ALLOW_MIPS_SHARED_TEXTREL) && ${MACHINE_CPUARCH:Mmips}
+# Check if we should be defining ALLOW_SHARED_TEXTREL... basically, C++
+# or -fexceptions in CFLAGS on MIPS.  This works around clang/lld attempting
+# to generate text relocations in read-only .eh_frame.  A future version of
+# clang/lld should instead transform them into relative references at link
+# time, and then we can stop doing this.
+SOLINKOPTS+=	-Wl,-z,notext
+.endif
 
 .if target(beforelinking)
 beforelinking: ${SOBJS}
@@ -251,7 +330,7 @@ ${SHLIB_NAME_FULL}: ${SOBJS}
 	@${ECHO} building shared library ${SHLIB_NAME}
 	@rm -f ${SHLIB_NAME} ${SHLIB_LINK}
 .if defined(SHLIB_LINK) && !commands(${SHLIB_LINK:R}.ld) && ${MK_DEBUG_FILES} == "no"
-	@${INSTALL_SYMLINK} ${TAG_ARGS:D${TAG_ARGS},development} ${SHLIB_NAME} ${SHLIB_LINK}
+	@${INSTALL_LIBSYMLINK} ${TAG_ARGS:D${TAG_ARGS},development} ${SHLIB_NAME} ${SHLIB_LINK}
 .endif
 	${_LD:N${CCACHE_BIN}} ${LDFLAGS} ${SSP_CFLAGS} ${SOLINKOPTS} \
 	    -o ${.TARGET} -Wl,-soname,${SONAME} \
@@ -267,7 +346,7 @@ ${SHLIB_NAME}: ${SHLIB_NAME_FULL} ${SHLIB_NAME}.debug
 	${OBJCOPY} --strip-debug --add-gnu-debuglink=${SHLIB_NAME}.debug \
 	    ${SHLIB_NAME_FULL} ${.TARGET}
 .if defined(SHLIB_LINK) && !commands(${SHLIB_LINK:R}.ld)
-	@${INSTALL_SYMLINK} ${TAG_ARGS:D${TAG_ARGS},development} ${SHLIB_NAME} ${SHLIB_LINK}
+	@${INSTALL_LIBSYMLINK} ${TAG_ARGS:D${TAG_ARGS},development} ${SHLIB_NAME} ${SHLIB_LINK}
 .endif
 
 ${SHLIB_NAME}.debug: ${SHLIB_NAME_FULL}
@@ -285,19 +364,34 @@ lib${LIB_PRIVATE}${LIB}_pic.a: ${SOBJS}
 	${RANLIB} ${RANLIBFLAGS} ${.TARGET}
 .endif
 
-.if defined(WANT_LINT) && !defined(NO_LINT) && defined(LIB) && !empty(LIB)
-LINTLIB=	llib-l${LIB}.ln
-_LIBS+=		${LINTLIB}
-LINTOBJS+=	${SRCS:M*.c:.c=.ln}
-CLEANFILES+=	${LINTOBJS}
+.if defined(BUILD_NOSSP_PIC_ARCHIVE) && defined(LIB) && !empty(LIB)
+NOSSPSOBJS+=	${OBJS:.o=.nossppico}
+DEPENDOBJS+=	${NOSSPSOBJS}
+CLEANFILES+=	${NOSSPSOBJS}
+_LIBS+=		lib${LIB_PRIVATE}${LIB}_nossp_pic.a
 
-${LINTLIB}: ${LINTOBJS}
-	@${ECHO} building lint library ${.TARGET}
+lib${LIB_PRIVATE}${LIB}_nossp_pic.a: ${NOSSPSOBJS}
+	@${ECHO} building special nossp pic ${LIB} library
 	@rm -f ${.TARGET}
-	${LINT} ${LINTLIBFLAGS} ${CFLAGS:M-[DIU]*} ${.ALLSRC}
+	${AR} ${ARFLAGS} ${.TARGET} ${NOSSPSOBJS} ${ARADD}
+	${RANLIB} ${RANLIBFLAGS} ${.TARGET}
 .endif
 
 .endif # !defined(INTERNALLIB)
+
+.if defined(INTERNALLIB) && ${MK_PIE} != "no"
+PIEOBJS+=	${OBJS:.o=.pieo}
+DEPENDOBJS+=	${PIEOBJS}
+CLEANFILES+=	${PIEOBJS}
+
+_LIBS+=		lib${LIB_PRIVATE}${LIB}_pie.a
+
+lib${LIB_PRIVATE}${LIB}_pie.a: ${PIEOBJS}
+	@${ECHO} building pie ${LIB} library
+	@rm -f ${.TARGET}
+	${AR} ${ARFLAGS} ${.TARGET} ${PIEOBJS} ${ARADD}
+	${RANLIB} ${RANLIBFLAGS} ${.TARGET}
+.endif
 
 .if defined(_SKIP_BUILD)
 all:
@@ -326,6 +420,11 @@ _EXTRADEPEND:
 .if !defined(NO_FSCHG)
 SHLINSTALLFLAGS+= -fschg
 .endif
+.endif
+# Install libraries with -S to avoid risk of modifying in-use libraries when
+# installing to a running system.  It is safe to avoid this for NO_ROOT builds
+# that are only creating an image.
+.if !defined(NO_SAFE_LIBINSTALL) && !defined(NO_ROOT)
 SHLINSTALLFLAGS+= -S
 .endif
 
@@ -368,7 +467,7 @@ _libinstall:
 	    ${_INSTALLFLAGS} ${SHLIB_LINK:R}.ld \
 	    ${DESTDIR}${_LIBDIR}/${SHLIB_LINK}
 .for _SHLIB_LINK_LINK in ${SHLIB_LDSCRIPT_LINKS}
-	${INSTALL_SYMLINK} ${SHLIB_LINK} ${DESTDIR}${_LIBDIR}/${_SHLIB_LINK_LINK}
+	${INSTALL_LIBSYMLINK} ${TAG_ARGS} ${SHLIB_LINK} ${DESTDIR}${_LIBDIR}/${_SHLIB_LINK_LINK}
 .endfor
 .else
 .if ${_SHLIBDIR} == ${_LIBDIR}
@@ -398,19 +497,20 @@ _libinstall:
 	${INSTALL} ${TAG_ARGS:D${TAG_ARGS},development} -o ${LIBOWN} -g ${LIBGRP} -m ${LIBMODE} \
 	    ${_INSTALLFLAGS} lib${LIB}_pic.a ${DESTDIR}${_LIBDIR}/
 .endif
-.if defined(WANT_LINT) && !defined(NO_LINT) && defined(LIB) && !empty(LIB)
-	${INSTALL} ${TAG_ARGS:D${TAG_ARGS},development} -o ${LIBOWN} -g ${LIBGRP} -m ${LIBMODE} \
-	    ${_INSTALLFLAGS} ${LINTLIB} ${DESTDIR}${LINTLIBDIR}/
-.endif
 .endif # !defined(INTERNALLIB)
 
 .if !defined(LIBRARIES_ONLY)
 .include <bsd.nls.mk>
+.include <bsd.confs.mk>
 .include <bsd.files.mk>
 .include <bsd.incs.mk>
-.include <bsd.confs.mk>
 .endif
 
+LINKOWN?=	${LIBOWN}
+LINKGRP?=	${LIBGRP}
+LINKMODE?=	${LIBMODE}
+SYMLINKOWN?=	${LIBOWN}
+SYMLINKGRP?=	${LIBGRP}
 .include <bsd.links.mk>
 
 .if ${MK_MAN} != "no" && !defined(LIBRARIES_ONLY)
@@ -420,11 +520,6 @@ realinstall: maninstall
 
 .endif
 
-.if !target(lint)
-lint: ${SRCS:M*.c}
-	${LINT} ${LINTFLAGS} ${CFLAGS:M-[DIU]*} ${.ALLSRC}
-.endif
-
 .if ${MK_MAN} != "no" && !defined(LIBRARIES_ONLY)
 .include <bsd.man.mk>
 .endif
@@ -432,14 +527,25 @@ lint: ${SRCS:M*.c}
 .if defined(LIB) && !empty(LIB)
 OBJS_DEPEND_GUESS+= ${SRCS:M*.h}
 .for _S in ${SRCS:N*.[hly]}
-OBJS_DEPEND_GUESS.${_S:R}.po+=	${_S}
+OBJS_DEPEND_GUESS.${_S:${OBJS_SRCS_FILTER:ts:}}.po+=	${_S}
 .endfor
 .endif
 .if defined(SHLIB_NAME) || \
     defined(INSTALL_PIC_ARCHIVE) && defined(LIB) && !empty(LIB)
 .for _S in ${SRCS:N*.[hly]}
-OBJS_DEPEND_GUESS.${_S:R}.pico+=	${_S}
+OBJS_DEPEND_GUESS.${_S:${OBJS_SRCS_FILTER:ts:}}.pico+=	${_S}
 .endfor
+.endif
+.if defined(BUILD_NOSSP_PIC_ARCHIVE) && defined(LIB) && !empty(LIB)
+.for _S in ${SRCS:N*.[hly]}
+OBJS_DEPEND_GUESS.${_S:${OBJS_SRCS_FILTER:ts:}}.nossppico+=	${_S}
+.endfor
+.endif
+
+.if defined(HAS_TESTS)
+MAKE+=			MK_MAKE_CHECK_USE_SANDBOX=yes
+SUBDIR_TARGETS+=	check
+TESTS_LD_LIBRARY_PATH+=	${.OBJDIR}
 .endif
 
 .include <bsd.dep.mk>

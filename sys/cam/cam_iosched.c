@@ -1,8 +1,9 @@
 /*-
  * CAM IO Scheduler Interface
  *
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2015 Netflix, Inc.
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -130,13 +131,13 @@ typedef int l_tick_t(struct iop_stats *);
 
 /*
  * Called to see if the limiter thinks this IOP can be allowed to
- * proceed. If so, the limiter assumes that the while IOP proceeded
+ * proceed. If so, the limiter assumes that the IOP proceeded
  * and makes any accounting of it that's needed.
  */
 typedef int l_iop_t(struct iop_stats *, struct bio *);
 
 /*
- * Called when an I/O completes so the limiter can updates its
+ * Called when an I/O completes so the limiter can update its
  * accounting. Pending I/Os may complete in any order (even when
  * sent to the hardware at the same time), so the limiter may not
  * make any assumptions other than this I/O has completed. If it
@@ -221,6 +222,7 @@ struct iop_stats {
 	int		total;		/* Total for all time -- wraps */
 	int		in;		/* number queued all time -- wraps */
 	int		out;		/* number completed all time -- wraps */
+	int		errs;		/* Number of I/Os completed with error --  wraps */
 
 	/*
 	 * Statistics on different bits of the process.
@@ -233,7 +235,7 @@ struct iop_stats {
 	uint32_t	state_flags;
 #define IOP_RATE_LIMITED		1u
 
-#define LAT_BUCKETS 12			/* < 1ms < 2ms ... 512ms < 1024ms > 1024ms */
+#define LAT_BUCKETS 15			/* < 1ms < 2ms ... < 2^(n-1)ms >= 2^(n-1)ms*/
 	uint64_t	latencies[LAT_BUCKETS];
 
 	struct cam_iosched_softc *softc;
@@ -275,6 +277,10 @@ struct cam_iosched_softc {
 				/* scheduler flags < 16, user flags >= 16 */
 	uint32_t	flags;
 	int		sort_io_queue;
+	int		trim_goal;		/* # of trims to queue before sending */
+	int		trim_ticks;		/* Max ticks to hold trims */
+	int		last_trim_tick;		/* Last 'tick' time ld a trim */
+	int		queued_trims;		/* Number of trims in the queue */
 #ifdef CAM_IOSCHED_DYNAMIC
 	int		read_bias;		/* Read bias setting */
 	int		current_read_bias;	/* Current read bias state */
@@ -292,6 +298,9 @@ struct cam_iosched_softc {
 	uint32_t	this_frac;		/* Fraction of a second (1024ths) for this tick */
 	sbintime_t	last_time;		/* Last time we ticked */
 	struct control_loop cl;
+	sbintime_t	max_lat;		/* when != 0, if iop latency > max_lat, call max_lat_fcn */
+	cam_iosched_latfcn_t	latfcn;
+	void		*latarg;
 #endif
 };
 
@@ -415,6 +424,7 @@ cam_iosched_iops_init(struct iop_stats *ios)
 	ios->l_value1 = ios->current / ios->softc->quanta;
 	if (ios->l_value1 <= 0)
 		ios->l_value1 = 1;
+	ios->l_value2 = 0;
 
 	return 0;
 }
@@ -422,10 +432,30 @@ cam_iosched_iops_init(struct iop_stats *ios)
 static int
 cam_iosched_iops_tick(struct iop_stats *ios)
 {
+	int new_ios;
 
-	ios->l_value1 = (int)((ios->current * (uint64_t)ios->softc->this_frac) >> 16);
-	if (ios->l_value1 <= 0)
-		ios->l_value1 = 1;
+	/*
+	 * Allow at least one IO per tick until all
+	 * the IOs for this interval have been spent.
+	 */
+	new_ios = (int)((ios->current * (uint64_t)ios->softc->this_frac) >> 16);
+	if (new_ios < 1 && ios->l_value2 < ios->current) {
+		new_ios = 1;
+		ios->l_value2++;
+	}
+
+	/*
+	 * If this a new accounting interval, discard any "unspent" ios
+	 * granted in the previous interval.  Otherwise add the new ios to
+	 * the previously granted ones that haven't been spent yet.
+	 */
+	if ((ios->softc->total_ticks % ios->softc->quanta) == 0) {
+		ios->l_value1 = new_ios;
+		ios->l_value2 = 1;
+	} else {
+		ios->l_value1 += new_ios;
+	}
+
 
 	return 0;
 }
@@ -436,9 +466,10 @@ cam_iosched_iops_caniop(struct iop_stats *ios, struct bio *bp)
 
 	/*
 	 * So if we have any more IOPs left, allow it,
-	 * otherwise wait.
+	 * otherwise wait. If current iops is 0, treat that
+	 * as unlimited as a failsafe.
 	 */
-	if (ios->l_value1 <= 0)
+	if (ios->current > 0 && ios->l_value1 <= 0)
 		return EAGAIN;
 	return 0;
 }
@@ -493,8 +524,8 @@ cam_iosched_bw_caniop(struct iop_stats *ios, struct bio *bp)
 {
 	/*
 	 * So if we have any more bw quota left, allow it,
-	 * otherwise wait. Not, we'll go negative and that's
-	 * OK. We'll just get a lettle less next quota.
+	 * otherwise wait. Note, we'll go negative and that's
+	 * OK. We'll just get a little less next quota.
 	 *
 	 * Note on going negative: that allows us to process
 	 * requests in order better, since we won't allow
@@ -504,8 +535,11 @@ cam_iosched_bw_caniop(struct iop_stats *ios, struct bio *bp)
 	 * what we let through this quantum (to prevent the
 	 * starvation), at the cost of getting a little less
 	 * next quantum.
+	 *
+	 * Also note that if the current limit is <= 0,
+	 * we treat it as unlimited as a failsafe.
 	 */
-	if (ios->l_value1 <= 0)
+	if (ios->current > 0 && ios->l_value1 <= 0)
 		return EAGAIN;
 
 
@@ -533,7 +567,7 @@ cam_iosched_ticker(void *arg)
 	sbintime_t now, delta;
 	int pending;
 
-	callout_reset(&isc->ticker, hz / isc->quanta - 1, cam_iosched_ticker, isc);
+	callout_reset(&isc->ticker, hz / isc->quanta, cam_iosched_ticker, isc);
 
 	now = sbinuptime();
 	delta = now - isc->last_time;
@@ -639,7 +673,7 @@ cam_iosched_cl_maybe_steer(struct control_loop *clp)
 		 * ~10. At .25 it only takes ~8. However some preliminary data
 		 * from the SSD drives suggests a reasponse time in 10's of
 		 * seconds before latency drops regardless of the new write
-		 * rate. Careful observation will be reqiured to tune this
+		 * rate. Careful observation will be required to tune this
 		 * effectively.
 		 *
 		 * Also, when there's no read traffic, we jack up the write
@@ -673,7 +707,10 @@ cam_iosched_cl_maybe_steer(struct control_loop *clp)
 }
 #endif
 
-			/* Trim or similar currently pending completion */
+/*
+ * Trim or similar currently pending completion. Should only be set for
+ * those drivers wishing only one Trim active at a time.
+ */
 #define CAM_IOSCHED_FLAG_TRIM_ACTIVE	(1ul << 0)
 			/* Callout active, and needs to be torn down */
 #define CAM_IOSCHED_FLAG_CALLOUT_ACTIVE (1ul << 1)
@@ -687,22 +724,22 @@ cam_iosched_io_metric_update(struct cam_iosched_softc *isc,
     sbintime_t sim_latency, int cmd, size_t size);
 #endif
 
-static inline int
+static inline bool
 cam_iosched_has_flagged_work(struct cam_iosched_softc *isc)
 {
 	return !!(isc->flags & CAM_IOSCHED_FLAG_WORK_FLAGS);
 }
 
-static inline int
+static inline bool
 cam_iosched_has_io(struct cam_iosched_softc *isc)
 {
 #ifdef CAM_IOSCHED_DYNAMIC
 	if (do_dynamic_iosched) {
 		struct bio *rbp = bioq_first(&isc->bio_queue);
 		struct bio *wbp = bioq_first(&isc->write_queue);
-		int can_write = wbp != NULL &&
+		bool can_write = wbp != NULL &&
 		    cam_iosched_limiter_caniop(&isc->write_stats, wbp) == 0;
-		int can_read = rbp != NULL &&
+		bool can_read = rbp != NULL &&
 		    cam_iosched_limiter_caniop(&isc->read_stats, rbp) == 0;
 		if (iosched_debug > 2) {
 			printf("can write %d: pending_writes %d max_writes %d\n", can_write, isc->write_stats.pending, isc->write_stats.max);
@@ -715,18 +752,47 @@ cam_iosched_has_io(struct cam_iosched_softc *isc)
 	return bioq_first(&isc->bio_queue) != NULL;
 }
 
-static inline int
+static inline bool
 cam_iosched_has_more_trim(struct cam_iosched_softc *isc)
 {
-	return !(isc->flags & CAM_IOSCHED_FLAG_TRIM_ACTIVE) &&
-	    bioq_first(&isc->trim_queue);
+	struct bio *bp;
+
+	bp = bioq_first(&isc->trim_queue);
+#ifdef CAM_IOSCHED_DYNAMIC
+	if (do_dynamic_iosched) {
+		/*
+		 * If we're limiting trims, then defer action on trims
+		 * for a bit.
+		 */
+		if (bp == NULL || cam_iosched_limiter_caniop(&isc->trim_stats, bp) != 0)
+			return false;
+	}
+#endif
+
+	/*
+	 * If we've set a trim_goal, then if we exceed that allow trims
+	 * to be passed back to the driver. If we've also set a tick timeout
+	 * allow trims back to the driver. Otherwise, don't allow trims yet.
+	 */
+	if (isc->trim_goal > 0) {
+		if (isc->queued_trims >= isc->trim_goal)
+			return true;
+		if (isc->queued_trims > 0 &&
+		    isc->trim_ticks > 0 &&
+		    ticks - isc->last_trim_tick > isc->trim_ticks)
+			return true;
+		return false;
+	}
+
+	/* NB: Should perhaps have a max trim active independent of I/O limiters */
+	return !(isc->flags & CAM_IOSCHED_FLAG_TRIM_ACTIVE) && bp != NULL;
 }
 
 #define cam_iosched_sort_queue(isc)	((isc)->sort_io_queue >= 0 ?	\
     (isc)->sort_io_queue : cam_sort_io_queues)
 
 
-static inline int
+static inline bool
 cam_iosched_has_work(struct cam_iosched_softc *isc)
 {
 #ifdef CAM_IOSCHED_DYNAMIC
@@ -747,17 +813,18 @@ cam_iosched_iop_stats_init(struct cam_iosched_softc *isc, struct iop_stats *ios)
 {
 
 	ios->limiter = none;
-	cam_iosched_limiter_init(ios);
 	ios->in = 0;
-	ios->max = 300000;
+	ios->max = ios->current = 300000;
 	ios->min = 1;
 	ios->out = 0;
+	ios->errs = 0;
 	ios->pending = 0;
 	ios->queued = 0;
 	ios->total = 0;
 	ios->ema = 0;
 	ios->emvar = 0;
 	ios->softc = isc;
+	cam_iosched_limiter_init(ios);
 }
 
 static int
@@ -795,7 +862,7 @@ cam_iosched_limiter_sysctl(SYSCTL_HANDLER_ARGS)
 			return error;
 		}
 		/* Note: disk load averate requires ticker to be always running */
-		callout_reset(&isc->ticker, hz / isc->quanta - 1, cam_iosched_ticker, isc);
+		callout_reset(&isc->ticker, hz / isc->quanta, cam_iosched_ticker, isc);
 		isc->flags |= CAM_IOSCHED_FLAG_CALLOUT_ACTIVE;
 
 		cam_periph_unlock(isc->periph);
@@ -880,6 +947,27 @@ cam_iosched_sysctl_latencies(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 
+static int
+cam_iosched_quanta_sysctl(SYSCTL_HANDLER_ARGS)
+{
+	int *quanta;
+	int error, value;
+
+	quanta = (unsigned *)arg1;
+	value = *quanta;
+
+	error = sysctl_handle_int(oidp, (int *)&value, 0, req);
+	if ((error != 0) || (req->newptr == NULL))
+		return (error);
+
+	if (value < 1 || value > hz)
+		return (EINVAL);
+
+	*quanta = value;
+
+	return (0);
+}
+
 static void
 cam_iosched_iop_stats_sysctl_init(struct cam_iosched_softc *isc, struct iop_stats *ios, char *name)
 {
@@ -920,7 +1008,11 @@ cam_iosched_iop_stats_sysctl_init(struct cam_iosched_softc *isc, struct iop_stat
 	SYSCTL_ADD_INT(ctx, n,
 	    OID_AUTO, "out", CTLFLAG_RD,
 	    &ios->out, 0,
-	    "# of transactions completed");
+	    "# of transactions completed (including with error)");
+	SYSCTL_ADD_INT(ctx, n,
+	    OID_AUTO, "errs", CTLFLAG_RD,
+	    &ios->errs, 0,
+	    "# of transactions completed with an error");
 
 	SYSCTL_ADD_PROC(ctx, n,
 	    OID_AUTO, "limiter", CTLTYPE_STRING | CTLFLAG_RW,
@@ -1022,7 +1114,7 @@ cam_iosched_init(struct cam_iosched_softc **iscp, struct cam_periph *periph)
 		bioq_init(&(*iscp)->write_queue);
 		(*iscp)->read_bias = 100;
 		(*iscp)->current_read_bias = 100;
-		(*iscp)->quanta = 200;
+		(*iscp)->quanta = min(hz, 200);
 		cam_iosched_iop_stats_init(*iscp, &(*iscp)->read_stats);
 		cam_iosched_iop_stats_init(*iscp, &(*iscp)->write_stats);
 		cam_iosched_iop_stats_init(*iscp, &(*iscp)->trim_stats);
@@ -1031,7 +1123,7 @@ cam_iosched_init(struct cam_iosched_softc **iscp, struct cam_periph *periph)
 		callout_init_mtx(&(*iscp)->ticker, cam_periph_mtx(periph), 0);
 		(*iscp)->periph = periph;
 		cam_iosched_cl_init(&(*iscp)->cl, *iscp);
-		callout_reset(&(*iscp)->ticker, hz / (*iscp)->quanta - 1, cam_iosched_ticker, *iscp);
+		callout_reset(&(*iscp)->ticker, hz / (*iscp)->quanta, cam_iosched_ticker, *iscp);
 		(*iscp)->flags |= CAM_IOSCHED_FLAG_CALLOUT_ACTIVE;
 	}
 #endif
@@ -1072,14 +1164,21 @@ cam_iosched_fini(struct cam_iosched_softc *isc)
 void cam_iosched_sysctl_init(struct cam_iosched_softc *isc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *node)
 {
-#ifdef CAM_IOSCHED_DYNAMIC
 	struct sysctl_oid_list *n;
-#endif
 
-	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(node),
+	n = SYSCTL_CHILDREN(node);
+	SYSCTL_ADD_INT(ctx, n,
 		OID_AUTO, "sort_io_queue", CTLFLAG_RW | CTLFLAG_MPSAFE,
 		&isc->sort_io_queue, 0,
 		"Sort IO queue to try and optimise disk access patterns");
+	SYSCTL_ADD_INT(ctx, n,
+	    OID_AUTO, "trim_goal", CTLFLAG_RW,
+	    &isc->trim_goal, 0,
+	    "Number of trims to try to accumulate before sending to hardware");
+	SYSCTL_ADD_INT(ctx, n,
+	    OID_AUTO, "trim_ticks", CTLFLAG_RW,
+	    &isc->trim_goal, 0,
+	    "IO Schedul qaunta to hold back trims for when accumulating");
 
 #ifdef CAM_IOSCHED_DYNAMIC
 	if (!do_dynamic_iosched)
@@ -1101,9 +1200,9 @@ void cam_iosched_sysctl_init(struct cam_iosched_softc *isc,
 	    &isc->read_bias, 100,
 	    "How biased towards read should we be independent of limits");
 
-	SYSCTL_ADD_INT(ctx, n,
-	    OID_AUTO, "quanta", CTLFLAG_RW,
-	    &isc->quanta, 200,
+	SYSCTL_ADD_PROC(ctx, n,
+	    OID_AUTO, "quanta", CTLTYPE_UINT | CTLFLAG_RW,
+	    &isc->quanta, 0, cam_iosched_quanta_sysctl, "I",
 	    "How many quanta per second do we slice the I/O up into");
 
 	SYSCTL_ADD_INT(ctx, n,
@@ -1115,7 +1214,57 @@ void cam_iosched_sysctl_init(struct cam_iosched_softc *isc,
 	    OID_AUTO, "load", CTLFLAG_RD,
 	    &isc->load, 0,
 	    "scaled load average / 100");
+
+	SYSCTL_ADD_U64(ctx, n,
+	    OID_AUTO, "latency_trigger", CTLFLAG_RW,
+	    &isc->max_lat, 0,
+	    "Latency treshold to trigger callbacks");
 #endif
+}
+
+void
+cam_iosched_set_latfcn(struct cam_iosched_softc *isc,
+    cam_iosched_latfcn_t fnp, void *argp)
+{
+#ifdef CAM_IOSCHED_DYNAMIC
+	isc->latfcn = fnp;
+	isc->latarg = argp;
+#endif
+}
+
+/*
+ * Client drivers can set two parameters. "goal" is the number of BIO_DELETEs
+ * that will be queued up before iosched will "release" the trims to the client
+ * driver to wo with what they will (usually combine as many as possible). If we
+ * don't get this many, after trim_ticks we'll submit the I/O anyway with
+ * whatever we have.  We do need an I/O of some kind of to clock the deferred
+ * trims out to disk. Since we will eventually get a write for the super block
+ * or something before we shutdown, the trims will complete. To be safe, when a
+ * BIO_FLUSH is presented to the iosched work queue, we set the ticks time far
+ * enough in the past so we'll present the BIO_DELETEs to the client driver.
+ * There might be a race if no BIO_DELETESs were queued, a BIO_FLUSH comes in
+ * and then a BIO_DELETE is sent down. No know client does this, and there's
+ * already a race between an ordered BIO_FLUSH and any BIO_DELETEs in flight,
+ * but no client depends on the ordering being honored.
+ *
+ * XXX I'm not sure what the interaction between UFS direct BIOs and the BUF
+ * flushing on shutdown. I think there's bufs that would be dependent on the BIO
+ * finishing to write out at least metadata, so we'll be fine. To be safe, keep
+ * the number of ticks low (less than maybe 10s) to avoid shutdown races.
+ */
+
+void
+cam_iosched_set_trim_goal(struct cam_iosched_softc *isc, int goal)
+{
+
+	isc->trim_goal = goal;
+}
+
+void
+cam_iosched_set_trim_ticks(struct cam_iosched_softc *isc, int trim_ticks)
+{
+
+	isc->trim_ticks = trim_ticks;
 }
 
 /*
@@ -1162,7 +1311,11 @@ cam_iosched_get_write(struct cam_iosched_softc *isc)
 	 */
 	if (bioq_first(&isc->bio_queue) && isc->current_read_bias) {
 		if (iosched_debug)
-			printf("Reads present and current_read_bias is %d queued writes %d queued reads %d\n", isc->current_read_bias, isc->write_stats.queued, isc->read_stats.queued);
+			printf(
+			    "Reads present and current_read_bias is %d queued "
+			    "writes %d queued reads %d\n",
+			    isc->current_read_bias, isc->write_stats.queued,
+			    isc->read_stats.queued);
 		isc->current_read_bias--;
 		/* We're not limiting writes, per se, just doing reads first */
 		return NULL;
@@ -1203,6 +1356,9 @@ void
 cam_iosched_put_back_trim(struct cam_iosched_softc *isc, struct bio *bp)
 {
 	bioq_insert_head(&isc->trim_queue, bp);
+	if (isc->queued_trims == 0)
+		isc->last_trim_tick = ticks;
+	isc->queued_trims++;
 #ifdef CAM_IOSCHED_DYNAMIC
 	isc->trim_stats.queued++;
 	isc->trim_stats.total--;		/* since we put it back, don't double count */
@@ -1214,7 +1370,7 @@ cam_iosched_put_back_trim(struct cam_iosched_softc *isc, struct bio *bp)
  * gets the next trim from the trim queue.
  *
  * Assumes we're called with the periph lock held.  It removes this
- * trim from the queue and the device must explicitly reinstert it
+ * trim from the queue and the device must explicitly reinsert it
  * should the need arise.
  */
 struct bio *
@@ -1226,6 +1382,8 @@ cam_iosched_next_trim(struct cam_iosched_softc *isc)
 	if (bp == NULL)
 		return NULL;
 	bioq_remove(&isc->trim_queue, bp);
+	isc->queued_trims--;
+	isc->last_trim_tick = ticks;	/* Reset the tick timer when we take trims */
 #ifdef CAM_IOSCHED_DYNAMIC
 	isc->trim_stats.queued--;
 	isc->trim_stats.total++;
@@ -1235,19 +1393,68 @@ cam_iosched_next_trim(struct cam_iosched_softc *isc)
 }
 
 /*
- * gets the an available trim from the trim queue, if there's no trim
+ * gets an available trim from the trim queue, if there's no trim
  * already pending. It removes this trim from the queue and the device
- * must explicitly reinstert it should the need arise.
+ * must explicitly reinsert it should the need arise.
  *
  * Assumes we're called with the periph lock held.
  */
 struct bio *
 cam_iosched_get_trim(struct cam_iosched_softc *isc)
 {
+#ifdef CAM_IOSCHED_DYNAMIC
+	struct bio *bp;
+#endif
 
 	if (!cam_iosched_has_more_trim(isc))
 		return NULL;
+#ifdef CAM_IOSCHED_DYNAMIC
+	bp  = bioq_first(&isc->trim_queue);
+	if (bp == NULL)
+		return NULL;
 
+	/*
+	 * If pending read, prefer that based on current read bias setting. The
+	 * read bias is shared for both writes and TRIMs, but on TRIMs the bias
+	 * is for a combined TRIM not a single TRIM request that's come in.
+	 */
+	if (do_dynamic_iosched) {
+		if (bioq_first(&isc->bio_queue) && isc->current_read_bias) {
+			if (iosched_debug)
+				printf("Reads present and current_read_bias is %d"
+				    " queued trims %d queued reads %d\n",
+				    isc->current_read_bias, isc->trim_stats.queued,
+				    isc->read_stats.queued);
+			isc->current_read_bias--;
+			/* We're not limiting TRIMS, per se, just doing reads first */
+			return NULL;
+		}
+		/*
+		 * We're going to do a trim, so reset the bias.
+		 */
+		isc->current_read_bias = isc->read_bias;
+	}
+
+	/*
+	 * See if our current limiter allows this I/O. Because we only call this
+	 * here, and not in next_trim, the 'bandwidth' limits for trims won't
+	 * work, while the iops or max queued limits will work. It's tricky
+	 * because we want the limits to be from the perspective of the
+	 * "commands sent to the device." To make iops work, we need to check
+	 * only here (since we want all the ops we combine to count as one). To
+	 * make bw limits work, we'd need to check in next_trim, but that would
+	 * have the effect of limiting the iops as seen from the upper layers.
+	 */
+	if (cam_iosched_limiter_iop(&isc->trim_stats, bp) != 0) {
+		if (iosched_debug)
+			printf("Can't trim because limiter says no.\n");
+		isc->trim_stats.state_flags |= IOP_RATE_LIMITED;
+		return NULL;
+	}
+	isc->current_read_bias = isc->read_bias;
+	isc->trim_stats.state_flags &= ~IOP_RATE_LIMITED;
+	/* cam_iosched_next_trim below keeps proper book */
+#endif
 	return cam_iosched_next_trim(isc);
 }
 
@@ -1330,20 +1537,64 @@ cam_iosched_queue_work(struct cam_iosched_softc *isc, struct bio *bp)
 {
 
 	/*
-	 * Put all trims on the trim queue sorted, since we know
-	 * that the collapsing code requires this. Otherwise put
-	 * the work on the bio queue.
+	 * A BIO_SPEEDUP from the uppper layers means that they have a block
+	 * shortage. At the present, this is only sent when we're trying to
+	 * allocate blocks, but have a shortage before giving up. bio_length is
+	 * the size of their shortage. We will complete just enough BIO_DELETEs
+	 * in the queue to satisfy the need. If bio_length is 0, we'll complete
+	 * them all. This allows the scheduler to delay BIO_DELETEs to improve
+	 * read/write performance without worrying about the upper layers. When
+	 * it's possibly a problem, we respond by pretending the BIO_DELETEs
+	 * just worked. We can't do anything about the BIO_DELETEs in the
+	 * hardware, though. We have to wait for them to complete.
+	 */
+	if (bp->bio_cmd == BIO_SPEEDUP) {
+		off_t len;
+		struct bio *nbp;
+
+		len = 0;
+		while (bioq_first(&isc->trim_queue) &&
+		    (bp->bio_length == 0 || len < bp->bio_length)) {
+			nbp = bioq_takefirst(&isc->trim_queue);
+			len += nbp->bio_length;
+			nbp->bio_error = 0;
+			biodone(nbp);
+		}
+		if (bp->bio_length > 0) {
+			if (bp->bio_length > len)
+				bp->bio_resid = bp->bio_length - len;
+			else
+				bp->bio_resid = 0;
+		}
+		bp->bio_error = 0;
+		biodone(bp);
+		return;
+	}
+
+	/*
+	 * If we get a BIO_FLUSH, and we're doing delayed BIO_DELETEs then we
+	 * set the last tick time to one less than the current ticks minus the
+	 * delay to force the BIO_DELETEs to be presented to the client driver.
+	 */
+	if (bp->bio_cmd == BIO_FLUSH && isc->trim_ticks > 0)
+		isc->last_trim_tick = ticks - isc->trim_ticks - 1;
+
+	/*
+	 * Put all trims on the trim queue. Otherwise put the work on the bio
+	 * queue.
 	 */
 	if (bp->bio_cmd == BIO_DELETE) {
-		bioq_disksort(&isc->trim_queue, bp);
+		bioq_insert_tail(&isc->trim_queue, bp);
+		if (isc->queued_trims == 0)
+			isc->last_trim_tick = ticks;
+		isc->queued_trims++;
 #ifdef CAM_IOSCHED_DYNAMIC
 		isc->trim_stats.in++;
 		isc->trim_stats.queued++;
 #endif
 	}
 #ifdef CAM_IOSCHED_DYNAMIC
-	else if (do_dynamic_iosched &&
-	    (bp->bio_cmd == BIO_WRITE || bp->bio_cmd == BIO_FLUSH)) {
+	else if (do_dynamic_iosched && (bp->bio_cmd != BIO_READ)) {
 		if (cam_iosched_sort_queue(isc))
 			bioq_disksort(&isc->write_queue, bp);
 		else
@@ -1387,7 +1638,7 @@ cam_iosched_schedule(struct cam_iosched_softc *isc, struct cam_periph *periph)
 }
 
 /*
- * Complete a trim request
+ * Complete a trim request. Mark that we no longer have one in flight.
  */
 void
 cam_iosched_trim_done(struct cam_iosched_softc *isc)
@@ -1413,13 +1664,19 @@ cam_iosched_bio_complete(struct cam_iosched_softc *isc, struct bio *bp,
 		printf("done: %p %#x\n", bp, bp->bio_cmd);
 	if (bp->bio_cmd == BIO_WRITE) {
 		retval = cam_iosched_limiter_iodone(&isc->write_stats, bp);
+		if ((bp->bio_flags & BIO_ERROR) != 0)
+			isc->write_stats.errs++;
 		isc->write_stats.out++;
 		isc->write_stats.pending--;
 	} else if (bp->bio_cmd == BIO_READ) {
 		retval = cam_iosched_limiter_iodone(&isc->read_stats, bp);
+		if ((bp->bio_flags & BIO_ERROR) != 0)
+			isc->read_stats.errs++;
 		isc->read_stats.out++;
 		isc->read_stats.pending--;
 	} else if (bp->bio_cmd == BIO_DELETE) {
+		if ((bp->bio_flags & BIO_ERROR) != 0)
+			isc->trim_stats.errs++;
 		isc->trim_stats.out++;
 		isc->trim_stats.pending--;
 	} else if (bp->bio_cmd != BIO_FLUSH) {
@@ -1427,16 +1684,29 @@ cam_iosched_bio_complete(struct cam_iosched_softc *isc, struct bio *bp,
 			printf("Completing command with bio_cmd == %#x\n", bp->bio_cmd);
 	}
 
-	if (!(bp->bio_flags & BIO_ERROR))
-		cam_iosched_io_metric_update(isc, done_ccb->ccb_h.qos.sim_data,
+	if (!(bp->bio_flags & BIO_ERROR) && done_ccb != NULL) {
+		sbintime_t sim_latency;
+		
+		sim_latency = cam_iosched_sbintime_t(done_ccb->ccb_h.qos.periph_data);
+		
+		cam_iosched_io_metric_update(isc, sim_latency,
 		    bp->bio_cmd, bp->bio_bcount);
+		/*
+		 * Debugging code: allow callbacks to the periph driver when latency max
+		 * is exceeded. This can be useful for triggering external debugging actions.
+		 */
+		if (isc->latfcn && isc->max_lat != 0 && sim_latency > isc->max_lat)
+			isc->latfcn(isc->latarg, sim_latency, bp);
+	}
+		
 #endif
 	return retval;
 }
 
 /*
  * Tell the io scheduler that you've pushed a trim down into the sim.
- * xxx better place for this?
+ * This also tells the I/O scheduler not to push any more trims down, so
+ * some periphs do not call it if they can cope with multiple trims in flight.
  */
 void
 cam_iosched_submit_trim(struct cam_iosched_softc *isc)
@@ -1476,7 +1746,7 @@ cam_iosched_clr_work_flags(struct cam_iosched_softc *isc, uint32_t flags)
 #ifdef CAM_IOSCHED_DYNAMIC
 /*
  * After the method presented in Jack Crenshaw's 1998 article "Integer
- * Suqare Roots," reprinted at
+ * Square Roots," reprinted at
  * http://www.embedded.com/electronics-blogs/programmer-s-toolbox/4219659/Integer-Square-Roots
  * and well worth the read. Briefly, we find the power of 4 that's the
  * largest smaller than val. We then check each smaller power of 4 to
@@ -1485,7 +1755,7 @@ cam_iosched_clr_work_flags(struct cam_iosched_softc *isc, uint32_t flags)
  * accumulating the right answer. It could also have been accumulated
  * using a separate root counter, but this code is smaller and faster
  * than that method. This method is also integer size invariant.
- * It returns floor(sqrt((float)val)), or the larget integer less than
+ * It returns floor(sqrt((float)val)), or the largest integer less than
  * or equal to the square root.
  */
 static uint64_t
@@ -1519,7 +1789,7 @@ isqrt64(uint64_t val)
 	return res;
 }
 
-static sbintime_t latencies[] = {
+static sbintime_t latencies[LAT_BUCKETS - 1] = {
 	SBT_1MS <<  0,
 	SBT_1MS <<  1,
 	SBT_1MS <<  2,
@@ -1530,7 +1800,10 @@ static sbintime_t latencies[] = {
 	SBT_1MS <<  7,
 	SBT_1MS <<  8,
 	SBT_1MS <<  9,
-	SBT_1MS << 10
+	SBT_1MS << 10,
+	SBT_1MS << 11,
+	SBT_1MS << 12,
+	SBT_1MS << 13		/* 8.192s */
 };
 
 static void
@@ -1553,7 +1826,7 @@ cam_iosched_update(struct iop_stats *iop, sbintime_t sim_latency)
 		iop->latencies[i]++; 	 /* Put all > 1024ms values into the last bucket. */
 
 	/*
-	 * Classic expoentially decaying average with a tiny alpha
+	 * Classic exponentially decaying average with a tiny alpha
 	 * (2 ^ -alpha_bits). For more info see the NIST statistical
 	 * handbook.
 	 *
@@ -1665,7 +1938,7 @@ DB_SHOW_COMMAND(iosched, cam_iosched_db_show)
 	db_printf("in_reads:          %d\n", isc->read_stats.in);
 	db_printf("out_reads:         %d\n", isc->read_stats.out);
 	db_printf("queued_reads:      %d\n", isc->read_stats.queued);
-	db_printf("Current Q len      %d\n", biolen(&isc->bio_queue));
+	db_printf("Read Q len         %d\n", biolen(&isc->bio_queue));
 	db_printf("pending_writes:    %d\n", isc->write_stats.pending);
 	db_printf("min_writes:        %d\n", isc->write_stats.min);
 	db_printf("max_writes:        %d\n", isc->write_stats.max);
@@ -1673,7 +1946,7 @@ DB_SHOW_COMMAND(iosched, cam_iosched_db_show)
 	db_printf("in_writes:         %d\n", isc->write_stats.in);
 	db_printf("out_writes:        %d\n", isc->write_stats.out);
 	db_printf("queued_writes:     %d\n", isc->write_stats.queued);
-	db_printf("Current Q len      %d\n", biolen(&isc->write_queue));
+	db_printf("Write Q len        %d\n", biolen(&isc->write_queue));
 	db_printf("pending_trims:     %d\n", isc->trim_stats.pending);
 	db_printf("min_trims:         %d\n", isc->trim_stats.min);
 	db_printf("max_trims:         %d\n", isc->trim_stats.max);
@@ -1681,7 +1954,7 @@ DB_SHOW_COMMAND(iosched, cam_iosched_db_show)
 	db_printf("in_trims:          %d\n", isc->trim_stats.in);
 	db_printf("out_trims:         %d\n", isc->trim_stats.out);
 	db_printf("queued_trims:      %d\n", isc->trim_stats.queued);
-	db_printf("Current Q len      %d\n", biolen(&isc->trim_queue));
+	db_printf("Trim Q len         %d\n", biolen(&isc->trim_queue));
 	db_printf("read_bias:         %d\n", isc->read_bias);
 	db_printf("current_read_bias: %d\n", isc->current_read_bias);
 	db_printf("Trim active?       %s\n",

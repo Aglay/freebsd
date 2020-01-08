@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004 Poul-Henning Kamp
  * All rights reserved.
  *
@@ -34,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
+#include <sys/sbuf.h>
 #include <sys/vnode.h>
 #include <sys/mount.h>
 
@@ -136,11 +139,9 @@ g_vfs_done(struct bio *bip)
 
 	cp = bip->bio_from;
 	sc = cp->geom->softc;
-	if (bip->bio_error) {
-		printf("g_vfs_done():");
-		g_print_bio(bip);
-		printf("error = %d\n", bip->bio_error);
-	}
+	if (bip->bio_error)
+		g_print_bio("g_vfs_done():", bip, "error = %d",
+		    bip->bio_error);
 	bp->b_error = bip->bio_error;
 	bp->b_ioflags = bip->bio_flags;
 	if (bip->bio_error)

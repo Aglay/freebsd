@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011, Bryan Venteicher <bryanv@FreeBSD.org>
  * All rights reserved.
  *
@@ -52,14 +54,21 @@ static struct virtio_ident {
 	uint16_t	devid;
 	const char	*name;
 } virtio_ident_table[] = {
-	{ VIRTIO_ID_NETWORK,	"Network"	},
-	{ VIRTIO_ID_BLOCK,	"Block"		},
-	{ VIRTIO_ID_CONSOLE,	"Console"	},
-	{ VIRTIO_ID_ENTROPY,	"Entropy"	},
-	{ VIRTIO_ID_BALLOON,	"Balloon"	},
-	{ VIRTIO_ID_IOMEMORY,	"IOMemory"	},
-	{ VIRTIO_ID_SCSI,	"SCSI"		},
-	{ VIRTIO_ID_9P,		"9P Transport"	},
+	{ VIRTIO_ID_NETWORK,		"Network"			},
+	{ VIRTIO_ID_BLOCK,		"Block"				},
+	{ VIRTIO_ID_CONSOLE,		"Console"			},
+	{ VIRTIO_ID_ENTROPY,		"Entropy"			},
+	{ VIRTIO_ID_BALLOON,		"Balloon"			},
+	{ VIRTIO_ID_IOMEMORY,		"IOMemory"			},
+	{ VIRTIO_ID_RPMSG,		"Remote Processor Messaging" 	},
+	{ VIRTIO_ID_SCSI,		"SCSI"				},
+	{ VIRTIO_ID_9P,			"9P Transport"			},
+	{ VIRTIO_ID_RPROC_SERIAL,	"Remote Processor Serial"	},
+	{ VIRTIO_ID_CAIF,		"CAIF"				},
+	{ VIRTIO_ID_GPU,		"GPU"				},
+	{ VIRTIO_ID_INPUT,		"Input" 			},
+	{ VIRTIO_ID_VSOCK,		"VSOCK Transport" 		},
+	{ VIRTIO_ID_CRYPTO,		"Crypto" 			},
 
 	{ 0, NULL }
 };
@@ -231,6 +240,13 @@ virtio_reinit_complete(device_t dev)
 	VIRTIO_BUS_REINIT_COMPLETE(device_get_parent(dev));
 }
 
+int
+virtio_config_generation(device_t dev)
+{
+
+	return (VIRTIO_BUS_CONFIG_GENERATION(device_get_parent(dev)));
+}
+
 void
 virtio_read_device_config(device_t dev, bus_size_t offset, void *dst, int len)
 {
@@ -245,6 +261,30 @@ virtio_write_device_config(device_t dev, bus_size_t offset, void *dst, int len)
 
 	VIRTIO_BUS_WRITE_DEVICE_CONFIG(device_get_parent(dev),
 	    offset, dst, len);
+}
+
+int
+virtio_child_pnpinfo_str(device_t busdev __unused, device_t child, char *buf,
+    size_t buflen)
+{
+
+	/*
+	 * All of these PCI fields will be only 16 bits, but on the vtmmio bus
+	 * the corresponding fields (only "vendor" and "device_type") are 32
+	 * bits.  Many virtio drivers can attach below either bus.
+	 * Gratuitously expand these two fields to 32-bits to allow sharing PNP
+	 * match table data between the mostly-similar buses.
+	 *
+	 * Subdevice and device_type are redundant in both buses, so I don't
+	 * see a lot of PNP utility in exposing the same value under a
+	 * different name.
+	 */
+	snprintf(buf, buflen, "vendor=0x%08x device=0x%04x subvendor=0x%04x "
+	    "device_type=0x%08x", (unsigned)virtio_get_vendor(child),
+	    (unsigned)virtio_get_device(child),
+	    (unsigned)virtio_get_subvendor(child),
+	    (unsigned)virtio_get_device_type(child));
+	return (0);
 }
 
 static int

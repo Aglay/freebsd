@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -112,7 +114,7 @@ main(int argc, char **argv)
 	if (caph_limit_stdio() < 0)
 		err(1, "unable to limit rights for stdio");
 	cap_rights_init(&rights);
-	if (cap_rights_limit(STDIN_FILENO, &rights) < 0 && errno != ENOSYS)
+	if (caph_rights_limit(STDIN_FILENO, &rights) < 0)
 		err(1, "unable to limit rights for stdin");
 
 	/*
@@ -121,7 +123,7 @@ main(int argc, char **argv)
 	 */
 	caph_cache_catpages();
 
-	if (cap_enter() < 0 && errno != ENOSYS)
+	if (caph_enter() < 0)
 		err(1, "unable to enter capability mode");
 
 	while ((ch = getopt(argc, argv, "b:cnp:rs:w:")) != -1)
@@ -261,12 +263,15 @@ main(int argc, char **argv)
 			mask = 0;
 			break;
 		case HAVE_REPS | HAVE_BEGIN | HAVE_ENDER:
-			if (reps == 0)
-				errx(1, "infinite sequences cannot be bounded");
-			else if (reps == 1)
-				s = 0.0;
-			else
-				s = (ender - begin) / (reps - 1);
+			if (!randomize) {
+				if (reps == 0)
+					errx(1, "infinite sequences cannot "
+					    "be bounded");
+				else if (reps == 1)
+					s = 0.0;
+				else
+					s = (ender - begin) / (reps - 1);
+			}
 			mask = 0;
 			break;
 		case HAVE_REPS | HAVE_BEGIN | HAVE_ENDER | HAVE_STEP:

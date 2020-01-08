@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006 Oleksandr Tymoshenko
  * All rights reserved.
  *
@@ -53,6 +55,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_extern.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/vm_map.h>
 
 #include <machine/atomic.h>
@@ -153,8 +156,6 @@ struct bus_dmamap {
 	bus_dma_tag_t	dmat;
 	struct memdesc	mem;
 	int		flags;
-	void		*origbuffer;
-	void		*allocbuffer;
 	TAILQ_ENTRY(bus_dmamap)	freelist;
 	STAILQ_ENTRY(bus_dmamap) links;
 	bus_dmamap_callback_t *callback;
@@ -202,11 +203,8 @@ dmamap_ctor(void *mem, int size, void *arg, int flags)
 
 	dmat->map_count++;
 
+	bzero(map, sizeof(*map));
 	map->dmat = dmat;
-	map->flags = 0;
-	map->slist = NULL;
-	map->allocbuffer = NULL;
-	map->sync_count = 0;
 	STAILQ_INIT(&map->bpages);
 
 	return (0);
@@ -275,7 +273,7 @@ run_filter(bus_dma_tag_t dmat, bus_addr_t paddr)
 		  || (*dmat->filter)(dmat->filterarg, paddr) != 0))
 			retval = 1;
 
-		dmat = dmat->parent;		
+		dmat = dmat->parent;
 	} while (retval == 0 && dmat != NULL);
 	return (retval);
 }
@@ -290,7 +288,7 @@ _bus_dma_can_bounce(vm_offset_t lowaddr, vm_offset_t highaddr)
 	int i;
 	for (i = 0; phys_avail[i] && phys_avail[i + 1]; i += 2) {
 		if ((lowaddr >= phys_avail[i] && lowaddr <= phys_avail[i + 1])
-		    || (lowaddr < phys_avail[i] && 
+		    || (lowaddr < phys_avail[i] &&
 		    highaddr > phys_avail[i]))
 			return (1);
 	}
@@ -354,7 +352,7 @@ _busdma_alloc_dmamap(bus_dma_tag_t dmat)
 	return (map);
 }
 
-static __inline void 
+static __inline void
 _busdma_free_dmamap(bus_dmamap_t map)
 {
 
@@ -478,6 +476,64 @@ bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 	return (error);
 }
 
+void
+bus_dma_template_init(bus_dma_tag_template_t *t, bus_dma_tag_t parent)
+{
+
+	if (t == NULL)
+		return;
+
+	t->parent = parent;
+	t->alignment = 1;
+	t->boundary = 0;
+	t->lowaddr = t->highaddr = BUS_SPACE_MAXADDR;
+	t->maxsize = t->maxsegsize = BUS_SPACE_MAXSIZE;
+	t->nsegments = BUS_SPACE_UNRESTRICTED;
+	t->lockfunc = NULL;
+	t->lockfuncarg = NULL;
+	t->flags = 0;
+}
+
+int
+bus_dma_template_tag(bus_dma_tag_template_t *t, bus_dma_tag_t *dmat)
+{
+
+	if (t == NULL || dmat == NULL)
+		return (EINVAL);
+
+	return (bus_dma_tag_create(t->parent, t->alignment, t->boundary,
+	    t->lowaddr, t->highaddr, NULL, NULL, t->maxsize,
+	    t->nsegments, t->maxsegsize, t->flags, t->lockfunc, t->lockfuncarg,
+	    dmat));
+}
+
+void
+bus_dma_template_clone(bus_dma_tag_template_t *t, bus_dma_tag_t dmat)
+{
+
+	if (t == NULL || dmat == NULL)
+		return;
+
+	t->parent = dmat->parent;
+	t->alignment = dmat->alignment;
+	t->boundary = dmat->boundary;
+	t->lowaddr = dmat->lowaddr;
+	t->highaddr = dmat->highaddr;
+	t->maxsize = dmat->maxsize;
+	t->nsegments = dmat->nsegments;
+	t->maxsegsize = dmat->maxsegsz;
+	t->flags = dmat->flags;
+	t->lockfunc = dmat->lockfunc;
+	t->lockfuncarg = dmat->lockfuncarg;
+}
+
+int
+bus_dma_tag_set_domain(bus_dma_tag_t dmat, int domain)
+{
+
+	return (0);
+}
+
 int
 bus_dma_tag_destroy(bus_dma_tag_t dmat)
 {
@@ -488,10 +544,10 @@ bus_dma_tag_destroy(bus_dma_tag_t dmat)
 	if (dmat != NULL) {
 		if (dmat->map_count != 0)
 			return (EBUSY);
-		
+
 		while (dmat != NULL) {
 			bus_dma_tag_t parent;
-			
+
 			parent = dmat->parent;
 			atomic_subtract_int(&dmat->ref_count, 1);
 			if (dmat->ref_count == 0) {
@@ -705,12 +761,11 @@ bus_dmamem_alloc(bus_dma_tag_t dmat, void** vaddrp, int flags,
 	    howmany(dmat->maxsize, MIN(dmat->maxsegsz, PAGE_SIZE)) &&
 	    dmat->alignment <= PAGE_SIZE &&
 	    (dmat->boundary % PAGE_SIZE) == 0) {
-		vaddr = (void *)kmem_alloc_attr(kernel_arena, dmat->maxsize,
-		    mflags, 0, dmat->lowaddr, memattr);
+		vaddr = (void *)kmem_alloc_attr(dmat->maxsize, mflags, 0,
+		    dmat->lowaddr, memattr);
 	} else {
-		vaddr = (void *)kmem_alloc_contig(kernel_arena, dmat->maxsize,
-		    mflags, 0, dmat->lowaddr, dmat->alignment, dmat->boundary,
-		    memattr);
+		vaddr = (void *)kmem_alloc_contig(dmat->maxsize, mflags, 0,
+		    dmat->lowaddr, dmat->alignment, dmat->boundary, memattr);
 	}
 	if (vaddr == NULL) {
 		_busdma_free_dmamap(newmap);
@@ -748,7 +803,7 @@ bus_dmamem_free(bus_dma_tag_t dmat, void *vaddr, bus_dmamap_t map)
 	    !_bus_dma_can_bounce(dmat->lowaddr, dmat->highaddr))
 		uma_zfree(bufzone->umazone, vaddr);
 	else
-		kmem_free(kernel_arena, (vm_offset_t)vaddr, dmat->maxsize);
+		kmem_free((vm_offset_t)vaddr, dmat->maxsize);
 	CTR3(KTR_BUSDMA, "%s: tag %p flags 0x%x", __func__, dmat, dmat->flags);
 }
 
@@ -1385,7 +1440,7 @@ alloc_bounce_pages(bus_dma_tag_t dmat, u_int numpages)
 			break;
 		}
 		bpage->busaddr = pmap_kextract(bpage->vaddr);
-		bpage->vaddr_nocache = 
+		bpage->vaddr_nocache =
 		    (vm_offset_t)pmap_mapdev(bpage->busaddr, PAGE_SIZE);
 		mtx_lock(&bounce_lock);
 		STAILQ_INSERT_TAIL(&bz->bounce_page_list, bpage, links);

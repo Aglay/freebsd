@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -32,15 +34,9 @@
  */
 #ifndef _SYS_SOCKBUF_H_
 #define _SYS_SOCKBUF_H_
-#include <sys/_lock.h>
-#include <sys/_mutex.h>
-#include <sys/_sx.h>
-#include <sys/_task.h>
-
-#define	SB_MAX		(2*1024*1024)	/* default for max chars in sockbuf */
 
 /*
- * Constants for sb_flags field of struct sockbuf.
+ * Constants for sb_flags field of struct sockbuf/xsockbuf.
  */
 #define	SB_WAIT		0x04		/* someone is waiting for data/space */
 #define	SB_SEL		0x08		/* someone is selecting */
@@ -54,34 +50,33 @@
 #define	SB_AUTOSIZE	0x800		/* automatically size socket buffer */
 #define	SB_STOP		0x1000		/* backpressure indicator */
 #define	SB_AIO_RUNNING	0x2000		/* AIO operation running */
+#define	SB_TLS_IFNET	0x4000		/* has used / is using ifnet KTLS */
 
 #define	SBS_CANTSENDMORE	0x0010	/* can't send more data to peer */
 #define	SBS_CANTRCVMORE		0x0020	/* can't receive more data from peer */
 #define	SBS_RCVATMARK		0x0040	/* at mark on input */
 
+#if defined(_KERNEL) || defined(_WANT_SOCKET)
+#include <sys/_lock.h>
+#include <sys/_mutex.h>
+#include <sys/_sx.h>
+#include <sys/_task.h>
+
+#define	SB_MAX		(2*1024*1024)	/* default for max chars in sockbuf */
+
+struct ktls_session;
 struct mbuf;
 struct sockaddr;
 struct socket;
 struct thread;
 struct selinfo;
 
-struct	xsockbuf {
-	u_int	sb_cc;
-	u_int	sb_hiwat;
-	u_int	sb_mbcnt;
-	u_int   sb_mcnt;
-	u_int   sb_ccnt;
-	u_int	sb_mbmax;
-	int	sb_lowat;
-	int	sb_timeo;
-	short	sb_flags;
-};
-
 /*
  * Variables for socket buffering.
  *
  * Locking key to struct sockbuf:
  * (a) locked by SOCKBUF_LOCK().
+ * (b) locked by sblock()
  */
 struct	sockbuf {
 	struct	mtx sb_mtx;		/* sockbuf lock */
@@ -106,13 +101,16 @@ struct	sockbuf {
 	u_int	sb_ctl;		/* (a) non-data chars in buffer */
 	int	sb_lowat;	/* (a) low water mark */
 	sbintime_t	sb_timeo;	/* (a) timeout for read/write */
-	short	sb_flags;	/* (a) flags, see below */
+	uint64_t sb_tls_seqno;	/* (a) TLS seqno */
+	struct	ktls_session *sb_tls_info; /* (a + b) TLS state */
+	short	sb_flags;	/* (a) flags, see above */
 	int	(*sb_upcall)(struct socket *, void *, int); /* (a) */
 	void	*sb_upcallarg;	/* (a) */
 	TAILQ_HEAD(, kaiocb) sb_aiojobq; /* (a) pending AIO ops */
 	struct	task sb_aiotask; /* AIO task */
 };
 
+#endif	/* defined(_KERNEL) || defined(_WANT_SOCKET) */
 #ifdef _KERNEL
 
 /*
@@ -146,9 +144,9 @@ int	sbappendaddr_locked(struct sockbuf *sb, const struct sockaddr *asa,
 	    struct mbuf *m0, struct mbuf *control);
 int	sbappendaddr_nospacecheck_locked(struct sockbuf *sb,
 	    const struct sockaddr *asa, struct mbuf *m0, struct mbuf *control);
-int	sbappendcontrol(struct sockbuf *sb, struct mbuf *m0,
+void	sbappendcontrol(struct sockbuf *sb, struct mbuf *m0,
 	    struct mbuf *control);
-int	sbappendcontrol_locked(struct sockbuf *sb, struct mbuf *m0,
+void	sbappendcontrol_locked(struct sockbuf *sb, struct mbuf *m0,
 	    struct mbuf *control);
 void	sbappendrecord(struct sockbuf *sb, struct mbuf *m0);
 void	sbappendrecord_locked(struct sockbuf *sb, struct mbuf *m0);
@@ -170,11 +168,11 @@ void	sbrelease_locked(struct sockbuf *sb, struct socket *so);
 int	sbsetopt(struct socket *so, int cmd, u_long cc);
 int	sbreserve_locked(struct sockbuf *sb, u_long cc, struct socket *so,
 	    struct thread *td);
+void	sbsndptr_adv(struct sockbuf *sb, struct mbuf *mb, u_int len);
 struct mbuf *
-	sbsndptr(struct sockbuf *sb, u_int off, u_int len, u_int *moff);
+	sbsndptr_noadv(struct sockbuf *sb, u_int off, u_int *moff);
 struct mbuf *
 	sbsndmbuf(struct sockbuf *sb, u_int off, u_int *moff);
-void	sbtoxsockbuf(struct sockbuf *sb, struct xsockbuf *xsb);
 int	sbwait(struct sockbuf *sb);
 int	sblock(struct sockbuf *sb, int flags);
 void	sbunlock(struct sockbuf *sb);

@@ -61,17 +61,17 @@ struct kobject {
 extern struct kobject *mm_kobj;
 
 struct attribute {
-	const char 	*name;
+	const char	*name;
 	struct module	*owner;
 	mode_t		mode;
 };
 
 struct kobj_attribute {
-        struct attribute attr;
-        ssize_t (*show)(struct kobject *kobj, struct kobj_attribute *attr,
-                        char *buf);
-        ssize_t (*store)(struct kobject *kobj, struct kobj_attribute *attr,
-                         const char *buf, size_t count);
+	struct attribute attr;
+	ssize_t (*show)(struct kobject *kobj, struct kobj_attribute *attr,
+	    char *buf);
+	ssize_t (*store)(struct kobject *kobj, struct kobj_attribute *attr,
+	    const char *buf, size_t count);
 };
 
 static inline void
@@ -133,6 +133,11 @@ kobject_create_and_add(const char *name, struct kobject *parent)
 	kobject_put(kobj);
 
 	return (NULL);
+}
+
+static inline void
+kobject_del(struct kobject *kobj __unused)
+{
 }
 
 static inline char *

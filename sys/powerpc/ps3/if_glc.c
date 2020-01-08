@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2010 Nathan Whitehorn
  * All rights reserved.
  *
@@ -502,12 +504,31 @@ glc_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	return (err);
 }
 
+static u_int
+glc_add_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct glc_softc *sc = arg;
+	uint64_t addr;
+
+	/*
+	 * Filter can only hold 32 addresses, so fall back to
+	 * the IFF_ALLMULTI case if we have too many. +1 is for
+	 * broadcast.
+	 */
+	if (cnt + 1 == 32)
+		return (0);
+
+	addr = 0;
+	memcpy(&((uint8_t *)(&addr))[2], LLADDR(sdl), ETHER_ADDR_LEN);
+	lv1_net_add_multicast_address(sc->sc_bus, sc->sc_dev, addr, 0);
+
+	return (1);
+}
+
 static void
 glc_set_multicast(struct glc_softc *sc)
 {
 	struct ifnet *ifp = sc->sc_ifp;
-	struct ifmultiaddr *inm;
-	uint64_t addr;
 	int naddrs;
 
 	/* Clear multicast filter */
@@ -520,30 +541,10 @@ glc_set_multicast(struct glc_softc *sc)
 	if ((ifp->if_flags & IFF_ALLMULTI) != 0) {
 		lv1_net_add_multicast_address(sc->sc_bus, sc->sc_dev, 0, 1);
 	} else {
-		if_maddr_rlock(ifp);
-		naddrs = 1; /* Include broadcast */
-		TAILQ_FOREACH(inm, &ifp->if_multiaddrs, ifma_link) {
-			if (inm->ifma_addr->sa_family != AF_LINK)
-				continue;
-			addr = 0;
-			memcpy(&((uint8_t *)(&addr))[2],
-			    LLADDR((struct sockaddr_dl *)inm->ifma_addr),
-			    ETHER_ADDR_LEN);
-
-			lv1_net_add_multicast_address(sc->sc_bus, sc->sc_dev,
-			    addr, 0);
-
-			/*
-			 * Filter can only hold 32 addresses, so fall back to
-			 * the IFF_ALLMULTI case if we have too many.
-			 */
-			if (++naddrs >= 32) {
-				lv1_net_add_multicast_address(sc->sc_bus,
-				    sc->sc_dev, 0, 1);
-				break;
-			}
-		}
-		if_maddr_runlock(ifp);
+		naddrs = if_foreach_llmaddr(ifp, glc_add_maddr, sc);
+		if (naddrs + 1 == 32)
+			lv1_net_add_multicast_address(sc->sc_bus,
+			    sc->sc_dev, 0, 1);
 	}
 }
 
@@ -830,7 +831,8 @@ glc_txintr(struct glc_softc *sc)
 		/* Speculatively (or necessarily) start the TX queue again */
 		error = lv1_net_start_tx_dma(sc->sc_bus, sc->sc_dev,
 		    sc->sc_txdmadesc_phys +
-		    txs->txs_firstdesc*sizeof(struct glc_dmadesc), 0);
+		    ((txs == NULL) ? 0 : txs->txs_firstdesc)*
+		     sizeof(struct glc_dmadesc), 0);
 		if (error != 0)
 			device_printf(sc->sc_self,
 			    "lv1_net_start_tx_dma error: %d\n", error);

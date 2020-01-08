@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2007 Sepherosa Ziehau.  All rights reserved.
  *
  * This code is derived from software contributed to The DragonFly Project
@@ -186,6 +188,8 @@ static driver_t et_driver = {
 static devclass_t et_devclass;
 
 DRIVER_MODULE(et, pci, et_driver, et_devclass, 0, 0);
+MODULE_PNP_INFO("U16:vendor;U16:device;D:#", pci, et, et_devices,
+    nitems(et_devices) - 1);
 DRIVER_MODULE(miibus, et, miibus_driver, miibus_devclass, 0, 0);
 
 static int	et_rx_intr_npkts = 32;
@@ -1556,13 +1560,36 @@ et_free_rx_ring(struct et_softc *sc)
 	}
 }
 
+static u_int
+et_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t h, *hp, *hash = arg;
+
+	h = ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN);
+	h = (h & 0x3f800000) >> 23;
+
+	hp = &hash[0];
+	if (h >= 32 && h < 64) {
+		h -= 32;
+		hp = &hash[1];
+	} else if (h >= 64 && h < 96) {
+		h -= 64;
+		hp = &hash[2];
+	} else if (h >= 96) {
+		h -= 96;
+		hp = &hash[3];
+	}
+	*hp |= (1 << h);
+
+	return (1);
+}
+
 static void
 et_setmulti(struct et_softc *sc)
 {
 	struct ifnet *ifp;
 	uint32_t hash[4] = { 0, 0, 0, 0 };
 	uint32_t rxmac_ctrl, pktfilt;
-	struct ifmultiaddr *ifma;
 	int i, count;
 
 	ET_LOCK_ASSERT(sc);
@@ -1577,34 +1604,7 @@ et_setmulti(struct et_softc *sc)
 		goto back;
 	}
 
-	count = 0;
-	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		uint32_t *hp, h;
-
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-
-		h = ether_crc32_be(LLADDR((struct sockaddr_dl *)
-				   ifma->ifma_addr), ETHER_ADDR_LEN);
-		h = (h & 0x3f800000) >> 23;
-
-		hp = &hash[0];
-		if (h >= 32 && h < 64) {
-			h -= 32;
-			hp = &hash[1];
-		} else if (h >= 64 && h < 96) {
-			h -= 64;
-			hp = &hash[2];
-		} else if (h >= 96) {
-			h -= 96;
-			hp = &hash[3];
-		}
-		*hp |= (1 << h);
-
-		++count;
-	}
-	if_maddr_runlock(ifp);
+	count = if_foreach_llmaddr(ifp, et_hash_maddr, &hash);
 
 	for (i = 0; i < 4; ++i)
 		CSR_WRITE_4(sc, ET_MULTI_HASH + (i * 4), hash[i]);

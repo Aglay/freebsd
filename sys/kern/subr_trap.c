@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1994, David Greenman
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -143,6 +145,11 @@ userret(struct thread *td, struct trapframe *frame)
 	 */
 	if (p->p_flag & P_PROFIL)
 		addupc_task(td, TRAPF_PC(frame), td->td_pticks * psratio);
+
+#ifdef HWPMC_HOOKS
+	if (PMC_THREAD_HAS_SAMPLES(td))
+		PMC_CALL_HOOK(td, PMC_FN_THR_USERRET, NULL);
+#endif
 	/*
 	 * Let the scheduler adjust our priority etc.
 	 */
@@ -164,10 +171,20 @@ userret(struct thread *td, struct trapframe *frame)
 	KASSERT(td->td_rw_rlocks == 0,
 	    ("userret: Returning with %d rwlocks held in read mode",
 	    td->td_rw_rlocks));
+	KASSERT(td->td_sx_slocks == 0,
+	    ("userret: Returning with %d sx locks held in shared mode",
+	    td->td_sx_slocks));
+	KASSERT(td->td_lk_slocks == 0,
+	    ("userret: Returning with %d lockmanager locks held in shared mode",
+	    td->td_lk_slocks));
 	KASSERT((td->td_pflags & TDP_NOFAULTING) == 0,
 	    ("userret: Returning with pagefaults disabled"));
-	KASSERT(td->td_no_sleeping == 0,
-	    ("userret: Returning with sleep disabled"));
+	if (__predict_false(!THREAD_CAN_SLEEP())) {
+#ifdef EPOCH_TRACE
+		epoch_trace_list(curthread);
+#endif
+		KASSERT(1, ("userret: Returning with sleep disabled"));
+	}
 	KASSERT(td->td_pinned == 0 || (td->td_pflags & TDP_CALLCHAIN) != 0,
 	    ("userret: Returning with with pinned thread"));
 	KASSERT(td->td_vp_reserv == 0,
@@ -176,6 +193,8 @@ userret(struct thread *td, struct trapframe *frame)
 	    ("userret: Returning with stop signals deferred"));
 	KASSERT(td->td_su == NULL,
 	    ("userret: Returning with SU cleanup request not handled"));
+	KASSERT(td->td_vslock_sz == 0,
+	    ("userret: Returning with vslock-wired space"));
 #ifdef VIMAGE
 	/* Unfortunately td_vnet_lpush needs VNET_DEBUG. */
 	VNET_ASSERT(curvnet == NULL,
@@ -184,16 +203,8 @@ userret(struct thread *td, struct trapframe *frame)
 	    (td->td_vnet_lpush != NULL) ? td->td_vnet_lpush : "N/A"));
 #endif
 #ifdef RACCT
-	if (racct_enable && p->p_throttled != 0) {
-		PROC_LOCK(p);
-		while (p->p_throttled != 0) {
-			msleep(p->p_racct, &p->p_mtx, 0, "racct",
-			    p->p_throttled < 0 ? 0 : p->p_throttled);
-			if (p->p_throttled > 0)
-				p->p_throttled = 0;
-		}
-		PROC_UNLOCK(p);
-	}
+	if (__predict_false(racct_enable && p->p_throttled != 0))
+		racct_proc_throttled(p);
 #endif
 }
 
@@ -269,8 +280,7 @@ ast(struct trapframe *framep)
 #endif
 		thread_lock(td);
 		sched_prio(td, td->td_user_pri);
-		mi_switch(SW_INVOL | SWT_NEEDRESCHED, NULL);
-		thread_unlock(td);
+		mi_switch(SW_INVOL | SWT_NEEDRESCHED);
 #ifdef KTRACE
 		if (KTRPOINT(td, KTR_CSW))
 			ktrcsw(0, 1, __func__);

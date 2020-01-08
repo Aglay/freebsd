@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1988, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -33,7 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/libkern.h>
 
 char *
-strcpy(char * __restrict to, const char * __restrict from)
+(strcpy)(char * __restrict to, const char * __restrict from)
 {
 	char *save = to;
 

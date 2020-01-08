@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1980, 1989, 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -66,3 +68,7 @@ extern int use_kvm;
 #define NVAL(indx)  namelist[(indx)].n_value
 #define NPTR(indx)  (void *)NVAL((indx))
 #define NREAD(indx, buf, len) kvm_ckread(NPTR((indx)), (buf), (len))
+
+extern void putint(int, int, int, int);
+extern void putfloat(double, int, int, int, int, int);
+extern void putlongdouble(long double, int, int, int, int, int);

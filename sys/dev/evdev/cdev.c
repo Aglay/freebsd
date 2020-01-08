@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2014 Jakub Wojciech Klama <jceel@FreeBSD.org>
- * Copyright (c) 2015-2016 Vladimir Kondratyev <wulf@cicgroup.ru>
+ * Copyright (c) 2015-2016 Vladimir Kondratyev <wulf@FreeBSD.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,24 +29,23 @@
 
 #include "opt_evdev.h"
 
-#include <sys/types.h>
-#include <sys/bitstring.h>
-#include <sys/systm.h>
 #include <sys/param.h>
-#include <sys/kernel.h>
+#include <sys/bitstring.h>
 #include <sys/conf.h>
-#include <sys/uio.h>
-#include <sys/proc.h>
-#include <sys/poll.h>
 #include <sys/filio.h>
 #include <sys/fcntl.h>
-#include <sys/selinfo.h>
+#include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <sys/poll.h>
+#include <sys/proc.h>
+#include <sys/selinfo.h>
+#include <sys/systm.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 
-#include <dev/evdev/input.h>
 #include <dev/evdev/evdev.h>
 #include <dev/evdev/evdev_private.h>
+#include <dev/evdev/input.h>
 
 #ifdef EVDEV_DEBUG
 #define	debugf(client, fmt, args...)	printf("evdev cdev: "fmt"\n", ##args)
@@ -350,6 +349,19 @@ evdev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 	if (client->ec_revoked || evdev == NULL)
 		return (ENODEV);
 
+	/*
+	 * Fix evdev state corrupted with discarding of kdb events.
+	 * EVIOCGKEY and EVIOCGLED ioctls can suffer from this.
+	 */
+	if (evdev->ev_kdb_active) {
+		EVDEV_LOCK(evdev);
+		if (evdev->ev_kdb_active) {
+			evdev->ev_kdb_active = false;
+			evdev_restore_after_kdb(evdev);
+		}
+		EVDEV_UNLOCK(evdev);
+	}
+
 	/* file I/O ioctl handling */
 	switch (cmd) {
 	case FIOSETOWN:
@@ -420,7 +432,7 @@ evdev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 			return (ENOTSUP);
 
 		ke = (struct input_keymap_entry *)data;
-		evdev->ev_methods->ev_get_keycode(evdev, evdev->ev_softc, ke);
+		evdev->ev_methods->ev_get_keycode(evdev, ke);
 		return (0);
 
 	case EVIOCSKEYCODE:
@@ -433,7 +445,7 @@ evdev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag,
 			return (ENOTSUP);
 
 		ke = (struct input_keymap_entry *)data;
-		evdev->ev_methods->ev_set_keycode(evdev, evdev->ev_softc, ke);
+		evdev->ev_methods->ev_set_keycode(evdev, ke);
 		return (0);
 
 	case EVIOCGABS(0) ... EVIOCGABS(ABS_MAX):

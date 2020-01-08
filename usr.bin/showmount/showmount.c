@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993, 1995
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -51,6 +53,7 @@ static const char rcsid[] =
 #include <sys/socketvar.h>
 
 #include <err.h>
+#include <getopt.h>
 #include <netdb.h>
 #include <rpc/rpc.h>
 #include <rpc/pmap_clnt.h>
@@ -100,6 +103,14 @@ int xdr_exportslist(XDR *, struct exportslist **);
 int tcp_callrpc(const char *host, int prognum, int versnum, int procnum,
 		xdrproc_t inproc, char *in, xdrproc_t outproc, char *out);
 
+static const struct option long_opts[] = {
+	{ "all",			no_argument,	NULL,	'a' },
+	{ "directories",	no_argument,	NULL,	'd' },
+	{ "exports-script",	no_argument,	NULL,	'E' },
+	{ "exports",		no_argument,	NULL,	'e' },
+	{ NULL,				0,				NULL,	0 },
+};
+
 /*
  * This command queries the NFS mount daemon for it's mount list and/or
  * it's exports list and prints them out.
@@ -117,7 +128,7 @@ main(int argc, char **argv)
 	const char *host;
 	int ch, estat, nbytes;
 
-	while ((ch = getopt(argc, argv, "adEe13")) != -1)
+	while ((ch = getopt_long(argc, argv, "+adEe13", long_opts, NULL)) != -1)
 		switch (ch) {
 		case 'a':
 			if (type == 0) {
@@ -277,11 +288,15 @@ xdr_mntdump(XDR *xdrsp, struct mountlist **mlp)
 			return (0);
 		mp->ml_left = mp->ml_right = (struct mountlist *)0;
 		strp = mp->ml_host;
-		if (!xdr_string(xdrsp, &strp, MNTNAMLEN))
+		if (!xdr_string(xdrsp, &strp, MNTNAMLEN)) {
+			free(mp);
 			return (0);
+		}
 		strp = mp->ml_dirp;
-		if (!xdr_string(xdrsp, &strp, MNTPATHLEN))
+		if (!xdr_string(xdrsp, &strp, MNTPATHLEN)) {
+			free(mp);
 			return (0);
+		}
 
 		/*
 		 * Build a binary tree on sorted order of either host or dirp.

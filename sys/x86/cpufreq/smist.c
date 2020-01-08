@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Bruno Ducrot
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/cpu.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/systm.h>
 
 #include <machine/bus.h>

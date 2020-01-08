@@ -6,8 +6,8 @@ _LIBARCHIVEDIR=	${SRCTOP}/contrib/libarchive
 
 LIB=	archive
 
-LIBADD=	z bz2 lzma bsdxml
-CFLAGS+= -DHAVE_BZLIB_H=1 -DHAVE_LIBLZMA=1 -DHAVE_LZMA_H=1
+LIBADD=	z bz2 lzma bsdxml zstd
+CFLAGS+= -DHAVE_BZLIB_H=1 -DHAVE_LIBLZMA=1 -DHAVE_LZMA_H=1 -DHAVE_ZSTD_H=1 -DHAVE_LIBZSTD=1
 
 # FreeBSD SHLIB_MAJOR value is managed as part of the FreeBSD system.
 # It has no real relation to the libarchive version number.
@@ -15,6 +15,7 @@ SHLIB_MAJOR= 7
 
 CFLAGS+=	-DPLATFORM_CONFIG_H=\"${.CURDIR}/config_freebsd.h\"
 CFLAGS+=	-I${.OBJDIR}
+CFLAGS+=	-I${SRCTOP}/sys/contrib/zstd/lib
 
 .if ${MK_OPENSSL} != "no"
 CFLAGS+=	-DWITH_OPENSSL
@@ -45,6 +46,8 @@ INCS=	archive.h archive_entry.h
 
 # Sources to be compiled.
 SRCS=	archive_acl.c					\
+	archive_blake2sp_ref.c				\
+	archive_blake2s_ref.c				\
 	archive_check_magic.c				\
 	archive_cmdline.c				\
 	archive_cryptor.c				\
@@ -64,6 +67,7 @@ SRCS=	archive_acl.c					\
 	archive_pack_dev.c				\
 	archive_pathmatch.c				\
 	archive_ppmd7.c					\
+	archive_ppmd8.c					\
 	archive_random.c				\
 	archive_rb.c					\
 	archive_read.c					\
@@ -94,6 +98,7 @@ SRCS=	archive_acl.c					\
 	archive_read_support_filter_rpm.c		\
 	archive_read_support_filter_uu.c		\
 	archive_read_support_filter_xz.c		\
+	archive_read_support_filter_zstd.c		\
 	archive_read_support_format_7zip.c		\
 	archive_read_support_format_all.c		\
 	archive_read_support_format_ar.c		\
@@ -105,6 +110,7 @@ SRCS=	archive_acl.c					\
 	archive_read_support_format_lha.c		\
 	archive_read_support_format_mtree.c		\
 	archive_read_support_format_rar.c		\
+	archive_read_support_format_rar5.c		\
 	archive_read_support_format_raw.c		\
 	archive_read_support_format_tar.c		\
 	archive_read_support_format_warc.c		\
@@ -136,6 +142,7 @@ SRCS=	archive_acl.c					\
 	archive_write_add_filter_program.c		\
 	archive_write_add_filter_uuencode.c		\
 	archive_write_add_filter_xz.c			\
+	archive_write_add_filter_zstd.c			\
 	archive_write_set_format.c			\
 	archive_write_set_format_7zip.c			\
 	archive_write_set_format_ar.c			\
@@ -162,6 +169,7 @@ SRCS=	archive_acl.c					\
 MAN=	archive_entry.3					\
 	archive_entry_acl.3				\
 	archive_entry_linkify.3				\
+	archive_entry_misc.3				\
 	archive_entry_paths.3				\
 	archive_entry_perms.3				\
 	archive_entry_stat.3				\
@@ -413,8 +421,7 @@ MLINKS+=	archive_write_set_options.3 archive_write_set_format_option.3
 MLINKS+=	archive_write_set_options.3 archive_write_set_option.3
 MLINKS+=	libarchive.3 archive.3
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.lib.mk>

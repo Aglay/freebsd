@@ -45,10 +45,12 @@ enum arm64_bus {
 
 extern enum arm64_bus arm64_bus_method;
 
-extern vm_paddr_t physmap[];
-extern u_int physmap_idx;
-
+void dbg_init(void);
 void initarm(struct arm64_bootparams *);
+vm_offset_t parse_boot_param(struct arm64_bootparams *abp);
+#ifdef FDT
+void parse_fdt_bootargs(void);
+#endif
 extern void (*pagezero)(void *);
 
 #endif /* _MACHINE_MACHDEP_H_ */

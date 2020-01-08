@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1992, 1993, 1995
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -79,12 +81,8 @@ static int
 fdesc_mount(struct mount *mp)
 {
 	struct fdescmount *fmp;
-	struct thread *td = curthread;
 	struct vnode *rvp;
 	int error;
-
-	if (!prison_allow(td->td_ucred, PR_ALLOW_MOUNT_FDESCFS))
-		return (EPERM);
 
 	/*
 	 * Update is a no-op
@@ -101,6 +99,8 @@ fdesc_mount(struct mount *mp)
 	 */
 	mp->mnt_data = fmp;
 	fmp->flags = 0;
+	if (vfs_getopt(mp->mnt_optnew, "linrdlnk", NULL, NULL) == 0)
+		fmp->flags |= FMNT_LINRDLNKF;
 	error = fdesc_allocvp(Froot, -1, FD_ROOT, mp, &rvp);
 	if (error) {
 		free(fmp, M_FDESCMNT);
@@ -110,7 +110,7 @@ fdesc_mount(struct mount *mp)
 	rvp->v_type = VDIR;
 	rvp->v_vflag |= VV_ROOT;
 	fmp->f_root = rvp;
-	VOP_UNLOCK(rvp, 0);
+	VOP_UNLOCK(rvp);
 	/* XXX -- don't mark as local to work around fts() problems */
 	/*mp->mnt_flag |= MNT_LOCAL;*/
 	vfs_getnewfsid(mp);

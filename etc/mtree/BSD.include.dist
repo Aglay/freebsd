@@ -128,17 +128,15 @@
         ..
         io
         ..
-        lmc
-        ..
         mfi
+        ..
+        mlx5
         ..
         mmc
         ..
         mpt
             mpilib
             ..
-        ..
-        nand
         ..
         nvme
         ..
@@ -152,11 +150,17 @@
         ..
         ppbus
         ..
+        pwm
+        ..
         smbus
         ..
         speaker
         ..
+        tcp_log
+        ..
         usb
+        ..
+        veriexec
         ..
         vkbd
         ..
@@ -177,8 +181,6 @@
         fdescfs
         ..
         msdosfs
-        ..
-        nandfs
         ..
         nfs
         ..
@@ -255,6 +257,8 @@
     ..
     lib80211
     ..
+    libipt
+    ..
     libmilter
     ..
     libxo
@@ -284,6 +288,8 @@
     netinet
         cc
         ..
+        netdump
+        ..
     ..
     netinet6
     ..
@@ -311,6 +317,18 @@
     ..
     nfsserver
     ..
+    opencsd
+        c_api
+        ..
+        etmv3
+        ..
+        etmv4
+        ..
+        ptm
+        ..
+        stm
+        ..
+    ..
     openssl
     ..
     pcap
@@ -335,6 +353,8 @@
         mac_mls
         ..
         mac_partition
+        ..
+        mac_veriexec
         ..
     ..
     ssp

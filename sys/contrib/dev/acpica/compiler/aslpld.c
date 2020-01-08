@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -682,12 +682,12 @@ OpcDoPld (
 
     /* Disable further optimization */
 
-    Op->Asl.CompileFlags &= ~NODE_COMPILE_TIME_CONST;
+    Op->Asl.CompileFlags &= ~OP_COMPILE_TIME_CONST;
     UtSetParseOpName (Op);
 
     /* Child node is the buffer length */
 
-    NewOp = TrAllocateNode (PARSEOP_INTEGER);
+    NewOp = TrAllocateOp (PARSEOP_INTEGER);
 
     NewOp->Asl.AmlOpcode = AML_BYTE_OP;
     NewOp->Asl.Value.Integer = 20;
@@ -698,7 +698,7 @@ OpcDoPld (
 
     /* Peer to the child is the raw buffer data */
 
-    NewOp = TrAllocateNode (PARSEOP_RAW_DATA);
+    NewOp = TrAllocateOp (PARSEOP_RAW_DATA);
     NewOp->Asl.AmlOpcode = AML_RAW_DATA_BUFFER;
     NewOp->Asl.AmlLength = 20;
     NewOp->Asl.Value.String = ACPI_CAST_PTR (char, Buffer);
@@ -728,11 +728,7 @@ OpcEncodePldBuffer (
     UINT32                  Dword;
 
 
-    Buffer = ACPI_ALLOCATE_ZEROED (ACPI_PLD_BUFFER_SIZE);
-    if (!Buffer)
-    {
-        return (NULL);
-    }
+    Buffer = ACPI_CAST_PTR (UINT32, UtLocalCacheCalloc (ACPI_PLD_BUFFER_SIZE));
 
     /* First 32 bits */
 

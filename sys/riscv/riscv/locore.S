@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2015-2016 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015-2018 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * Portions of this software were developed by SRI International and the
@@ -34,7 +34,7 @@
  * $FreeBSD$
  */
 
-#include "assym.s"
+#include "assym.inc"
 
 #include <sys/syscall.h>
 #include <machine/asm.h>
@@ -53,110 +53,37 @@
 	.text
 	.globl _start
 _start:
-	/* Setup supervisor trap vector */
-	la	t0, cpu_exception_handler
-	csrw	stvec, t0
+	/* Get the physical address kernel loaded to */
+	lla	t0, virt_map
+	ld	t1, 0(t0)
+	sub	t1, t1, t0
+	li	t2, KERNBASE
+	sub	s9, t2, t1	/* s9 = physmem base */
 
-	/* Ensure sscratch is zero */
-	li	t0, 0
-	csrw	sscratch, t0
+	/*
+	 * a0 = hart id
+	 * a1 = dtbp
+	 */
 
-	/* Load physical memory information */
-	li	a0, 0
-	la	a1, memory_info
-	call	sbi_query_memory
+	/* Pick a hart to run the boot process. */
+	lla	t0, hart_lottery
+	li	t1, 1
+	amoadd.w t0, t1, 0(t0)
 
-	/* Store base to s6 */
-	la	s6, memory_info
-	ld	s6, 0(s6)	/* s6 = physmem base */
-
-	/* Direct secondary cores to mpentry */
-	call	sbi_hart_id
-	bnez	a0, mpentry
+	/*
+	 * We must jump to mpentry in the non-BSP case because the offset is
+	 * too large to fit in a 12-bit branch immediate.
+	 */
+	beqz	t0, 1f
+	j	mpentry
 
 	/*
 	 * Page tables
 	 */
-
-	/* Create an L1 page for early devmap */
-	la	s1, pagetable_l1
-	la	s2, pagetable_l2_devmap	/* Link to next level PN */
-	li	t0, KERNBASE
-	sub	s2, s2, t0
-	add	s2, s2, s6
-	srli	s2, s2, PAGE_SHIFT
-
-	li	a5, (VM_MAX_KERNEL_ADDRESS - L2_SIZE)
-	srli	a5, a5, L1_SHIFT	/* >> L1_SHIFT */
-	andi	a5, a5, 0x1ff		/* & 0x1ff */
-	li	t4, PTE_V
-	slli	t5, s2, PTE_PPN0_S	/* (s2 << PTE_PPN0_S) */
-	or	t6, t4, t5
-
-	/* Store single level1 PTE entry to position */
-	li	a6, PTE_SIZE
-	mulw	a5, a5, a6
-	add	t0, s1, a5
-	sd	t6, (t0)
-
-	/* Create an L1 page for SBI */
-	la	s1, pagetable_l1
-	la	s2, pagetable_l2_sbi	/* Link to next level PN */
-	li	t0, KERNBASE
-	sub	s2, s2, t0
-	add	s2, s2, s6
-	srli	s2, s2, PAGE_SHIFT
-	li	a5, 511
-	li	t4, PTE_V
-	slli	t5, s2, PTE_PPN0_S	/* (s2 << PTE_PPN0_S) */
-	or	t6, t4, t5
-
-	/* Store SBI L1 PTE entry to position */
-	li	a6, PTE_SIZE
-	mulw	a5, a5, a6
-	add	t0, s1, a5
-	sd	t6, (t0)
-
-	/* Create an L2 page for SBI */
-	la	s1, pagetable_l2_sbi
-	la	s2, pagetable_l3_sbi	/* Link to next level PN */
-	li	t0, KERNBASE
-	sub	s2, s2, t0
-	add	s2, s2, s6
-	srli	s2, s2, PAGE_SHIFT
-	li	a5, 511
-	li	t4, PTE_V
-	slli	t5, s2, PTE_PPN0_S	/* (s2 << PTE_PPN0_S) */
-	or	t6, t4, t5
-
-	/* Store SBI L2 PTE entry to position */
-	li	a6, PTE_SIZE
-	mulw	a5, a5, a6
-	add	t0, s1, a5
-	sd	t6, (t0)
-
-	/* Create an L3 page for SBI */
-	la	s1, pagetable_l3_sbi
-	li	s2, 0x8000b000
-	srli	s2, s2, PAGE_SHIFT
-	li	a5, 511
-	li	t4, PTE_V | PTE_RX | PTE_W
-	slli	t5, s2, PTE_PPN0_S	/* (s2 << PTE_PPN0_S) */
-	or	t6, t4, t5
-
-	/* Store SBI L3 PTE entry to position */
-	li	a6, PTE_SIZE
-	mulw	a5, a5, a6
-	add	t0, s1, a5
-	sd	t6, (t0)
-	/* END SBI page creation */
-
+1:
 	/* Add L1 entry for kernel */
-	la	s1, pagetable_l1
-	la	s2, pagetable_l2	/* Link to next level PN */
-	li	t0, KERNBASE
-	sub	s2, s2, t0
-	add	s2, s2, s6
+	lla	s1, pagetable_l1
+	lla	s2, pagetable_l2	/* Link to next level PN */
 	srli	s2, s2, PAGE_SHIFT
 
 	li	a5, KERNBASE
@@ -173,13 +100,13 @@ _start:
 	sd	t6, (t0)
 
 	/* Level 2 superpages (512 x 2MiB) */
-	la	s1, pagetable_l2
-	srli	t4, s6, 21		/* Div physmem base by 2 MiB */
+	lla	s1, pagetable_l2
+	srli	t4, s9, 21		/* Div physmem base by 2 MiB */
 	li	t2, 512			/* Build 512 entries */
 	add	t3, t4, t2
 	li	t5, 0
 2:
-	li	t0, (PTE_V | PTE_RWX)
+	li	t0, (PTE_KERN | PTE_X)
 	slli	t2, t4, PTE_PPN1_S	/* << PTE_PPN1_S */
 	or	t5, t0, t2
 	sd	t5, (s1)		/* Store PTE entry to position */
@@ -188,35 +115,106 @@ _start:
 	addi	t4, t4, 1
 	bltu	t4, t3, 2b
 
-	/* Set page tables base register */
-	la	s2, pagetable_l1
-	li	t0, KERNBASE
-	sub	s2, s2, t0
-	add	s2, s2, s6
+	/* Create an L1 page for early devmap */
+	lla	s1, pagetable_l1
+	lla	s2, pagetable_l2_devmap	/* Link to next level PN */
 	srli	s2, s2, PAGE_SHIFT
-	csrw	sptbr, s2
+
+	li	a5, (VM_MAX_KERNEL_ADDRESS - L2_SIZE)
+	srli	a5, a5, L1_SHIFT	/* >> L1_SHIFT */
+	andi	a5, a5, 0x1ff		/* & 0x1ff */
+	li	t4, PTE_V
+	slli	t5, s2, PTE_PPN0_S	/* (s2 << PTE_PPN0_S) */
+	or	t6, t4, t5
+
+	/* Store single level1 PTE entry to position */
+	li	a6, PTE_SIZE
+	mulw	a5, a5, a6
+	add	t0, s1, a5
+	sd	t6, (t0)
+
+	/* Create an L2 page superpage for DTB */
+	lla	s1, pagetable_l2_devmap
+	mv	s2, a1
+	srli	s2, s2, PAGE_SHIFT
+
+	li	t0, (PTE_KERN)
+	slli	t2, s2, PTE_PPN0_S	/* << PTE_PPN0_S */
+	or	t0, t0, t2
+
+	/* Store PTE entry to position */
+	li	a6, PTE_SIZE
+	li	a5, 510
+	mulw	a5, a5, a6
+	add	t1, s1, a5
+	sd	t0, (t1)
+
+	/* Page tables END */
+
+	/* Setup supervisor trap vector */
+	lla	t0, va
+	sub	t0, t0, s9
+	li	t1, KERNBASE
+	add	t0, t0, t1
+	csrw	stvec, t0
+
+	/* Set page tables base register */
+	lla	s2, pagetable_l1
+	srli	s2, s2, PAGE_SHIFT
+	li	t0, SATP_MODE_SV39
+	or	s2, s2, t0
+	sfence.vma
+	csrw	satp, s2
+
+	.align 2
+va:
+
+	/* Setup supervisor trap vector */
+	la	t0, cpu_exception_handler
+	csrw	stvec, t0
+
+	/* Ensure sscratch is zero */
+	li	t0, 0
+	csrw	sscratch, t0
+
+	/* Set the global pointer */
+.option push
+.option norelax
+	la	gp, __global_pointer$
+.option pop
 
 	/* Initialize stack pointer */
 	la	s3, initstack_end
 	mv	sp, s3
-	addi	sp, sp, -PCB_SIZE
 
-	/* Clear BSS  */
-	la	a0, _C_LABEL(__bss_start)
+	/* Allocate space for thread0 PCB and riscv_bootparams */
+	addi	sp, sp, -(PCB_SIZE + RISCV_BOOTPARAMS_SIZE) & ~STACKALIGNBYTES
+
+	/* Clear BSS */
+	la	s0, _C_LABEL(__bss_start)
 	la	s1, _C_LABEL(_end)
 1:
-	sd	zero, 0(a0)
-	addi	a0, a0, 8
-	bltu	a0, s1, 1b
+	sd	zero, 0(s0)
+	addi	s0, s0, 8
+	bltu	s0, s1, 1b
+
+#ifdef SMP
+	/* Store boot hart id. */
+	la	t0, boot_hart
+	sw	a0, 0(t0)
+#endif
 
 	/* Fill riscv_bootparams */
-	addi	sp, sp, -16
-
 	la	t0, pagetable_l1
-	sd	t0, 0(sp) /* kern_l1pt */
+	sd	t0, RISCV_BOOTPARAMS_KERN_L1PT(sp)
+	sd	s9, RISCV_BOOTPARAMS_KERN_PHYS(sp)
 
-	la	t0, initstack_end
-	sd	t0, 8(sp) /* kern_stack */
+	la	t0, initstack
+	sd	t0, RISCV_BOOTPARAMS_KERN_STACK(sp)
+
+	li	t0, (VM_MAX_KERNEL_ADDRESS - 2 * L2_SIZE)
+	sd	t0, RISCV_BOOTPARAMS_DTBP_VIRT(sp)
+	sd	a1, RISCV_BOOTPARAMS_DTBP_PHYS(sp)
 
 	mv	a0, sp
 	call	_C_LABEL(initriscv)	/* Off we go */
@@ -258,14 +256,12 @@ pagetable_l2:
 	.space	PAGE_SIZE
 pagetable_l2_devmap:
 	.space	PAGE_SIZE
-pagetable_l2_sbi:
-	.space	PAGE_SIZE
-pagetable_l3_sbi:
-	.space	PAGE_SIZE
 
-	.globl memory_info
-memory_info:
-	.space	(24)
+	.align 3
+virt_map:
+	.quad   virt_map
+hart_lottery:
+	.space	4
 
 	.globl init_pt_va
 init_pt_va:
@@ -286,11 +282,11 @@ END(mpentry)
 ENTRY(mpentry)
 	/*
 	 * Calculate the offset to __riscv_boot_ap
-	 * for current core, cpuid in a0.
+	 * for the current core, cpuid is in a0.
 	 */
 	li	t1, 4
 	mulw	t1, t1, a0
-	/* Get pointer */
+	/* Get the pointer */
 	la	t0, __riscv_boot_ap
 	add	t0, t0, t1
 
@@ -299,19 +295,46 @@ ENTRY(mpentry)
 	lw	t1, 0(t0)
 	beqz	t1, 1b
 
-	/* Set page tables base register */
-	la	s2, pagetable_l1
-	li	t0, KERNBASE
-	sub	s2, s2, t0
-	add	s2, s2, s6
-	srli	s2, s2, PAGE_SHIFT
-	csrw	sptbr, s2
-
 	/* Setup stack pointer */
 	la	t0, secondary_stacks
 	li	t1, (PAGE_SIZE * KSTACK_PAGES)
-	mulw	t1, t1, a0
+	mulw	t2, t1, a0
+	add	t0, t0, t2
+	add	t0, t0, t1
+	sub	t0, t0, s9
+	li	t1, KERNBASE
 	add	sp, t0, t1
+
+	/* Setup supervisor trap vector */
+	la	t0, mpva
+	sub	t0, t0, s9
+	li	t1, KERNBASE
+	add	t0, t0, t1
+	csrw	stvec, t0
+
+	/* Set page tables base register */
+	la	s2, pagetable_l1
+	srli	s2, s2, PAGE_SHIFT
+	li	t0, SATP_MODE_SV39
+	or	s2, s2, t0
+	sfence.vma
+	csrw	satp, s2
+
+	.align 2
+mpva:
+	/* Setup supervisor trap vector */
+	la	t0, cpu_exception_handler
+	csrw	stvec, t0
+
+	/* Ensure sscratch is zero */
+	li	t0, 0
+	csrw	sscratch, t0
+
+	/* Set the global pointer */
+.option push
+.option norelax
+	la	gp, __global_pointer$
+.option pop
 
 	call	init_secondary
 END(mpentry)

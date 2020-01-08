@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 David Chisnall
  * All rights reserved.
  *
@@ -32,6 +34,7 @@
 
 #ifndef _FDT_HH_
 #define _FDT_HH_
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -54,6 +57,7 @@ namespace fdt
 {
 class property;
 class node;
+class device_tree;
 /**
  * Type for (owned) pointers to properties.
  */
@@ -368,7 +372,7 @@ class property
 	/**
 	 * Returns the key for this property.
 	 */
-	inline std::string get_key()
+	inline const std::string &get_key()
 	{
 		return key;
 	}
@@ -407,10 +411,25 @@ class node
 	 */
 	std::string name;
 	/**
+	 * The name of the node is a path reference.
+	 */
+	bool name_is_path_reference = false;
+	/**
 	 * The unit address of the node, which is optionally written after the
 	 * name followed by an at symbol.
 	 */
 	std::string unit_address;
+	/**
+	 * A flag indicating that this node has been marked /omit-if-no-ref/ and
+	 * will be omitted if it is not referenced, either directly or indirectly,
+	 * by a node that is not similarly denoted.
+	 */
+	bool omit_if_no_ref = false;
+	/**
+	 * A flag indicating that this node has been referenced, either directly
+	 * or indirectly, by a node that is not marked /omit-if-no-ref/.
+	 */
+	bool used = false;
 	/**
 	 * The type for the property vector.
 	 */
@@ -419,6 +438,25 @@ class node
 	 * Iterator type for child nodes.
 	 */
 	typedef std::vector<node_ptr>::iterator child_iterator;
+	/**
+	 * Recursion behavior to be observed for visiting
+	 */
+	enum visit_behavior
+	{
+		/**
+		 * Recurse as normal through the rest of the tree.
+		 */
+		VISIT_RECURSE,
+		/**
+		 * Continue recursing through the device tree, but do not
+		 * recurse through this branch of the tree any further.
+		 */
+		VISIT_CONTINUE,
+		/**
+		 * Immediately halt the visit.  No further nodes will be visited.
+		 */
+		VISIT_BREAK
+	};
 	private:
 	/**
 	 * Adaptor to use children in range-based for loops.
@@ -482,6 +520,7 @@ class node
 	 * already been parsed.
 	 */
 	node(text_input_buffer &input,
+	     device_tree &tree,
 	     std::string &&n,
 	     std::unordered_set<std::string> &&l,
 	     std::string &&a,
@@ -578,6 +617,7 @@ class node
 	 * have been parsed.
 	 */
 	static node_ptr parse(text_input_buffer &input,
+	                      device_tree &tree,
 	                      std::string &&name,
 	                      std::unordered_set<std::string> &&label=std::unordered_set<std::string>(),
 	                      std::string &&address=std::string(),
@@ -615,10 +655,17 @@ class node
 		children.push_back(std::move(n));
 	}
 	/**
+	 * Deletes any children from this node.
+	 */
+	inline void delete_children_if(bool (*predicate)(node_ptr &))
+	{
+		children.erase(std::remove_if(children.begin(), children.end(), predicate), children.end());
+	}
+	/**
 	 * Merges a node into this one.  Any properties present in both are
 	 * overridden, any properties present in only one are preserved.
 	 */
-	void merge_node(node_ptr other);
+	void merge_node(node_ptr &other);
 	/**
 	 * Write this node to the specified output.  Although nodes do not
 	 * refer to a string table directly, their properties do.  The string
@@ -633,9 +680,13 @@ class node
 	 */
 	void write_dts(FILE *file, int indent);
 	/**
-	 * Recursively visit this node and then its children.
+	 * Recursively visit this node and then its children based on the
+	 * callable's return value.  The callable may return VISIT_BREAK
+	 * immediately halt all recursion and end the visit, VISIT_CONTINUE to
+	 * not recurse into the current node's children, or VISIT_RECURSE to recurse
+	 * through children as expected.  parent will be passed to the callable.
 	 */
-	void visit(std::function<void(node&)>);
+	visit_behavior visit(std::function<visit_behavior(node&, node*)>, node *parent);
 };
 
 /**
@@ -674,12 +725,17 @@ class device_tree
 	/**
 	 * The format that we should use for writing phandles.
 	 */
-	phandle_format phandle_node_name;
+	phandle_format phandle_node_name = EPAPR;
 	/**
 	 * Flag indicating that this tree is valid.  This will be set to false
 	 * on parse errors. 
 	 */
-	bool valid;
+	bool valid = true;
+	/**
+	 * Flag indicating that this tree requires garbage collection.  This will be
+	 * set to true if a node marked /omit-if-no-ref/ is encountered.
+	 */
+	bool garbage_collect = false;
 	/**
 	 * Type used for memory reservations.  A reservation is two 64-bit
 	 * values indicating a base address and length in memory that the
@@ -706,6 +762,12 @@ class device_tree
 	 * with the full path to its target.
 	 */
 	std::unordered_map<std::string, node_path> node_paths;
+	/**
+	 * All of the elements in `node_paths` in the order that they were
+	 * created.  This is used for emitting the `__symbols__` section, where
+	 * we want to guarantee stable ordering.
+	 */
+	std::vector<std::pair<std::string, node_path>> ordered_node_paths;
 	/**
 	 * A collection of property values that are references to other nodes.
 	 * These should be expanded to the full path of their targets.
@@ -773,23 +835,23 @@ class device_tree
 	/**
 	 * The default boot CPU, specified in the device tree header.
 	 */
-	uint32_t boot_cpu;
+	uint32_t boot_cpu = 0;
 	/**
 	 * The number of empty reserve map entries to generate in the blob.
 	 */
-	uint32_t spare_reserve_map_entries;
+	uint32_t spare_reserve_map_entries = 0;
 	/**
 	 * The minimum size in bytes of the blob.
 	 */
-	uint32_t minimum_blob_size;
+	uint32_t minimum_blob_size = 0;
 	/**
 	 * The number of bytes of padding to add to the end of the blob.
 	 */
-	uint32_t blob_padding;
+	uint32_t blob_padding = 0;
 	/**
 	 * Is this tree a plugin?
 	 */
-	bool is_plugin;
+	bool is_plugin = false;
 	/**
 	 * Visit all of the nodes recursively, and if they have labels then add
 	 * them to the node_paths and node_names vectors so that they can be
@@ -797,6 +859,12 @@ class device_tree
 	 * properties that have been explicitly added.  
 	 */
 	void collect_names_recursive(node_ptr &n, node_path &path);
+	/**
+	 * Assign a phandle property to a single node.  The next parameter
+	 * holds the phandle to be assigned, and will be incremented upon
+	 * assignment.
+	 */
+	property_ptr assign_phandle(node *n, uint32_t &next);
 	/**
 	 * Assign phandle properties to all nodes that have been referenced and
 	 * require one.  This method will recursively visit the tree starting at
@@ -810,9 +878,21 @@ class device_tree
 	/**
 	 * Resolves all cross references.  Any properties that refer to another
 	 * node must have their values replaced by either the node path or
-	 * phandle value.
+	 * phandle value.  The phandle parameter holds the next phandle to be
+	 * assigned, should the need arise.  It will be incremented upon each
+	 * assignment of a phandle.  Garbage collection of unreferenced nodes
+	 * marked for "delete if unreferenced" will also occur here.
 	 */
-	void resolve_cross_references();
+	void resolve_cross_references(uint32_t &phandle);
+	/**
+	 * Garbage collects nodes that have been marked /omit-if-no-ref/ and do not
+	 * have any references to them from nodes that are similarly marked.  This
+	 * is a fairly expensive operation.  The return value indicates whether the
+	 * tree has been dirtied as a result of this operation, so that the caller
+	 * may take appropriate measures to bring the device tree into a consistent
+	 * state as needed.
+	 */
+	bool garbage_collect_marked_nodes();
 	/**
 	 * Parses a dts file in the given buffer and adds the roots to the parsed
 	 * set.  The `read_header` argument indicates whether the header has
@@ -857,15 +937,33 @@ class device_tree
 	/**
 	 * Default constructor.  Creates a valid, but empty FDT.
 	 */
-	device_tree() : phandle_node_name(EPAPR), valid(true),
-		boot_cpu(0), spare_reserve_map_entries(0),
-		minimum_blob_size(0), blob_padding(0) {}
+	device_tree() {}
 	/**
 	 * Constructs a device tree from the specified file name, referring to
 	 * a file that contains a device tree blob.
 	 */
 	void parse_dtb(const std::string &fn, FILE *depfile);
 	/**
+	 * Construct a fragment wrapper around node.  This will assume that node's
+	 * name may be used as the target of the fragment, and the contents are to
+	 * be wrapped in an __overlay__ node.  The fragment wrapper will be assigned
+	 * fragnumas its fragment number, and fragment number will be incremented.
+	 */
+	node_ptr create_fragment_wrapper(node_ptr &node, int &fragnum);
+	/**
+	 * Generate a root node from the node passed in.  This is sensitive to
+	 * whether we're in a plugin context or not, so that if we're in a plugin we
+	 * can circumvent any errors that might normally arise from a non-/ root.
+	 * fragnum will be assigned to any fragment wrapper generated as a result
+	 * of the call, and fragnum will be incremented.
+	 */
+	node_ptr generate_root(node_ptr &node, int &fragnum);
+	/**
+	 * Reassign any fragment numbers from this new node, based on the given
+	 * delta.
+	 */
+	void reassign_fragment_numbers(node_ptr &node, int &delta);
+	/*
 	 * Constructs a device tree from the specified file name, referring to
 	 * a file that contains device tree source.
 	 */
@@ -876,6 +974,14 @@ class device_tree
 	inline bool is_valid()
 	{
 		return valid;
+	}
+	/**
+	 * Mark this tree as needing garbage collection, because an /omit-if-no-ref/
+	 * node has been encountered.
+	 */
+	void set_needs_garbage_collection()
+	{
+		garbage_collect = true;
 	}
 	/**
 	 * Sets the format for writing phandle properties.
@@ -904,7 +1010,10 @@ class device_tree
 	 */
 	void sort()
 	{
-		root->sort();
+		if (root)
+		{
+			root->sort();
+		}
 	}
 	/**
 	 * Adds a path to search for include files.  The argument must be a

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1994, 1995 The Regents of the University of California.
  * Copyright (c) 1994, 1995 Jan-Simon Pendry.
  * Copyright (c) 2005, 2006, 2012 Masanori Ozawa <ozawa@ongs.co.jp>, ONGS Inc.
@@ -165,7 +167,7 @@ unionfs_domount(struct mount *mp)
 		uid = va.va_uid;
 		gid = va.va_gid;
 	}
-	VOP_UNLOCK(mp->mnt_vnodecovered, LK_RELEASE);
+	VOP_UNLOCK(mp->mnt_vnodecovered);
 	if (error)
 		return (error);
 
@@ -250,7 +252,7 @@ unionfs_domount(struct mount *mp)
 	 * Save reference
 	 */
 	if (below) {
-		VOP_UNLOCK(upperrootvp, LK_RELEASE);
+		VOP_UNLOCK(upperrootvp);
 		vn_lock(lowerrootvp, LK_EXCLUSIVE | LK_RETRY);
 		ump->um_lowervp = upperrootvp;
 		ump->um_uppervp = lowerrootvp;
@@ -276,7 +278,7 @@ unionfs_domount(struct mount *mp)
 	/*
 	 * Unlock the node
 	 */
-	VOP_UNLOCK(ump->um_uppervp, LK_RELEASE);
+	VOP_UNLOCK(ump->um_uppervp);
 
 	/*
 	 * Get the unionfs root vnode.

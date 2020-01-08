@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2014 Andrew Turner
- * Copyright (c) 2015-2016 Ruslan Bukin <br@bsdpad.com>
+ * Copyright (c) 2015-2017 Ruslan Bukin <br@bsdpad.com>
  * All rights reserved.
  *
  * Portions of this software were developed by SRI International and the
@@ -44,10 +44,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/cons.h>
 #include <sys/cpu.h>
+#include <sys/devmap.h>
 #include <sys/exec.h>
 #include <sys/imgact.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/limits.h>
 #include <sys/linker.h>
 #include <sys/msgbuf.h>
@@ -61,12 +63,16 @@ __FBSDID("$FreeBSD$");
 #include <sys/syscallsubr.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
+#include <sys/tslog.h>
 #include <sys/ucontext.h>
+#include <sys/vmmeter.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <vm/vm_pager.h>
@@ -97,16 +103,14 @@ struct pcpu __pcpu[MAXCPU];
 
 static struct trapframe proc0_tf;
 
-vm_paddr_t phys_avail[PHYS_AVAIL_SIZE + 2];
-vm_paddr_t dump_avail[PHYS_AVAIL_SIZE + 2];
-
 int early_boot = 1;
 int cold = 1;
 long realmem = 0;
 long Maxmem = 0;
 
-#define	PHYSMAP_SIZE	(2 * (VM_PHYSSEG_MAX - 1))
-vm_paddr_t physmap[PHYSMAP_SIZE];
+#define	DTB_SIZE_MAX	(1024 * 1024)
+
+vm_paddr_t physmap[PHYS_AVAIL_ENTRIES];
 u_int physmap_idx;
 
 struct kva_md_info kmi;
@@ -115,28 +119,48 @@ int64_t dcache_line_size;	/* The minimum D cache line size */
 int64_t icache_line_size;	/* The minimum I cache line size */
 int64_t idcache_line_size;	/* The minimum cache line size */
 
+uint32_t boot_hart;	/* The hart we booted on. */
+cpuset_t all_harts;
+
 extern int *end;
-extern int *initstack_end;
-extern memory_block_info memory_info;
-
-struct pcpu *pcpup;
-
-uintptr_t mcall_trap(uintptr_t mcause, uintptr_t* regs);
-
-uintptr_t
-mcall_trap(uintptr_t mcause, uintptr_t* regs)
-{
-
-	return (0);
-}
 
 static void
 cpu_startup(void *dummy)
 {
 
+	sbi_print_version();
 	identify_cpu();
 
+	printf("real memory  = %ju (%ju MB)\n", ptoa((uintmax_t)realmem),
+	    ptoa((uintmax_t)realmem) / (1024 * 1024));
+
+	/*
+	 * Display any holes after the first chunk of extended memory.
+	 */
+	if (bootverbose) {
+		int indx;
+
+		printf("Physical memory chunk(s):\n");
+		for (indx = 0; phys_avail[indx + 1] != 0; indx += 2) {
+			vm_paddr_t size;
+
+			size = phys_avail[indx + 1] - phys_avail[indx];
+			printf(
+			    "0x%016jx - 0x%016jx, %ju bytes (%ju pages)\n",
+			    (uintmax_t)phys_avail[indx],
+			    (uintmax_t)phys_avail[indx + 1] - 1,
+			    (uintmax_t)size, (uintmax_t)size / PAGE_SIZE);
+		}
+	}
+
 	vm_ksubmap_init(&kmi);
+
+	printf("avail memory = %ju (%ju MB)\n",
+	    ptoa((uintmax_t)vm_free_count()),
+	    ptoa((uintmax_t)vm_free_count()) / (1024 * 1024));
+	if (bootverbose)
+		devmap_print_table();
+
 	bufinit();
 	vm_pager_bufferinit();
 }
@@ -148,16 +172,6 @@ cpu_idle_wakeup(int cpu)
 {
 
 	return (0);
-}
-
-void
-bzero(void *buf, size_t len)
-{
-	uint8_t *p;
-
-	p = buf;
-	while(len-- > 0)
-		*p++ = 0;
 }
 
 int
@@ -187,7 +201,6 @@ set_regs(struct thread *td, struct reg *regs)
 
 	frame = td->td_frame;
 	frame->tf_sepc = regs->sepc;
-	frame->tf_sstatus = regs->sstatus;
 	frame->tf_ra = regs->ra;
 	frame->tf_sp = regs->sp;
 	frame->tf_gp = regs->gp;
@@ -213,13 +226,14 @@ fill_fpregs(struct thread *td, struct fpreg *regs)
 		 * If we have just been running FPE instructions we will
 		 * need to save the state to memcpy it below.
 		 */
-		fpe_state_save(td);
+		if (td == curthread)
+			fpe_state_save(td);
 
 		memcpy(regs->fp_x, pcb->pcb_x, sizeof(regs->fp_x));
 		regs->fp_fcsr = pcb->pcb_fcsr;
 	} else
 #endif
-		memset(regs->fp_x, 0, sizeof(regs->fp_x));
+		memset(regs, 0, sizeof(*regs));
 
 	return (0);
 }
@@ -228,12 +242,17 @@ int
 set_fpregs(struct thread *td, struct fpreg *regs)
 {
 #ifdef FPE
+	struct trapframe *frame;
 	struct pcb *pcb;
 
+	frame = td->td_frame;
 	pcb = td->td_pcb;
 
 	memcpy(pcb->pcb_x, regs->fp_x, sizeof(regs->fp_x));
 	pcb->pcb_fcsr = regs->fp_fcsr;
+	pcb->pcb_fpflags |= PCB_FP_STARTED;
+	frame->tf_sstatus &= ~SSTATUS_FS_MASK;
+	frame->tf_sstatus |= SSTATUS_FS_CLEAN;
 #endif
 
 	return (0);
@@ -257,7 +276,7 @@ int
 ptrace_set_pc(struct thread *td, u_long addr)
 {
 
-	panic("ptrace_set_pc");
+	td->td_frame->tf_sepc = addr;
 	return (0);
 }
 
@@ -266,7 +285,7 @@ ptrace_single_step(struct thread *td)
 {
 
 	/* TODO; */
-	return (0);
+	return (EOPNOTSUPP);
 }
 
 int
@@ -274,11 +293,11 @@ ptrace_clear_single_step(struct thread *td)
 {
 
 	/* TODO; */
-	return (0);
+	return (EOPNOTSUPP);
 }
 
 void
-exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 	struct trapframe *tf;
 	struct pcb *pcb;
@@ -288,12 +307,7 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 
 	memset(tf, 0, sizeof(struct trapframe));
 
-	/*
-	 * We need to set a0 for init as it doesn't call
-	 * cpu_set_syscall_retval to copy the value. We also
-	 * need to set td_retval for the cases where we do.
-	 */
-	tf->tf_a[0] = td->td_retval[0] = stack;
+	tf->tf_a[0] = stack;
 	tf->tf_sp = STACKALIGN(stack);
 	tf->tf_ra = imgp->entry_addr;
 	tf->tf_sepc = imgp->entry_addr;
@@ -314,6 +328,9 @@ CTASSERT(sizeof(((struct trapframe *)0)->tf_s) ==
     sizeof((struct reg *)0)->s);
 CTASSERT(sizeof(((struct trapframe *)0)->tf_t) ==
     sizeof((struct reg *)0)->t);
+
+/* Support for FDT configurations only. */
+CTASSERT(FDT);
 
 int
 get_mcontext(struct thread *td, mcontext_t *mcp, int clear_ret)
@@ -353,7 +370,6 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	tf->tf_ra = mcp->mc_gpregs.gp_ra;
 	tf->tf_sp = mcp->mc_gpregs.gp_sp;
 	tf->tf_gp = mcp->mc_gpregs.gp_gp;
-	tf->tf_tp = mcp->mc_gpregs.gp_tp;
 	tf->tf_sepc = mcp->mc_gpregs.gp_sepc;
 	tf->tf_sstatus = mcp->mc_gpregs.gp_sstatus;
 
@@ -433,7 +449,9 @@ void
 cpu_halt(void)
 {
 
-	panic("cpu_halt");
+	intr_disable();
+	for (;;)
+		__asm __volatile("wfi");
 }
 
 /*
@@ -464,14 +482,16 @@ void
 spinlock_enter(void)
 {
 	struct thread *td;
+	register_t reg;
 
 	td = curthread;
 	if (td->td_md.md_spinlock_count == 0) {
+		reg = intr_disable();
 		td->td_md.md_spinlock_count = 1;
-		td->td_md.md_saved_sstatus_ie = intr_disable();
+		td->td_md.md_saved_sstatus_ie = reg;
+		critical_enter();
 	} else
 		td->td_md.md_spinlock_count++;
-	critical_enter();
 }
 
 void
@@ -481,11 +501,12 @@ spinlock_exit(void)
 	register_t sstatus_ie;
 
 	td = curthread;
-	critical_exit();
 	sstatus_ie = td->td_md.md_saved_sstatus_ie;
 	td->td_md.md_spinlock_count--;
-	if (td->td_md.md_spinlock_count == 0)
+	if (td->td_md.md_spinlock_count == 0) {
+		critical_exit();
 		intr_restore(sstatus_ie);
+	}
 }
 
 #ifndef	_SYS_SYSPROTO_H_
@@ -559,7 +580,6 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	struct thread *td;
 	struct proc *p;
 	int onstack;
-	int code;
 	int sig;
 
 	td = curthread;
@@ -567,7 +587,6 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	PROC_LOCK_ASSERT(p, MA_OWNED);
 
 	sig = ksi->ksi_signo;
-	code = ksi->ksi_code;
 	psp = p->p_sigacts;
 	mtx_assert(&psp->ps_mtx, MA_OWNED);
 
@@ -591,13 +610,14 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	fp = (struct sigframe *)STACKALIGN(fp);
 
 	/* Fill in the frame to copy out */
+	bzero(&frame, sizeof(frame));
 	get_mcontext(td, &frame.sf_uc.uc_mcontext, 0);
 	get_fpcontext(td, &frame.sf_uc.uc_mcontext);
 	frame.sf_si = ksi->ksi_info;
 	frame.sf_uc.uc_sigmask = *mask;
-	frame.sf_uc.uc_stack.ss_flags = (td->td_pflags & TDP_ALTSTACK) ?
-	    ((onstack) ? SS_ONSTACK : 0) : SS_DISABLE;
 	frame.sf_uc.uc_stack = td->td_sigstk;
+	frame.sf_uc.uc_stack.ss_flags = (td->td_pflags & TDP_ALTSTACK) != 0 ?
+	    (onstack ? SS_ONSTACK : 0) : SS_DISABLE;
 	mtx_unlock(&psp->ps_mtx);
 	PROC_UNLOCK(td->td_proc);
 
@@ -633,12 +653,15 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 static void
 init_proc0(vm_offset_t kstack)
 {
+	struct pcpu *pcpup;
 
 	pcpup = &__pcpu[0];
 
 	proc_linkup0(&proc0, &thread0);
 	thread0.td_kstack = kstack;
-	thread0.td_pcb = (struct pcb *)(thread0.td_kstack) - 1;
+	thread0.td_kstack_pages = KSTACK_PAGES;
+	thread0.td_pcb = (struct pcb *)(thread0.td_kstack +
+	    thread0.td_kstack_pages * PAGE_SIZE) - 1;
 	thread0.td_pcb->pcb_fpflags = 0;
 	thread0.td_frame = &proc0_tf;
 	pcpup->pc_curpcb = thread0.td_pcb;
@@ -688,7 +711,7 @@ add_physmap_entry(uint64_t base, uint64_t length, vm_paddr_t *physmap,
 
 	_physmap_idx += 2;
 	*physmap_idxp = _physmap_idx;
-	if (_physmap_idx == PHYSMAP_SIZE) {
+	if (_physmap_idx == PHYS_AVAIL_ENTRIES) {
 		printf(
 		"Too many segments in the physical address map, giving up\n");
 		return (0);
@@ -714,16 +737,13 @@ add_physmap_entry(uint64_t base, uint64_t length, vm_paddr_t *physmap,
 
 #ifdef FDT
 static void
-try_load_dtb(caddr_t kmdp)
+try_load_dtb(caddr_t kmdp, vm_offset_t dtbp)
 {
-	vm_offset_t dtbp;
 
 #if defined(FDT_DTB_STATIC)
 	dtbp = (vm_offset_t)&fdt_static_dtb;
-#else
-	/* TODO */
-	dtbp = (vm_offset_t)NULL;
 #endif
+
 	if (dtbp == (vm_offset_t)NULL) {
 		printf("ERROR loading DTB\n");
 		return;
@@ -742,6 +762,10 @@ cache_setup(void)
 {
 
 	/* TODO */
+
+	dcache_line_size = 0;
+	icache_line_size = 0;
+	idcache_line_size = 0;
 }
 
 /*
@@ -751,12 +775,14 @@ cache_setup(void)
 vm_offset_t
 fake_preload_metadata(struct riscv_bootparams *rvbp __unused)
 {
+	static uint32_t fake_preload[35];
 #ifdef DDB
 	vm_offset_t zstart = 0, zend = 0;
 #endif
 	vm_offset_t lastaddr;
-	int i = 0;
-	static uint32_t fake_preload[35];
+	int i;
+
+	i = 0;
 
 	fake_preload[i++] = MODINFO_NAME;
 	fake_preload[i++] = strlen("kernel") + 1;
@@ -768,12 +794,13 @@ fake_preload_metadata(struct riscv_bootparams *rvbp __unused)
 	i += 3;
 	fake_preload[i++] = MODINFO_ADDR;
 	fake_preload[i++] = sizeof(vm_offset_t);
-	fake_preload[i++] = (uint64_t)(KERNBASE + KERNENTRY);
+	*(vm_offset_t *)&fake_preload[i++] =
+	    (vm_offset_t)(KERNBASE + KERNENTRY);
 	i += 1;
 	fake_preload[i++] = MODINFO_SIZE;
-	fake_preload[i++] = sizeof(uint64_t);
-	printf("end is 0x%016lx\n", (uint64_t)&end);
-	fake_preload[i++] = (uint64_t)&end - (uint64_t)(KERNBASE + KERNENTRY);
+	fake_preload[i++] = sizeof(vm_offset_t);
+	fake_preload[i++] = (vm_offset_t)&end -
+	    (vm_offset_t)(KERNBASE + KERNENTRY);
 	i += 1;
 #ifdef DDB
 #if 0
@@ -803,9 +830,30 @@ fake_preload_metadata(struct riscv_bootparams *rvbp __unused)
 void
 initriscv(struct riscv_bootparams *rvbp)
 {
+	struct mem_region mem_regions[FDT_MEM_REGIONS];
+	struct pcpu *pcpup;
+	vm_offset_t rstart, rend;
+	vm_offset_t s, e;
+	int mem_regions_sz;
 	vm_offset_t lastaddr;
 	vm_size_t kernlen;
 	caddr_t kmdp;
+	int i;
+
+	TSRAW(&thread0, TS_ENTER, __func__, NULL);
+
+	/* Set the pcpu data, this is needed by pmap_bootstrap */
+	pcpup = &__pcpu[0];
+	pcpu_init(pcpup, 0, sizeof(struct pcpu));
+	pcpup->pc_hart = boot_hart;
+
+	/* Set the pcpu pointer */
+	__asm __volatile("mv tp, %0" :: "r"(pcpup));
+
+	PCPU_SET(curthread, &thread0);
+
+	/* Initialize SBI interface. */
+	sbi_init();
 
 	/* Set the module data location */
 	lastaddr = fake_preload_metadata(rvbp);
@@ -821,35 +869,34 @@ initriscv(struct riscv_bootparams *rvbp)
 	kern_envp = NULL;
 
 #ifdef FDT
-	try_load_dtb(kmdp);
+	try_load_dtb(kmdp, rvbp->dtbp_virt);
 #endif
 
 	/* Load the physical memory ranges */
 	physmap_idx = 0;
 
-#if 0
-	struct mem_region mem_regions[FDT_MEM_REGIONS];
-	int mem_regions_sz;
-	int i;
+#ifdef FDT
 	/* Grab physical memory regions information from device tree. */
 	if (fdt_get_mem_regions(mem_regions, &mem_regions_sz, NULL) != 0)
 		panic("Cannot get physical memory regions");
-	for (i = 0; i < mem_regions_sz; i++)
-		add_physmap_entry(mem_regions[i].mr_start,
-		    mem_regions[i].mr_size, physmap, &physmap_idx);
+
+	s = rvbp->dtbp_phys;
+	e = s + DTB_SIZE_MAX;
+
+	for (i = 0; i < mem_regions_sz; i++) {
+		rstart = mem_regions[i].mr_start;
+		rend = (mem_regions[i].mr_start + mem_regions[i].mr_size);
+
+		if ((rstart < s) && (rend > e)) {
+			/* Exclude DTB region. */
+			add_physmap_entry(rstart, (s - rstart), physmap, &physmap_idx);
+			add_physmap_entry(e, (rend - e), physmap, &physmap_idx);
+		} else {
+			add_physmap_entry(mem_regions[i].mr_start,
+			    mem_regions[i].mr_size, physmap, &physmap_idx);
+		}
+	}
 #endif
-
-	add_physmap_entry(memory_info.base, memory_info.size,
-	    physmap, &physmap_idx);
-
-	/* Set the pcpu data, this is needed by pmap_bootstrap */
-	pcpup = &__pcpu[0];
-	pcpu_init(pcpup, 0, sizeof(struct pcpu));
-
-	/* Set the pcpu pointer */
-	__asm __volatile("mv gp, %0" :: "r"(pcpup));
-
-	PCPU_SET(curthread, &thread0);
 
 	/* Do basic tuning, hz etc */
 	init_param1();
@@ -858,22 +905,32 @@ initriscv(struct riscv_bootparams *rvbp)
 
 	/* Bootstrap enough of pmap to enter the kernel proper */
 	kernlen = (lastaddr - KERNBASE);
-	pmap_bootstrap(rvbp->kern_l1pt, memory_info.base, kernlen);
+	pmap_bootstrap(rvbp->kern_l1pt, mem_regions[0].mr_start, kernlen);
+
+	/* Establish static device mappings */
+	devmap_bootstrap(0, NULL);
 
 	cninit();
 
 	init_proc0(rvbp->kern_stack);
-
-	/* set page table base register for thread0 */
-	thread0.td_pcb->pcb_l1addr = \
-	    (rvbp->kern_l1pt - KERNBASE + memory_info.base);
 
 	msgbufinit(msgbufp, msgbufsize);
 	mutex_init();
 	init_param2(physmem);
 	kdb_init();
 
-	riscv_init_interrupts();
-
 	early_boot = 0;
+
+	TSEXIT();
+}
+
+#undef bzero
+void
+bzero(void *buf, size_t len)
+{
+	uint8_t *p;
+
+	p = buf;
+	while(len-- > 0)
+		*p++ = 0;
 }

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1997, 1998, 1999
  *	Bill Paul <wpaul@ctr.columbia.edu>.  All rights reserved.
  *
@@ -1873,6 +1875,7 @@ an_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	int			len;
 	int			i, max;
 	struct an_softc		*sc;
+	struct an_req		*areq;
 	struct ifreq		*ifr;
 	struct thread		*td = curthread;
 	struct ieee80211req	*ireq;
@@ -1932,16 +1935,21 @@ an_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 		error = 0;
 		break;
 	case SIOCGAIRONET:
-		error = copyin(ifr->ifr_data, &sc->areq, sizeof(sc->areq));
-		if (error != 0)
+		error = priv_check(td, PRIV_DRIVER);
+		if (error)
 			break;
+		areq = malloc(sizeof(*areq), M_TEMP, M_WAITOK);
+		error = copyin(ifr_data_get_ptr(ifr), areq, sizeof(*areq));
+		if (error != 0) {
+			free(areq, M_TEMP);
+			break;
+		}
 		AN_LOCK(sc);
+		memcpy(&sc->areq, areq, sizeof(sc->areq));
 #ifdef ANCACHE
 		if (sc->areq.an_type == AN_RID_ZERO_CACHE) {
-			error = priv_check(td, PRIV_DRIVER);
-			if (error)
-				break;
 			sc->an_sigitems = sc->an_nextitem = 0;
+			free(areq, M_TEMP);
 			break;
 		} else if (sc->areq.an_type == AN_RID_READ_CACHE) {
 			char *pt = (char *)&sc->areq.an_val;
@@ -1957,17 +1965,21 @@ an_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 #endif
 		if (an_read_record(sc, (struct an_ltv_gen *)&sc->areq)) {
 			AN_UNLOCK(sc);
+			free(areq, M_TEMP);
 			error = EINVAL;
 			break;
 		}
+		memcpy(areq, &sc->areq, sizeof(*areq));
 		AN_UNLOCK(sc);
-		error = copyout(&sc->areq, ifr->ifr_data, sizeof(sc->areq));
+		error = copyout(areq, ifr_data_get_ptr(ifr), sizeof(*areq));
+		free(areq, M_TEMP);
 		break;
 	case SIOCSAIRONET:
 		if ((error = priv_check(td, PRIV_DRIVER)))
 			goto out;
 		AN_LOCK(sc);
-		error = copyin(ifr->ifr_data, &sc->areq, sizeof(sc->areq));
+		error = copyin(ifr_data_get_ptr(ifr), &sc->areq,
+		    sizeof(sc->areq));
 		if (error != 0)
 			break;
 		an_setdef(sc, &sc->areq);
@@ -1976,7 +1988,8 @@ an_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	case SIOCGPRIVATE_0:		/* used by Cisco client utility */
 		if ((error = priv_check(td, PRIV_DRIVER)))
 			goto out;
-		error = copyin(ifr->ifr_data, &l_ioctl, sizeof(l_ioctl));
+		error = copyin(ifr_data_get_ptr(ifr), &l_ioctl,
+		    sizeof(l_ioctl));
 		if (error)
 			goto out;
 		mode = l_ioctl.command;
@@ -1994,13 +2007,15 @@ an_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 		AN_UNLOCK(sc);
 		if (!error) {
 			/* copy out the updated command info */
-			error = copyout(&l_ioctl, ifr->ifr_data, sizeof(l_ioctl));
+			error = copyout(&l_ioctl, ifr_data_get_ptr(ifr),
+			    sizeof(l_ioctl));
 		}
 		break;
 	case SIOCGPRIVATE_1:		/* used by Cisco client utility */
 		if ((error = priv_check(td, PRIV_DRIVER)))
 			goto out;
-		error = copyin(ifr->ifr_data, &l_ioctl, sizeof(l_ioctl));
+		error = copyin(ifr_data_get_ptr(ifr), &l_ioctl,
+		    sizeof(l_ioctl));
 		if (error)
 			goto out;
 		l_ioctl.command = 0;

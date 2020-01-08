@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -112,12 +114,6 @@ void user(void);
 
 #include <machine/asm.h>
 #include <machine/cpufunc.h>
-/*
- * splhigh() and splx() are heavyweight, and call mcount().  Therefore
- * we disabled interrupts (IRQ, but not FIQ) directly on the CPU.
- *
- * We're lucky that the CPSR and 's' both happen to be 'int's.
- */
 #define	MCOUNT_ENTER(s)	{s = intr_disable(); }	/* kill IRQ */
 #define	MCOUNT_EXIT(s)	{intr_restore(s); }	/* restore old value */
 

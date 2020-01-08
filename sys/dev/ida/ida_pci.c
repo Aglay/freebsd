@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999,2000 Jonathan Lemon
  * All rights reserved.
  *
@@ -35,6 +37,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/bio.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -304,3 +308,5 @@ ida_pci_attach(device_t dev)
 }
 
 DRIVER_MODULE(ida, pci, ida_pci_driver, ida_devclass, 0, 0);
+MODULE_PNP_INFO("W32:vendor/device;D:#", pci, ida, board_id,
+    nitems(board_id) - 1);

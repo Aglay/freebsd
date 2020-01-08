@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004 Suleiman Souhlal
  * All rights reserved.
  *
@@ -64,7 +66,7 @@ __makecontext(ucontext_t *ucp, void (*start)(void), int argc, ...)
 	int i, regargs, stackargs;
 
 	/* Sanity checks */
-	if ((ucp == NULL) || (argc < 0) || (argc > NCARGS)
+	if ((ucp == NULL) || (argc < 0)
 	    || (ucp->uc_stack.ss_sp == NULL)
 	    || (ucp->uc_stack.ss_size < MINSIGSTKSZ)) {
 		/* invalidate context */
@@ -111,7 +113,12 @@ __makecontext(ucontext_t *ucp, void (*start)(void), int argc, ...)
 	 * Use caller-saved regs 14/15 to hold params that _ctx_start
 	 * will use to invoke the user-supplied func
 	 */
+#if !defined(_CALL_ELF) || _CALL_ELF == 1
+	/* Cast to ensure this is treated as a function descriptor. */
 	mc->mc_srr0 = *(uintptr_t *)_ctx_start;
+#else
+	mc->mc_srr0 = (uintptr_t) _ctx_start;
+#endif
 	mc->mc_gpr[1] = (uintptr_t) sp;		/* new stack pointer */
 	mc->mc_gpr[14] = (uintptr_t) start;	/* r14 <- start */
 	mc->mc_gpr[15] = (uintptr_t) ucp;	/* r15 <- ucp */

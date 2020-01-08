@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1988, 1990, 1993
  *	The Regents of the University of California.
  * Copyright (c) 2004 The FreeBSD Foundation
@@ -105,7 +107,7 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_inet.h"
 #include "opt_inet6.h"
-#include "opt_compat.h"
+#include "opt_kern_tls.h"
 #include "opt_sctp.h"
 
 #include <sys/param.h>
@@ -122,6 +124,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/hhook.h>
 #include <sys/kernel.h>
 #include <sys/khelp.h>
+#include <sys/ktls.h>
 #include <sys/event.h>
 #include <sys/eventhandler.h>
 #include <sys/poll.h>
@@ -140,6 +143,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/jail.h>
 #include <sys/syslog.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include <net/vnet.h>
 
@@ -885,6 +889,8 @@ solisten_wakeup(struct socket *sol)
 	}
 	SOLISTEN_UNLOCK(sol);
 	wakeup_one(&sol->sol_comp);
+	if ((sol->so_state & SS_ASYNC) && sol->so_sigio != NULL)
+		pgsigio(&sol->so_sigio, SIGIO, 0);
 }
 
 /*
@@ -916,12 +922,13 @@ solisten_dequeue(struct socket *head, struct socket **ret, int flags)
 	if (head->so_error) {
 		error = head->so_error;
 		head->so_error = 0;
+	} else if ((head->so_state & SS_NBIO) && TAILQ_EMPTY(&head->sol_comp))
+		error = EWOULDBLOCK;
+	else
+		error = 0;
+	if (error) {
 		SOLISTEN_UNLOCK(head);
 		return (error);
-        }
-	if ((head->so_state & SS_NBIO) && TAILQ_EMPTY(&head->sol_comp)) {
-		SOLISTEN_UNLOCK(head);
-		return (EWOULDBLOCK);
 	}
 	so = TAILQ_FIRST(&head->sol_comp);
 	SOCK_LOCK(so);
@@ -1024,6 +1031,9 @@ sofree(struct socket *so)
 		so->so_error = ECONNABORTED;
 	SOCK_UNLOCK(so);
 
+	if (so->so_dtor != NULL)
+		so->so_dtor(so);
+
 	VNET_SO_ASSERT(so);
 	if (pr->pr_flags & PR_RIGHTS && pr->pr_domain->dom_dispose != NULL)
 		(*pr->pr_domain->dom_dispose)(so);
@@ -1037,7 +1047,7 @@ sofree(struct socket *so)
 	 *
 	 * We used to do a lot of socket buffer and socket locking here, as
 	 * well as invoke sorflush() and perform wakeups.  The direct call to
-	 * dom_dispose() and sbrelease_internal() are an inlining of what was
+	 * dom_dispose() and sbdestroy() are an inlining of what was
 	 * necessary from sorflush().
 	 *
 	 * Notice that the socket buffer and kqueue state are torn down
@@ -1124,9 +1134,9 @@ drop:
 	so->so_state |= SS_NOFDREF;
 	sorele(so);
 	if (listening) {
-		struct socket *sp;
+		struct socket *sp, *tsp;
 
-		TAILQ_FOREACH(sp, &lqueue, so_list) {
+		TAILQ_FOREACH_SAFE(sp, &lqueue, so_list, tsp) {
 			SOCK_LOCK(sp);
 			if (sp->so_count == 0) {
 				SOCK_UNLOCK(sp);
@@ -1167,7 +1177,6 @@ soabort(struct socket *so)
 	KASSERT(so->so_count == 0, ("soabort: so_count"));
 	KASSERT((so->so_state & SS_PROTOREF) == 0, ("soabort: SS_PROTOREF"));
 	KASSERT(so->so_state & SS_NOFDREF, ("soabort: !SS_NOFDREF"));
-	KASSERT(so->so_qstate == SQ_NONE, ("soabort: !SQ_NONE"));
 	VNET_SO_ASSERT(so);
 
 	if (so->so_proto->pr_usrreqs->pru_abort != NULL)
@@ -1436,7 +1445,15 @@ sosend_generic(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	ssize_t resid;
 	int clen = 0, error, dontroute;
 	int atomic = sosendallatonce(so) || top;
+	int pru_flag;
+#ifdef KERN_TLS
+	struct ktls_session *tls;
+	int tls_enq_cnt, tls_pruflag;
+	uint8_t tls_rtype;
 
+	tls = NULL;
+	tls_rtype = TLS_RLTYPE_APP;
+#endif
 	if (uio != NULL)
 		resid = uio->uio_resid;
 	else
@@ -1467,6 +1484,28 @@ sosend_generic(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	error = sblock(&so->so_snd, SBLOCKWAIT(flags));
 	if (error)
 		goto out;
+
+#ifdef KERN_TLS
+	tls_pruflag = 0;
+	tls = ktls_hold(so->so_snd.sb_tls_info);
+	if (tls != NULL) {
+		if (tls->mode == TCP_TLS_MODE_SW)
+			tls_pruflag = PRUS_NOTREADY;
+
+		if (control != NULL) {
+			struct cmsghdr *cm = mtod(control, struct cmsghdr *);
+
+			if (clen >= sizeof(*cm) &&
+			    cm->cmsg_type == TLS_SET_RECORD_TYPE) {
+				tls_rtype = *((uint8_t *)CMSG_DATA(cm));
+				clen = 0;
+				m_freem(control);
+				control = NULL;
+				atomic = 1;
+			}
+		}
+	}
+#endif
 
 restart:
 	do {
@@ -1517,7 +1556,8 @@ restart:
 		}
 		if (space < resid + clen &&
 		    (atomic || space < so->so_snd.sb_lowat || space < clen)) {
-			if ((so->so_state & SS_NBIO) || (flags & MSG_NBIO)) {
+			if ((so->so_state & SS_NBIO) ||
+			    (flags & (MSG_NBIO | MSG_DONTWAIT)) != 0) {
 				SOCKBUF_UNLOCK(&so->so_snd);
 				error = EWOULDBLOCK;
 				goto release;
@@ -1544,10 +1584,27 @@ restart:
 				 * is a workaround to prevent protocol send
 				 * methods to panic.
 				 */
-				top = m_uiotombuf(uio, M_WAITOK, space,
-				    (atomic ? max_hdr : 0),
-				    (atomic ? M_PKTHDR : 0) |
-				    ((flags & MSG_EOR) ? M_EOR : 0));
+#ifdef KERN_TLS
+				if (tls != NULL) {
+					top = m_uiotombuf(uio, M_WAITOK, space,
+					    tls->params.max_frame_len,
+					    M_NOMAP |
+					    ((flags & MSG_EOR) ? M_EOR : 0));
+					if (top != NULL) {
+						error = ktls_frame(top, tls,
+						    &tls_enq_cnt, tls_rtype);
+						if (error) {
+							m_freem(top);
+							goto release;
+						}
+					}
+					tls_rtype = TLS_RLTYPE_APP;
+				} else
+#endif
+					top = m_uiotombuf(uio, M_WAITOK, space,
+					    (atomic ? max_hdr : 0),
+					    (atomic ? M_PKTHDR : 0) |
+					    ((flags & MSG_EOR) ? M_EOR : 0));
 				if (top == NULL) {
 					error = EFAULT; /* only possible error */
 					goto release;
@@ -1571,8 +1628,8 @@ restart:
 			 * this.
 			 */
 			VNET_SO_ASSERT(so);
-			error = (*so->so_proto->pr_usrreqs->pru_send)(so,
-			    (flags & MSG_OOB) ? PRUS_OOB :
+
+			pru_flag = (flags & MSG_OOB) ? PRUS_OOB :
 			/*
 			 * If the user set MSG_EOF, the protocol understands
 			 * this flag and nothing left to send then use
@@ -1584,13 +1641,37 @@ restart:
 				PRUS_EOF :
 			/* If there is more to send set PRUS_MORETOCOME. */
 			    (flags & MSG_MORETOCOME) ||
-			    (resid > 0 && space > 0) ? PRUS_MORETOCOME : 0,
-			    top, addr, control, td);
+			    (resid > 0 && space > 0) ? PRUS_MORETOCOME : 0;
+
+#ifdef KERN_TLS
+			pru_flag |= tls_pruflag;
+#endif
+
+			error = (*so->so_proto->pr_usrreqs->pru_send)(so,
+			    pru_flag, top, addr, control, td);
+
 			if (dontroute) {
 				SOCK_LOCK(so);
 				so->so_options &= ~SO_DONTROUTE;
 				SOCK_UNLOCK(so);
 			}
+
+#ifdef KERN_TLS
+			if (tls != NULL && tls->mode == TCP_TLS_MODE_SW) {
+				/*
+				 * Note that error is intentionally
+				 * ignored.
+				 *
+				 * Like sendfile(), we rely on the
+				 * completion routine (pru_ready())
+				 * to free the mbufs in the event that
+				 * pru_send() encountered an error and
+				 * did not append them to the sockbuf.
+				 */
+				soref(so);
+				ktls_enqueue(top, so, tls_enq_cnt);
+			}
+#endif
 			clen = 0;
 			control = NULL;
 			top = NULL;
@@ -1602,6 +1683,10 @@ restart:
 release:
 	sbunlock(&so->so_snd);
 out:
+#ifdef KERN_TLS
+	if (tls != NULL)
+		ktls_free(tls);
+#endif
 	if (top != NULL)
 		m_freem(top);
 	if (control != NULL)
@@ -1975,7 +2060,11 @@ dontblock:
 			SBLASTRECORDCHK(&so->so_rcv);
 			SBLASTMBUFCHK(&so->so_rcv);
 			SOCKBUF_UNLOCK(&so->so_rcv);
-			error = uiomove(mtod(m, char *) + moff, (int)len, uio);
+			if ((m->m_flags & M_NOMAP) != 0)
+				error = m_unmappedtouio(m, moff, uio, (int)len);
+			else
+				error = uiomove(mtod(m, char *) + moff,
+				    (int)len, uio);
 			SOCKBUF_LOCK(&so->so_rcv);
 			if (error) {
 				/*
@@ -2159,7 +2248,6 @@ release:
 
 /*
  * Optimized version of soreceive() for stream (TCP) sockets.
- * XXXAO: (MSG_WAITALL | MSG_PEEK) isn't properly handled.
  */
 int
 soreceive_stream(struct socket *so, struct sockaddr **psa, struct uio *uio,
@@ -2174,12 +2262,12 @@ soreceive_stream(struct socket *so, struct sockaddr **psa, struct uio *uio,
 		return (EINVAL);
 	if (psa != NULL)
 		*psa = NULL;
-	if (controlp != NULL)
-		return (EINVAL);
 	if (flagsp != NULL)
 		flags = *flagsp &~ MSG_EOR;
 	else
 		flags = 0;
+	if (controlp != NULL)
+		*controlp = NULL;
 	if (flags & MSG_OOB)
 		return (soreceive_rcvoob(so, uio, flags));
 	if (mp0 != NULL)
@@ -2190,7 +2278,7 @@ soreceive_stream(struct socket *so, struct sockaddr **psa, struct uio *uio,
 	/* Prevent other readers from entering the socket. */
 	error = sblock(sb, SBLOCKWAIT(flags));
 	if (error)
-		goto out;
+		return (error);
 	SOCKBUF_LOCK(sb);
 
 	/* Easy one, no space to copyout anything. */
@@ -2583,9 +2671,18 @@ soshutdown(struct socket *so, int how)
 		 * both backward-compatibility and POSIX requirements by forcing
 		 * ENOTCONN but still asking protocol to perform pru_shutdown().
 		 */
-		if (so->so_type != SOCK_DGRAM)
+		if (so->so_type != SOCK_DGRAM && !SOLISTENING(so))
 			return (ENOTCONN);
 		soerror_enotconn = 1;
+	}
+
+	if (SOLISTENING(so)) {
+		if (how != SHUT_WR) {
+			SOLISTEN_LOCK(so);
+			so->so_error = ECONNABORTED;
+			solisten_wakeup(so);	/* unlocks so */
+		}
+		goto done;
 	}
 
 	CURVNET_SET(so->so_vnet);
@@ -2602,6 +2699,7 @@ soshutdown(struct socket *so, int how)
 	wakeup(&so->so_timeo);
 	CURVNET_RESTORE();
 
+done:
 	return (soerror_enotconn ? ENOTCONN : 0);
 }
 
@@ -2740,12 +2838,10 @@ sosetopt(struct socket *so, struct sockopt *sopt)
 	CURVNET_SET(so->so_vnet);
 	error = 0;
 	if (sopt->sopt_level != SOL_SOCKET) {
-		if (so->so_proto->pr_ctloutput != NULL) {
+		if (so->so_proto->pr_ctloutput != NULL)
 			error = (*so->so_proto->pr_ctloutput)(so, sopt);
-			CURVNET_RESTORE();
-			return (error);
-		}
-		error = ENOPROTOOPT;
+		else
+			error = ENOPROTOOPT;
 	} else {
 		switch (sopt->sopt_name) {
 		case SO_ACCEPTFILTER:
@@ -2758,7 +2854,12 @@ sosetopt(struct socket *so, struct sockopt *sopt)
 			error = sooptcopyin(sopt, &l, sizeof l, sizeof l);
 			if (error)
 				goto bad;
-
+			if (l.l_linger < 0 ||
+			    l.l_linger > USHRT_MAX ||
+			    l.l_linger > (INT_MAX / hz)) {
+				error = EDOM;
+				goto bad;
+			}
 			SOCK_LOCK(so);
 			so->so_linger = l.l_linger;
 			if (l.l_onoff)
@@ -2775,6 +2876,7 @@ sosetopt(struct socket *so, struct sockopt *sopt)
 		case SO_BROADCAST:
 		case SO_REUSEADDR:
 		case SO_REUSEPORT:
+		case SO_REUSEPORT_LB:
 		case SO_OOBINLINE:
 		case SO_TIMESTAMP:
 		case SO_BINTIME:
@@ -2993,6 +3095,7 @@ sogetopt(struct socket *so, struct sockopt *sopt)
 		case SO_KEEPALIVE:
 		case SO_REUSEADDR:
 		case SO_REUSEPORT:
+		case SO_REUSEPORT_LB:
 		case SO_BROADCAST:
 		case SO_OOBINLINE:
 		case SO_ACCEPTCONN:
@@ -3003,6 +3106,10 @@ sogetopt(struct socket *so, struct sockopt *sopt)
 integer:
 			error = sooptcopyout(sopt, &optval, sizeof optval);
 			break;
+
+		case SO_DOMAIN:
+			optval = so->so_proto->pr_domain->dom_family;
+			goto integer;
 
 		case SO_TYPE:
 			optval = so->so_type;
@@ -3020,19 +3127,23 @@ integer:
 			goto integer;
 
 		case SO_SNDBUF:
-			optval = so->so_snd.sb_hiwat;
+			optval = SOLISTENING(so) ? so->sol_sbsnd_hiwat :
+			    so->so_snd.sb_hiwat;
 			goto integer;
 
 		case SO_RCVBUF:
-			optval = so->so_rcv.sb_hiwat;
+			optval = SOLISTENING(so) ? so->sol_sbrcv_hiwat :
+			    so->so_rcv.sb_hiwat;
 			goto integer;
 
 		case SO_SNDLOWAT:
-			optval = so->so_snd.sb_lowat;
+			optval = SOLISTENING(so) ? so->sol_sbsnd_lowat :
+			    so->so_snd.sb_lowat;
 			goto integer;
 
 		case SO_RCVLOWAT:
-			optval = so->so_rcv.sb_lowat;
+			optval = SOLISTENING(so) ? so->sol_sbrcv_lowat :
+			    so->so_rcv.sb_lowat;
 			goto integer;
 
 		case SO_SNDTIMEO:
@@ -3267,6 +3378,8 @@ sopoll_generic(struct socket *so, int events, struct ucred *active_cred,
 			revents = 0;
 		else if (!TAILQ_EMPTY(&so->sol_comp))
 			revents = events & (POLLIN | POLLRDNORM);
+		else if ((events & POLLINIGNEOF) == 0 && so->so_error)
+			revents = (events & (POLLIN | POLLRDNORM)) | POLLHUP;
 		else {
 			selrecord(td, &so->so_rdsel);
 			revents = 0;
@@ -3543,6 +3656,11 @@ filt_soread(struct knote *kn, long hint)
 	if (SOLISTENING(so)) {
 		SOCK_LOCK_ASSERT(so);
 		kn->kn_data = so->sol_qlen;
+		if (so->so_error) {
+			kn->kn_flags |= EV_EOF;
+			kn->kn_fflags = so->so_error;
+			return (1);
+		}
 		return (!TAILQ_EMPTY(&so->sol_comp));
 	}
 
@@ -3684,24 +3802,41 @@ soisconnecting(struct socket *so)
 void
 soisconnected(struct socket *so)
 {
-	struct socket *head;
-	int ret;
 
-	/*
-	 * XXXGL: this is the only place where we acquire socket locks
-	 * in reverse order: first child, then listening socket.  To
-	 * avoid possible LOR, use try semantics.
-	 */
-restart:
 	SOCK_LOCK(so);
-	if ((head = so->so_listen) != NULL &&
-	    __predict_false(SOLISTEN_TRYLOCK(head) == 0)) {
-		SOCK_UNLOCK(so);
-		goto restart;
-	}
 	so->so_state &= ~(SS_ISCONNECTING|SS_ISDISCONNECTING|SS_ISCONFIRMING);
 	so->so_state |= SS_ISCONNECTED;
-	if (head != NULL && (so->so_qstate == SQ_INCOMP)) {
+
+	if (so->so_qstate == SQ_INCOMP) {
+		struct socket *head = so->so_listen;
+		int ret;
+
+		KASSERT(head, ("%s: so %p on incomp of NULL", __func__, so));
+		/*
+		 * Promoting a socket from incomplete queue to complete, we
+		 * need to go through reverse order of locking.  We first do
+		 * trylock, and if that doesn't succeed, we go the hard way
+		 * leaving a reference and rechecking consistency after proper
+		 * locking.
+		 */
+		if (__predict_false(SOLISTEN_TRYLOCK(head) == 0)) {
+			soref(head);
+			SOCK_UNLOCK(so);
+			SOLISTEN_LOCK(head);
+			SOCK_LOCK(so);
+			if (__predict_false(head != so->so_listen)) {
+				/*
+				 * The socket went off the listen queue,
+				 * should be lost race to close(2) of sol.
+				 * The socket is about to soabort().
+				 */
+				SOCK_UNLOCK(so);
+				sorele(head);
+				return;
+			}
+			/* Not the last one, as so holds a ref. */
+			refcount_release(&head->so_count);
+		}
 again:
 		if ((so->so_options & SO_ACCEPTFILTER) == 0) {
 			TAILQ_REMOVE(&head->sol_incomp, so, so_list);
@@ -3730,8 +3865,6 @@ again:
 		}
 		return;
 	}
-	if (head != NULL)
-		SOLISTEN_UNLOCK(head);
 	SOCK_UNLOCK(so);
 	wakeup(&so->so_timeo);
 	sorwakeup(so);
@@ -3765,13 +3898,14 @@ soisdisconnected(struct socket *so)
 	so->so_state |= SS_ISDISCONNECTED;
 
 	if (!SOLISTENING(so)) {
+		SOCK_UNLOCK(so);
 		SOCKBUF_LOCK(&so->so_rcv);
 		socantrcvmore_locked(so);
 		SOCKBUF_LOCK(&so->so_snd);
 		sbdrop_locked(&so->so_snd, sbused(&so->so_snd));
 		socantsendmore_locked(so);
-	}
-	SOCK_UNLOCK(so);
+	} else
+		SOCK_UNLOCK(so);
 	wakeup(&so->so_timeo);
 }
 
@@ -3787,6 +3921,17 @@ sodupsockaddr(const struct sockaddr *sa, int mflags)
 	if (sa2)
 		bcopy(sa, sa2, sa->sa_len);
 	return sa2;
+}
+
+/*
+ * Register per-socket destructor.
+ */
+void
+sodtor_set(struct socket *so, so_dtor_t *func)
+{
+
+	SOCK_LOCK_ASSERT(so);
+	so->so_dtor = func;
 }
 
 /*
@@ -3949,13 +4094,14 @@ void
 sotoxsocket(struct socket *so, struct xsocket *xso)
 {
 
+	bzero(xso, sizeof(*xso));
 	xso->xso_len = sizeof *xso;
-	xso->xso_so = so;
+	xso->xso_so = (uintptr_t)so;
 	xso->so_type = so->so_type;
 	xso->so_options = so->so_options;
 	xso->so_linger = so->so_linger;
 	xso->so_state = so->so_state;
-	xso->so_pcb = so->so_pcb;
+	xso->so_pcb = (uintptr_t)so->so_pcb;
 	xso->xso_protocol = so->so_proto->pr_protocol;
 	xso->xso_family = so->so_proto->pr_domain->dom_family;
 	xso->so_timeo = so->so_timeo;
@@ -3967,8 +4113,6 @@ sotoxsocket(struct socket *so, struct xsocket *xso)
 		xso->so_incqlen = so->sol_incqlen;
 		xso->so_qlimit = so->sol_qlimit;
 		xso->so_oobmark = 0;
-		bzero(&xso->so_snd, sizeof(xso->so_snd));
-		bzero(&xso->so_rcv, sizeof(xso->so_rcv));
 	} else {
 		xso->so_state |= so->so_qstate;
 		xso->so_qlen = xso->so_incqlen = xso->so_qlimit = 0;
@@ -4044,6 +4188,9 @@ so_linger_get(const struct socket *so)
 void
 so_linger_set(struct socket *so, int val)
 {
+
+	KASSERT(val >= 0 && val <= USHRT_MAX && val <= (INT_MAX / hz),
+	    ("%s: val %d out of range", __func__, val));
 
 	so->so_linger = val;
 }

@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd February 26, 2017
+.Dd September 9, 2019
 .Dt RC.CONF 5
 .Os
 .Sh NAME
@@ -63,6 +63,9 @@ The file
 is used to override settings in
 .Pa /etc/rc.conf
 for historical reasons.
+.Pp
+The sysrc(8) command provides a scripting interface to modify system
+config files.
 .Pp
 In addition to
 .Pa /etc/rc.conf.local
@@ -245,12 +248,14 @@ Default
 .Pa /etc/ddb.conf .
 .It Va kld_list
 .Pq Vt str
-A list of kernel modules to load right after the local
-disks are mounted.
+A whitespace-separated list of kernel modules to load right after
+the local disks are mounted, without any
+.Pa .ko
+extension or path.
 Loading modules at this point in the boot process is
 much faster than doing it via
 .Pa /boot/loader.conf
-for those modules not necessary for mounting local disk.
+for those modules not necessary for mounting local disks.
 .It Va kldxref_enable
 .Pq Vt bool
 Set to
@@ -418,6 +423,9 @@ If
 .Xr dhclient 8
 is used to set the hostname via DHCP,
 this variable should be set to an empty string.
+Within a
+.Xr jail 8
+the hostname is generally already set and this variable may absent.
 If this value remains unset when the system is done booting
 your console login will display the default hostname of
 .Dq Amnesiac .
@@ -565,9 +573,11 @@ equivalent of
 .Va natd_enable .
 Setting this to
 .Dq Li YES
-enables kernel NAT.
+will automatically load the
+.Xr ipfw 8
+NAT kernel module if
 .Va firewall_enable
-must also be set to
+is also set to
 .Dq Li YES .
 .It Va firewall_nat_interface
 .Pq Vt str
@@ -580,6 +590,36 @@ kernel NAT should run.
 .It Va firewall_nat_flags
 .Pq Vt str
 Additional configuration parameters for kernel NAT should be placed here.
+.It Va firewall_nat64_enable
+.Pq Vt bool
+Setting this to
+.Dq Li YES
+will automatically load the
+.Xr ipfw 8
+NAT64 kernel module if
+.Va firewall_enable
+is also set to
+.Dq Li YES .
+.It Va firewall_nptv6_enable
+.Pq Vt bool
+Setting this to
+.Dq Li YES
+will automatically load the
+.Xr ipfw 8
+NPTv6 kernel module if
+.Va firewall_enable
+is also set to
+.Dq Li YES .
+.It Va firewall_pmod_enable
+.Pq Vt bool
+Setting this to
+.Dq Li YES
+will automatically load the
+.Xr ipfw 8
+pmod kernel module if
+.Va firewall_enable
+is also set to
+.Dq Li YES .
 .It Va dummynet_enable
 .Pq Vt bool
 Setting this to
@@ -591,6 +631,44 @@ module if
 is also set to
 .Dq Li YES .
 .\" -------------------------------------------------------------------
+.It Va ipfw_netflow_enable
+.Pq Vt bool
+Setting this to
+.Dq Li YES
+will enable netflow logging via
+.Xr ng_netflow 4
+.Pp
+By default a ipfw rule is inserted and all packets are duplicated with
+the ngtee command and netflow packets are sent to 127.0.0.1 on the netflow
+port using protocol version 5.
+.It Va ipfw_netflow_hook
+.Pq Vt int
+netflow hook name, must be numerical
+(default
+.Pa 9995 ) .
+.It Va ipfw_netflow_rule
+.Pq Vt int
+ipfw rule number
+(default
+.Pa 1000 ) .
+.It Va ipfw_netflow_ip
+.Pq Vt str
+Destination server ip for receiving netflow data
+(default
+.Pa 127.0.0.1 ) .
+.It Va ipfw_netflow_port
+.Pq Vt int
+Destination server port for receiving netflow data
+(default
+.Pa 9995 ) .
+.It Va ipfw_netflow_version
+.Pq Vt int
+Do not set for using version 5 of the netflow protocol, set it to 9 for using version 9.
+.It Va ipfw_netflow_fib
+.Pq Vt int
+Only match packet in FIB
+.Pa ipfw_netflow_fib
+(default is undefined meaning all FIBs).
 .It Va natd_program
 .Pq Vt str
 Path to
@@ -948,7 +1026,7 @@ is set to the list of
 instances that should be started at system boot time.
 If
 .Va pflog_instances
-is set, for each whitespace-seperated
+is set, for each whitespace-separated
 .Ar element
 in the list,
 .Ao Ar element Ac Ns Va _dev
@@ -990,7 +1068,7 @@ If multiple instances of
 .Xr ftp-proxy 8
 are desired at boot time,
 .Va ftpproxy_instances
-should contain a whitespace-seperated list of instance names.
+should contain a whitespace-separated list of instance names.
 For each
 .Ar element
 in the list, a variable named
@@ -1186,11 +1264,11 @@ It is possible to add IP alias entries using
 syntax with the address family keyword such as
 .Li inet .
 Assuming that the interface in question was
-.Li ed0 ,
+.Li em0 ,
 it might look something like this:
 .Bd -literal
-ifconfig_ed0_alias0="inet 127.0.0.253 netmask 0xffffffff"
-ifconfig_ed0_alias1="inet 127.0.0.254 netmask 0xffffffff"
+ifconfig_em0_alias0="inet 127.0.0.253 netmask 0xffffffff"
+ifconfig_em0_alias1="inet 127.0.0.254 netmask 0xffffffff"
 .Ed
 .Pp
 It also possible to configure multiple IP addresses in Classless
@@ -1230,11 +1308,11 @@ not for the other address families such as
 .Li inet6 .
 .Pp
 With the interface in question being
-.Li ed0 ,
+.Li em0 ,
 an example could look like:
 .Bd -literal
-ifconfig_ed0_alias2="inet 192.0.2.129/27"
-ifconfig_ed0_alias3="inet 192.0.2.1-5/28"
+ifconfig_em0_alias2="inet 192.0.2.129/27"
+ifconfig_em0_alias3="inet 192.0.2.1-5/28"
 .Ed
 .Pp
 and so on.
@@ -1256,10 +1334,10 @@ its contents are passed to
 Execution stops at the first unsuccessful access, so if
 something like this is present:
 .Bd -literal
-ifconfig_ed0_alias0="inet 127.0.0.251 netmask 0xffffffff"
-ifconfig_ed0_alias1="inet 127.0.0.252 netmask 0xffffffff"
-ifconfig_ed0_alias2="inet 127.0.0.253 netmask 0xffffffff"
-ifconfig_ed0_alias4="inet 127.0.0.254 netmask 0xffffffff"
+ifconfig_em0_alias0="inet 127.0.0.251 netmask 0xffffffff"
+ifconfig_em0_alias1="inet 127.0.0.252 netmask 0xffffffff"
+ifconfig_em0_alias2="inet 127.0.0.253 netmask 0xffffffff"
+ifconfig_em0_alias4="inet 127.0.0.254 netmask 0xffffffff"
 .Ed
 .Pp
 Then note that alias4 would
@@ -1275,7 +1353,7 @@ variable, which has the same functionality as
 .Va ifconfig_ Ns Ao Ar interface Ac Ns Va _alias Ns Aq Ar n
 and can have all of entries in a variable like the following:
 .Bd -literal
-ifconfig_ed0_aliases="\\
+ifconfig_em0_aliases="\\
 	inet 127.0.0.251 netmask 0xffffffff \\
 	inet 127.0.0.252 netmask 0xffffffff \\
 	inet 127.0.0.253 netmask 0xffffffff \\
@@ -1382,11 +1460,11 @@ to the
 .Va ifconfig_ Ns Aq Ar interface
 variable.
 For instance, to initialize the
-.Li ed0
+.Li em0
 device via DHCP,
 it is possible to use something like:
 .Bd -literal
-ifconfig_ed0="DHCP"
+ifconfig_em0="DHCP"
 .Ed
 .Pp
 If you want to configure your wireless interface with
@@ -1437,7 +1515,7 @@ variable.
 .Pp
 It is also possible to rename an interface by doing:
 .Bd -literal
-ifconfig_ed0_name="net0"
+ifconfig_em0_name="net0"
 ifconfig_net0="inet 192.0.2.1 netmask 0xffffff00"
 .Ed
 .It Va ipv6_enable
@@ -1575,6 +1653,23 @@ is set to 1.
 .Pp
 Default is
 .Dq Li NO .
+.It Va ifconfig_ Ns Ao Ar interface Ac Ns _descr
+.Pq Vt str
+This assigns arbitrary description to an interface.
+The
+.Xr sysctl 8
+variable
+.Va net.ifdescr_maxlen
+limits its length.
+This static setting may be overridden by commands
+started with dynamic interface configuration utilities
+like
+.Xr dhclient 8
+hooks. The description can be seen with
+.Xr ifconfig 8
+command and it may be exported with
+.Xr bsnmpd 1
+daemon using its MIB-2 module.
 .It Va ifconfig_ Ns Ao Ar interface Ac Ns _ipv6
 .Pq Vt str
 IPv6 functionality on an interface should be configured by
@@ -1593,8 +1688,8 @@ with
 keyword.
 For example:
 .Bd -literal
-ifconfig_ed0_ipv6="inet6 2001:db8:1::1 prefixlen 64"
-ifconfig_ed0_alias0="inet6 2001:db8:2::1 prefixlen 64"
+ifconfig_em0_ipv6="inet6 2001:db8:1::1 prefixlen 64"
+ifconfig_em0_alias0="inet6 2001:db8:2::1 prefixlen 64"
 .Ed
 .Pp
 Interfaces that have an
@@ -1621,7 +1716,7 @@ defined in
 If only a link-local address is needed on the interface,
 the following configuration can be used:
 .Bd -literal
-ifconfig_ed0_ipv6="inet6 auto_linklocal"
+ifconfig_em0_ipv6="inet6 auto_linklocal"
 .Ed
 .Pp
 A link-local address can also be configured manually.
@@ -1630,7 +1725,7 @@ so that it does not change when the network interface
 card is replaced.
 For example:
 .Bd -literal
-ifconfig_ed0_ipv6="inet6 fe80::1 prefixlen 64"
+ifconfig_em0_ipv6="inet6 fe80::1 prefixlen 64"
 .Ed
 .It Va ipv6_prefix_ Ns Aq Ar interface
 .Pq Vt str
@@ -1644,15 +1739,15 @@ is empty.
 .Pp
 For example, the following configuration
 .Bd -literal
-ipv6_prefix_ed0="2001:db8:1:0 2001:db8:2:0"
+ipv6_prefix_em0="2001:db8:1:0 2001:db8:2:0"
 .Ed
 .Pp
 is equivalent to the following:
 .Bd -literal
-ifconfig_ed0_alias0="inet6 2001:db8:1:: eui64 prefixlen 64"
-ifconfig_ed0_alias1="inet6 2001:db8:1:: prefixlen 64 anycast"
-ifconfig_ed0_alias2="inet6 2001:db8:2:: eui64 prefixlen 64"
-ifconfig_ed0_alias3="inet6 2001:db8:2:: prefixlen 64 anycast"
+ifconfig_em0_alias0="inet6 2001:db8:1:: eui64 prefixlen 64"
+ifconfig_em0_alias1="inet6 2001:db8:1:: prefixlen 64 anycast"
+ifconfig_em0_alias2="inet6 2001:db8:2:: eui64 prefixlen 64"
+ifconfig_em0_alias3="inet6 2001:db8:2:: prefixlen 64 anycast"
 .Ed
 .Pp
 These Subnet-Router anycast addresses will be added only when
@@ -1684,10 +1779,10 @@ or
 .Dq Li ipv6_prefer
 is specified,
 .Xr ip6addrctl 8
-installs a pre-defined policy table described in Section 2.1
-.Pq IPv6-preferred
-or 10.3
+installs a pre-defined policy table described in Section 10.3
 .Pq IPv4-preferred
+or 2.1
+.Pq IPv6-preferred
 of RFC 3484.
 .Pp
 If
@@ -1758,21 +1853,40 @@ This variable is deprecated in favor of
 Set to the list of
 .Xr gif 4
 tunnel interfaces to configure on this host.
-A
-.Va gifconfig_ Ns Aq Ar interface
-variable is assumed to exist for each value of
-.Ar interface .
+For each
+.Xr gif
+tunnel interface, set a variable named
+.Va ifconfig_ Ns Aq Ar interface
+with the parameters for the
+.Xr ifconfig 8
+command to configure the link level for
+.Ar interface
+with the
+.Cm tunnel
+option.
 The value of this variable is used to configure the link layer of the
-tunnel according to the syntax of the
+tunnel using the
 .Cm tunnel
 option to
-.Xr ifconfig 8 .
+.Xr ifconfig .
+For example, configure two
+.Xr gif
+interfaces with:
+.Bd -literal -offset indent
+gif_interfaces="gif0 gif1"
+ifconfig_gif0="tunnel src_addr0 dst_addr0"
+ifconfig_gif1="tunnel src_addr1 dst_addr1"
+.Ed
+.Pp
 Additionally, this option ensures that each listed interface is created
 via the
 .Cm create
 option to
-.Xr ifconfig 8
-before attempting to configure it.
+.Xr ifconfig .
+This example also works with
+.Va cloned_interfaces
+instead of
+.Va gif_interfaces .
 .It Va sppp_interfaces
 .Pq Vt str
 Set to the list of
@@ -1931,6 +2045,13 @@ List of devices to automatically attach on boot.
 Note that .eli devices from
 .Pa /etc/fstab
 are automatically appended to this list.
+.It Va geli_groups
+.Pq Vt str
+List of groups containing devices to automatically attach on boot with the same
+keyfiles and passphrase.
+This must be accompanied with a corresponding
+.Va geli_ Ns Ao Ar group Ac Ns Va _devices
+variable.
 .It Va geli_tries
 .Pq Vt int
 Number of times user is asked for the pass-phrase.
@@ -1942,8 +2063,10 @@ sysctl variable.
 Default flags to use by
 .Xr geli 8
 when configuring disk encryption.
-Flags can be configured for every device separately by defining
+Flags can be configured for every device separately by defining the
 .Va geli_ Ns Ao Ar device Ac Ns Va _flags
+variable, and for every group separately by defining the
+.Va geli_ Ns Ao Ar group Ac Ns Va _flags
 variable.
 .It Va geli_autodetach
 .Pq Vt str
@@ -1951,7 +2074,7 @@ Specifies if GELI devices should be marked for detach on last close after
 file systems are mounted.
 Default is
 .Dq Li YES .
-This can be changed for every device separately by defining
+This can be changed for every device separately by defining the
 .Va geli_ Ns Ao Ar device Ac Ns Va _autodetach
 variable.
 .It Va root_rw_mount
@@ -1979,8 +2102,8 @@ of the file systems fails.
 .It Va background_fsck
 .Pq Vt bool
 If set to
-.Dq Li YES ,
-the system will attempt to run
+.Dq Li NO ,
+the system will not attempt to run
 .Xr fsck 8
 in the background where possible.
 .It Va background_fsck_delay
@@ -2473,6 +2596,14 @@ This command is intended to
 synchronize the system clock only
 .Em once
 from some standard reference.
+.Pp
+Note that the use of the
+.Va ntpd_sync_on_start
+variable is a preferred alternative to the
+.Xr ntpdate 8
+utility as
+.Xr ntpdate 8
+is to be retired from the NTP distribution.
 .It Va ntpdate_config
 .Pq Vt str
 Configuration file for
@@ -3159,11 +3290,9 @@ is set to
 this is the actual port the mouse is on.
 It might be
 .Pa /dev/cuau0
-for a COM1 serial mouse,
+for a COM1 serial mouse, or
 .Pa /dev/psm0
-for a PS/2 mouse or
-.Pa /dev/mse0
-for a bus mouse, for example.
+for a PS/2 mouse, for example.
 .It Va moused_flags
 .Pq Vt str
 If
@@ -3339,6 +3468,13 @@ Otherwise, the value of this variable is passed as the argument to
 .Xr dumpon 8 .
 To disable crash dumps, set this variable to
 .Dq Li NO .
+.It Va dumpon_flags
+.Pq Vt str
+Flags to pass to
+.Xr dumpon 8
+when configuring
+.Va dumpdev
+as the system dump device.
 .It Va dumpdir
 .Pq Vt str
 When the system reboots after a crash and a crash dump is found on the
@@ -3359,18 +3495,6 @@ to not run
 at boot time when
 .Va dumpdir
 is set.
-.It Va dumppubkey
-.Pq Vt str
-Path to a public key.
-It is used by
-.Xr dumpon 8
-to encrypt a one-time key for a crash dump.
-The public key has to match a private key used by
-.Xr decryptcore 8
-to decrypt a crash dump after reboot.
-See
-.Xr dumpon 8
-for more details.
 .It Va savecore_enable
 .Pq Vt bool
 If set to
@@ -3450,21 +3574,6 @@ Set to
 to enable system accounting through the
 .Xr accton 8
 facility.
-.It Va ibcs2_enable
-.Pq Vt bool
-Set to
-.Dq Li YES
-to enable iBCS2 (SCO) binary emulation at system initial boot
-time.
-.It Va ibcs2_loaders
-.Pq Vt str
-If not set to
-.Dq Li NO
-and if
-.Va ibcs2_enable
-is set to
-.Dq Li YES ,
-this specifies a list of additional iBCS2 loaders to enable.
 .It Va firstboot_sentinel
 .Pq Vt str
 This variable specifies the full path to a
@@ -3629,6 +3738,41 @@ is set to
 these are the flags passed to the
 .Xr watchdogd 8
 daemon.
+.It Va watchdogd_timeout
+.Pq Vt int
+If
+.Va watchdogd_enable
+is set to
+.Dq Li YES ,
+this is a timeout that will be used by the
+.Xr watchdogd 8
+daemon.
+If this option is set, it overrides
+.Fl t
+in
+.Va watchdogd_flags .
+.It Va watchdogd_shutdown_timeout
+.Pq Vt int
+If
+.Va watchdogd_enable
+is set to
+.Dq Li YES ,
+this is a timeout that will be set by the
+.Xr watchdogd 8
+daemon when it exits during the system shutdown.
+This timeout will not be set when returning to the single-user mode
+or when the watchdogd service is stopped individually using the
+.Xr service 8
+command or the rc.d script.
+Note that the timeout will be applied if
+.Xr watchdogd 8
+is stopped outside of
+.Xr rc 8
+framework.
+If this option is set, it overrides
+.Fl x
+in
+.Va watchdogd_flags .
 .It Va devfs_rulesets
 .Pq Vt str
 List of files containing sets of rules for
@@ -4407,6 +4551,26 @@ The default is
 which configures sessions based on the
 .Pa /etc/iscsi.conf
 configuration file.
+.It Va cfumass_enable
+.Pq Vt bool
+If set to
+.Dq Li YES ,
+create and export an USB LUN using
+.Xr cfumass 4
+at boot time.
+.It Va cfumass_dir
+.Pq Vt str
+The directory where the files exported by USB LUN are located.
+The default directory is
+.Pa /var/cfumass .
+.It Va service_delete_empty
+.Pq Vt bool
+If set to
+.Dq Li YES ,
+.Ql Li service delete
+removes empty
+.Dq Li rc.conf.d
+files.
 .El
 .Sh FILES
 .Bl -tag -width ".Pa /etc/defaults/rc.conf" -compact
@@ -4415,7 +4579,6 @@ configuration file.
 .It Pa /etc/rc.conf.local
 .El
 .Sh SEE ALSO
-.Xr catman 1 ,
 .Xr chmod 1 ,
 .Xr gdb 1 ,
 .Xr info 1 ,
@@ -4496,10 +4659,12 @@ configuration file.
 .Xr rwhod 8 ,
 .Xr savecore 8 ,
 .Xr sdpd 8 ,
+.Xr service 8 ,
 .Xr sshd 8 ,
 .Xr swapon 8 ,
 .Xr sysctl 8 ,
 .Xr syslogd 8 ,
+.Xr sysrc 8 ,
 .Xr timed 8 ,
 .Xr unbound 8 ,
 .Xr usbconfig 8 ,

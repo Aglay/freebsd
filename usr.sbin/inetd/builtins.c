@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1983, 1991, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -130,10 +132,10 @@ chargen_dg(int s, struct servtab *sep)
 	socklen_t size;
 	char text[LINESIZ+2];
 
-	if (endring == 0) {
+	if (endring == NULL)
 		initring();
+	if (rs == NULL)
 		rs = ring;
-	}
 
 	size = sizeof(ss);
 	if (recvfrom(s, text, sizeof(text), 0,
@@ -166,10 +168,8 @@ chargen_stream(int s, struct servtab *sep)
 
 	inetd_setproctitle(sep->se_service, s);
 
-	if (!endring) {
+	if (!endring)
 		initring();
-		rs = ring;
-	}
 
 	text[LINESIZ] = '\r';
 	text[LINESIZ + 1] = '\n';
@@ -649,8 +649,14 @@ ident_stream(int s, struct servtab *sep)
 			goto fakeid_fail;
 		if (!Fflag) {
 			if (iflag) {
-				if (p[strspn(p, "0123456789")] == '\0' &&
-				    getpwuid(atoi(p)) != NULL)
+				const char *errstr;
+				uid_t uid;
+
+				uid = strtonum(p, 0, UID_MAX, &errstr);
+				if (errstr != NULL)
+					goto fakeid_fail;
+
+				if (getpwuid(uid) != NULL)
 					goto fakeid_fail;
 			} else {
 				if (getpwnam(p) != NULL)

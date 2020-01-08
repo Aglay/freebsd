@@ -4,11 +4,11 @@
 # For more information on this file, please read the config(5) manual page,
 # and/or the handbook section on Kernel Configuration Files:
 #
-#    http://www.FreeBSD.org/doc/en_US.ISO8859-1/books/handbook/kernelconfig-config.html
+#    https://www.FreeBSD.org/doc/en_US.ISO8859-1/books/handbook/kernelconfig-config.html
 #
 # The handbook is also available locally in /usr/share/doc/handbook
 # if you've installed the doc distribution, otherwise always see the
-# FreeBSD World Wide Web server (http://www.FreeBSD.org/) for the
+# FreeBSD World Wide Web server (https://www.FreeBSD.org/) for the
 # latest information.
 #
 # An exhaustive list of options and more detailed explanations of the
@@ -19,10 +19,8 @@
 # $FreeBSD$
 
 ident		IMX6
-include 	"std.armv6"
+include 	"std.armv7"
 include 	"../freescale/imx/std.imx6"
-
-options 	INTRNG
 
 options 	SOC_IMX6
 
@@ -51,9 +49,8 @@ device		mpcore_timer
 
 # Pseudo devices.
 device		loop			# Network loopback
-device		random			# Entropy device
 device		vlan			# 802.1Q VLAN support
-device		tun			# Packet tunnel.
+device		tuntap			# Packet tunnel.
 device		md			# Memory "disks"
 #device		gif			# IPv6 and IPv4 tunneling
 #device		firmware		# firmware assist module
@@ -77,6 +74,9 @@ device		scbus			# SCSI bus (required for ATA/SCSI)
 device		da			# Direct Access (disks)
 device		cd			# CD
 device		pass			# Passthrough device (direct ATA/SCSI access)
+
+# ATA controllers
+device 		ahci			# AHCI-compatible SATA controllers
 
 # USB support
 device		ehci			# OHCI USB interface
@@ -114,12 +114,14 @@ device		hdmi
 
 # Flattened Device Tree
 options 	FDT			# Configure using FDT/DTB data
-makeoptions	MODULES_EXTRA=dtb/imx6
+makeoptions	MODULES_EXTRA="dtb/imx6 imx"
+device  	fdt_pinctrl		# FDT pinmux driver
 
 # SoC-specific devices
 device		ffec			# Freescale Fast Ethernet Controller
 device		fsliic			# Freescale i2c/iic
 device		iic			# iic protocol
 device		iicbus			# iic bus
+device		imx6_snvs		# On-chip RTC
 device		imxwdt			# Watchdog. WARNING: can't be disabled!!!
 

@@ -2,7 +2,7 @@
 
 CRTARCH=	${MACHINE_CPUARCH:C/amd64/x86_64/}
 
-CRTSRC=		${SRCTOP}/contrib/compiler-rt/lib/builtins
+CRTSRC=		${SRCTOP}/contrib/llvm-project/compiler-rt/lib/builtins
 
 .PATH:		${CRTSRC}/${CRTARCH}
 .PATH:		${CRTSRC}
@@ -32,14 +32,15 @@ SRCF+=		divdi3
 SRCF+=		divmoddi4
 SRCF+=		divmodsi4
 SRCF+=		divsc3
+SRCF+=		divsi3
 SRCF+=		divtc3
 SRCF+=		divti3
 SRCF+=		divxc3
 SRCF+=		enable_execute_stack
 SRCF+=		eprintf
 SRCF+=		extendhfsf2
-SRCF+=		ffssi2
 SRCF+=		ffsdi2
+SRCF+=		ffssi2
 SRCF+=		ffsti2
 SRCF+=		fixdfdi
 SRCF+=		fixdfti
@@ -56,28 +57,22 @@ SRCF+=		fixunsxfsi
 SRCF+=		fixunsxfti
 SRCF+=		fixxfdi
 SRCF+=		fixxfti
-SRCF+=		floatdidf
-SRCF+=		floatdisf
 SRCF+=		floatditf
-SRCF+=		floatdixf
-SRCF+=		floatsitf
 SRCF+=		floattidf
 SRCF+=		floattisf
 SRCF+=		floattixf
-SRCF+=		floatundidf
-SRCF+=		floatundisf
 SRCF+=		floatunditf
-SRCF+=		floatundixf
 SRCF+=		floatunsidf
 SRCF+=		floatunsisf
 SRCF+=		floatuntidf
 SRCF+=		floatuntisf
 SRCF+=		floatuntixf
-SRCF+=		gcc_personality_v0
+SRCF+=		gcc_personality_v0	# not in upstream
 SRCF+=		int_util
 SRCF+=		lshrdi3
 SRCF+=		lshrti3
 SRCF+=		moddi3
+SRCF+=		modsi3
 SRCF+=		modti3
 SRCF+=		muldc3
 SRCF+=		muldi3
@@ -120,9 +115,28 @@ SRCF+=		udivdi3
 SRCF+=		udivmoddi4
 SRCF+=		udivmodsi4
 SRCF+=		udivmodti4
+SRCF+=		udivsi3
 SRCF+=		udivti3
 SRCF+=		umoddi3
+SRCF+=		umodsi3
 SRCF+=		umodti3
+
+# Avoid using SSE2 instructions on i386, if unsupported.
+.if ${MACHINE_CPUARCH} == "i386" && empty(MACHINE_CPU:Msse2)
+SRCS+=		floatdidf.c
+SRCS+=		floatdisf.c
+SRCS+=		floatdixf.c
+SRCS+=		floatundidf.c
+SRCS+=		floatundisf.c
+SRCS+=		floatundixf.c
+.else
+SRCF+=		floatdidf
+SRCF+=		floatdisf
+SRCF+=		floatdixf
+SRCF+=		floatundidf
+SRCF+=		floatundisf
+SRCF+=		floatundixf
+.endif
 
 # __cpu_model support, only used on x86
 .if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
@@ -145,7 +159,10 @@ SRCF+=		fixtfti
 SRCF+=		fixunstfdi
 SRCF+=		fixunstfsi
 SRCF+=		fixunstfti
+SRCF+=		floatsitf
+SRCF+=		floattitf
 SRCF+=		floatunsitf
+SRCF+=		floatuntitf
 SRCF+=		multf3
 SRCF+=		subtf3
 SRCF+=		trunctfdf2
@@ -171,20 +188,13 @@ SRCF+=		subsf3
 SRCF+=		truncdfsf2
 .endif
 
-.if ${MACHINE_CPUARCH} != "arm"
+.if ${MACHINE_CPUARCH} != "arm" && ${MACHINE_CPUARCH} != "mips"
 SRCF+=		comparedf2
 SRCF+=		comparesf2
 .endif
 
-.if ${MACHINE_CPUARCH} != "mips"
-SRCF+=		divsi3
-SRCF+=		modsi3
-SRCF+=		udivsi3
-SRCF+=		umodsi3
-.endif
-
 # FreeBSD-specific atomic intrinsics.
-.if ${MACHINE_CPUARCH} == "arm" || ${MACHINE_CPUARCH} == "armv6"
+.if ${MACHINE_CPUARCH} == "arm"
 .PATH:		${SRCTOP}/sys/arm/arm
 
 SRCF+=		stdatomic
@@ -195,8 +205,16 @@ CFLAGS+=	-DEMIT_SYNC_ATOMICS
 SRCF+=		stdatomic
 .endif
 
+
+.if "${COMPILER_TYPE}" == "clang" && \
+    (${MACHINE_ARCH} == "powerpc" || ${MACHINE_ARCH} == "powerpcspe")
+SRCS+=          atomic.c
+CFLAGS.atomic.c+=      -Wno-atomic-alignment
+.endif
+
+
 .for file in ${SRCF}
-.if ${MACHINE_ARCH:Marmv6*} && (!defined(CPUTYPE) || ${CPUTYPE:M*soft*} == "") \
+.if ${MACHINE_ARCH:Marmv[67]*} && (!defined(CPUTYPE) || ${CPUTYPE:M*soft*} == "") \
     && exists(${CRTSRC}/${CRTARCH}/${file}vfp.S)
 SRCS+=		${file}vfp.S
 . elif exists(${CRTSRC}/${CRTARCH}/${file}.S)
@@ -226,7 +244,12 @@ SRCS+=		sync_synchronize.S
 .endif
 
 # On some archs GCC-6.3 requires bswap32 built-in.
-.if ${MACHINE_CPUARCH} == "mips" || ${MACHINE_CPUARCH} == "sparc64"
+.if ${MACHINE_CPUARCH} == "mips" || ${MACHINE_CPUARCH} == "riscv" || \
+    ${MACHINE_CPUARCH} == "sparc64"
 SRCS+=		bswapdi2.c
 SRCS+=		bswapsi2.c
+.endif
+
+.if ${MACHINE_ARCH:Mriscv*sf}
+CFLAGS+=	-D__SOFT_FP__
 .endif

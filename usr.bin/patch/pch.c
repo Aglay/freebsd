@@ -70,6 +70,8 @@ static LINENUM	p_bfake = -1;	/* beg of faked up lines */
 static FILE	*pfp = NULL;	/* patch file pointer */
 static char	*bestguess = NULL;	/* guess at correct filename */
 
+char		*source_file;
+
 static void	grow_hunkmax(void);
 static int	intuit_diff_type(void);
 static void	next_intuit_at(off_t, LINENUM);
@@ -179,6 +181,9 @@ there_is_another_patch(void)
 			say("done\n");
 		return false;
 	}
+	if (p_filesize == 0)
+		return false;
+	nonempty_patchf_seen = true;
 	if (verbose)
 		say("Hmm...");
 	diff_type = intuit_diff_type();
@@ -215,7 +220,12 @@ there_is_another_patch(void)
 			bestguess = xstrdup(buf);
 			filearg[0] = fetchname(buf, &exists, 0);
 		}
-		if (!exists) {
+		/*
+		 * fetchname can now return buf = NULL, exists = true, to
+		 * indicate to the caller that /dev/null was specified.  Retain
+		 * previous behavior for now until this can be better evaluted.
+		 */
+		if (filearg[0] == NULL || !exists) {
 			int def_skip = *bestguess == '\0';
 			ask("No file found--skip this patch? [%c] ",
 			    def_skip  ? 'y' : 'n');
@@ -311,14 +321,16 @@ intuit_diff_type(void)
 			    &names[OLD_FILE].exists, strippath);
 		else if (strnEQ(s, "--- ", 4)) {
 			size_t off = 4;
-			if (piece_of_git && strippath == 957)
+			if (piece_of_git && strippath == 957 &&
+			    strnEQ(s, "--- a/", 6))
 				off = 6;
 			names[NEW_FILE].path = fetchname(s + off,
 			    &names[NEW_FILE].exists, strippath);
 		} else if (strnEQ(s, "+++ ", 4)) {
 			/* pretend it is the old name */
 			size_t off = 4;
-			if (piece_of_git && strippath == 957)
+			if (piece_of_git && strippath == 957 &&
+			    strnEQ(s, "+++ b/", 6))
 				off = 6;
 			names[OLD_FILE].path = fetchname(s + off,
 			    &names[OLD_FILE].exists, strippath);
@@ -397,6 +409,24 @@ scan_exit:
 		struct file_name tmp = names[OLD_FILE];
 		names[OLD_FILE] = names[NEW_FILE];
 		names[NEW_FILE] = tmp;
+	}
+
+	/* Invalidated */
+	free(source_file);
+	source_file = NULL;
+
+	if (retval != 0) {
+		/*
+		 * If we've successfully determined a diff type, stored in
+		 * retval, path == NULL means _PATH_DEVNULL if exists is set.
+		 * Explicitly specify it here to make it easier to detect later
+		 * on that we're actually creating a file and not that we've
+		 * just goofed something up.
+		 */
+		if (names[OLD_FILE].path != NULL)
+			source_file = xstrdup(names[OLD_FILE].path);
+		else if (names[OLD_FILE].exists)
+			source_file = xstrdup(_PATH_DEVNULL);
 	}
 	if (filearg[0] == NULL) {
 		if (posix)
@@ -1135,7 +1165,12 @@ hunk_done:
 			if (*buf != '>')
 				fatal("> expected at line %ld of patch\n",
 				    p_input_line);
-			p_line[i] = savestr(buf + 2);
+			/* Don't overrun if we don't have enough line */
+			if (len > 2)
+				p_line[i] = savestr(buf + 2);
+			else
+				p_line[i] = savestr("");
+
 			if (out_of_mem) {
 				p_end = i - 1;
 				return false;

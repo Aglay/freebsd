@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1997, 1998, 1999
  *	Bill Paul <wpaul@ctr.columbia.edu>.  All rights reserved.
  *
@@ -1008,11 +1010,6 @@ struct ti_type {
 #define TI_TIMEOUT		1000
 #define TI_TXCONS_UNSET		0xFFFF	/* impossible value */
 
-struct ti_mc_entry {
-	struct ether_addr		mc_addr;
-	SLIST_ENTRY(ti_mc_entry)	mc_entries;
-};
-
 typedef enum {
 	TI_FLAG_NONE		= 0x00,
 	TI_FLAG_DEBUGING	= 0x01,
@@ -1046,7 +1043,6 @@ struct ti_softc {
 	int			ti_std;		/* current std ring head */
 	int			ti_mini;	/* current mini ring head */
 	int			ti_jumbo;	/* current jumo ring head */
-	SLIST_HEAD(__ti_mchead, ti_mc_entry)	ti_mc_listhead;
 	uint32_t		ti_stat_ticks;
 	uint32_t		ti_rx_coal_ticks;
 	uint32_t		ti_tx_coal_ticks;

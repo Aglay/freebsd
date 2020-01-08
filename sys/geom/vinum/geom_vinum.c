@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  *  Copyright (c) 2004, 2007 Lukas Ertl
  *  Copyright (c) 2007, 2009 Ulf Lilleengen
  *  All rights reserved.
@@ -42,6 +44,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/vinum/geom_vinum_var.h>
 #include <geom/vinum/geom_vinum.h>
 #include <geom/vinum/geom_vinum_raid5.h>
@@ -1046,3 +1049,4 @@ static struct g_class g_vinum_class	= {
 };
 
 DECLARE_GEOM_CLASS(g_vinum_class, g_vinum);
+MODULE_VERSION(geom_vinum, 0);

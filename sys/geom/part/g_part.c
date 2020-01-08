@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002, 2005-2009 Marcel Moolenaar
  * All rights reserved.
  *
@@ -69,6 +71,7 @@ struct g_part_alias_list {
 	const char *lexeme;
 	enum g_part_alias alias;
 } g_part_alias_list[G_PART_ALIAS_COUNT] = {
+	{ "apple-apfs", G_PART_ALIAS_APPLE_APFS },
 	{ "apple-boot", G_PART_ALIAS_APPLE_BOOT },
 	{ "apple-core-storage", G_PART_ALIAS_APPLE_CORE_STORAGE },
 	{ "apple-hfs", G_PART_ALIAS_APPLE_HFS },
@@ -95,6 +98,7 @@ struct g_part_alias_list {
 	{ "efi", G_PART_ALIAS_EFI },
 	{ "fat16", G_PART_ALIAS_MS_FAT16 },
 	{ "fat32", G_PART_ALIAS_MS_FAT32 },
+	{ "fat32lba", G_PART_ALIAS_MS_FAT32LBA },
 	{ "freebsd", G_PART_ALIAS_FREEBSD },
 	{ "freebsd-boot", G_PART_ALIAS_FREEBSD_BOOT },
 	{ "freebsd-nandfs", G_PART_ALIAS_FREEBSD_NANDFS },
@@ -139,6 +143,14 @@ static u_int auto_resize = 1;
 SYSCTL_UINT(_kern_geom_part, OID_AUTO, auto_resize,
     CTLFLAG_RWTUN, &auto_resize, 1,
     "Enable auto resize");
+static u_int allow_nesting = 0;
+SYSCTL_UINT(_kern_geom_part, OID_AUTO, allow_nesting,
+    CTLFLAG_RWTUN, &allow_nesting, 0,
+    "Allow additional levels of nesting");
+char g_part_separator[MAXPATHLEN] = "";
+SYSCTL_STRING(_kern_geom_part, OID_AUTO, separator,
+    CTLFLAG_RDTUN, &g_part_separator, sizeof(g_part_separator),
+    "Partition name separator");
 
 /*
  * The GEOM partitioning class.
@@ -272,6 +284,35 @@ g_part_geometry(struct g_part_table *table, struct g_consumer *cp,
 	}
 }
 
+static void
+g_part_get_physpath_done(struct bio *bp)
+{
+	struct g_geom *gp;
+	struct g_part_entry *entry;
+	struct g_part_table *table;
+	struct g_provider *pp;
+	struct bio *pbp;
+
+	pbp = bp->bio_parent;
+	pp = pbp->bio_to;
+	gp = pp->geom;
+	table = gp->softc;
+	entry = pp->private;
+
+	if (bp->bio_error == 0) {
+		char *end;
+		size_t len, remainder;
+		len = strlcat(bp->bio_data, "/", bp->bio_length);
+		if (len < bp->bio_length) {
+			end = bp->bio_data + len;
+			remainder = bp->bio_length - len;
+			G_PART_NAME(table, entry, end, remainder);
+		}
+	}
+	g_std_done(bp);
+}
+
+
 #define	DPRINTF(...)	if (bootverbose) {	\
 	printf("GEOM_PART: " __VA_ARGS__);	\
 }
@@ -334,9 +375,9 @@ g_part_check_integrity(struct g_part_table *table, struct g_consumer *cp)
 				offset = e1->gpe_offset;
 			if ((offset + pp->stripeoffset) % pp->stripesize) {
 				DPRINTF("partition %d on (%s, %s) is not "
-				    "aligned on %u bytes\n", e1->gpe_index,
+				    "aligned on %ju bytes\n", e1->gpe_index,
 				    pp->name, table->gpt_scheme->name,
-				    pp->stripesize);
+				    (uintmax_t)pp->stripesize);
 				/* Don't treat this as a critical failure */
 			}
 		}
@@ -429,6 +470,7 @@ g_part_new_provider(struct g_geom *gp, struct g_part_table *table,
 	struct g_consumer *cp;
 	struct g_provider *pp;
 	struct sbuf *sb;
+	struct g_geom_alias *gap;
 	off_t offset;
 
 	cp = LIST_FIRST(&gp->consumer);
@@ -439,6 +481,19 @@ g_part_new_provider(struct g_geom *gp, struct g_part_table *table,
 		entry->gpe_offset = offset;
 
 	if (entry->gpe_pp == NULL) {
+		/*
+		 * Add aliases to the geom before we create the provider so that
+		 * geom_dev can taste it with all the aliases in place so all
+		 * the aliased dev_t instances get created for each partition
+		 * (eg foo5p7 gets created for bar5p7 when foo is an alias of bar).
+		 */
+		LIST_FOREACH(gap, &table->gpt_gp->aliases, ga_next) {
+			sb = sbuf_new_auto();
+			G_PART_FULLNAME(table, entry, sb, gap->ga_alias);
+			sbuf_finish(sb);
+			g_geom_add_alias(gp, sbuf_data(sb));
+			sbuf_delete(sb);
+		}
 		sb = sbuf_new_auto();
 		G_PART_FULLNAME(table, entry, sb, gp->name);
 		sbuf_finish(sb);
@@ -773,7 +828,7 @@ g_part_ctl_add(struct gctl_req *req, struct g_part_parms *gpp)
 		G_PART_FULLNAME(table, entry, sb, gp->name);
 		if (pp->stripesize > 0 && entry->gpe_pp->stripeoffset != 0)
 			sbuf_printf(sb, " added, but partition is not "
-			    "aligned on %u bytes\n", pp->stripesize);
+			    "aligned on %ju bytes\n", (uintmax_t)pp->stripesize);
 		else
 			sbuf_cat(sb, " added\n");
 		sbuf_finish(sb);
@@ -1332,13 +1387,13 @@ g_part_ctl_resize(struct gctl_req *req, struct g_part_parms *gpp)
 	}
 
 	pp = entry->gpe_pp;
-	if ((g_debugflags & 16) == 0 &&
+	if ((g_debugflags & G_F_FOOTSHOOTING) == 0 &&
 	    (pp->acr > 0 || pp->acw > 0 || pp->ace > 0)) {
 		if (entry->gpe_end - entry->gpe_start + 1 > gpp->gpp_size) {
 			/* Deny shrinking of an opened partition. */
 			gctl_error(req, "%d", EBUSY);
 			return (EBUSY);
-		} 
+		}
 	}
 
 	error = G_PART_RESIZE(table, entry, gpp);
@@ -1524,18 +1579,23 @@ g_part_wither(struct g_geom *gp, int error)
 {
 	struct g_part_entry *entry;
 	struct g_part_table *table;
+	struct g_provider *pp;
 
 	table = gp->softc;
 	if (table != NULL) {
-		G_PART_DESTROY(table, NULL);
+		gp->softc = NULL;
 		while ((entry = LIST_FIRST(&table->gpt_entry)) != NULL) {
 			LIST_REMOVE(entry, gpe_entry);
+			pp = entry->gpe_pp;
+			entry->gpe_pp = NULL;
+			if (pp != NULL) {
+				pp->private = NULL;
+				g_wither_provider(pp, error);
+			}
 			g_free(entry);
 		}
-		if (gp->softc != NULL) {
-			kobj_delete((kobj_t)gp->softc, M_GEOM);
-			gp->softc = NULL;
-		}
+		G_PART_DESTROY(table, NULL);
+		kobj_delete((kobj_t)table, M_GEOM);
 	}
 	g_wither_geom(gp, error);
 }
@@ -1575,6 +1635,7 @@ g_part_ctlreq(struct gctl_req *req, struct g_class *mp, const char *verb)
 		if (!strcmp(verb, "bootcode")) {
 			ctlreq = G_PART_CTL_BOOTCODE;
 			mparms |= G_PART_PARM_GEOM | G_PART_PARM_BOOTCODE;
+			oparms |= G_PART_PARM_SKIP_DSN;
 		}
 		break;
 	case 'c':
@@ -1692,6 +1753,8 @@ g_part_ctlreq(struct gctl_req *req, struct g_class *mp, const char *verb)
 				parm = G_PART_PARM_SIZE;
 			else if (!strcmp(ap->name, "start"))
 				parm = G_PART_PARM_START;
+			else if (!strcmp(ap->name, "skip_dsn"))
+				parm = G_PART_PARM_SKIP_DSN;
 			break;
 		case 't':
 			if (!strcmp(ap->name, "type"))
@@ -1751,6 +1814,10 @@ g_part_ctlreq(struct gctl_req *req, struct g_class *mp, const char *verb)
 			break;
 		case G_PART_PARM_SIZE:
 			error = g_part_parm_quad(req, ap->name, &gpp.gpp_size);
+			break;
+		case G_PART_PARM_SKIP_DSN:
+			error = g_part_parm_uint32(req, ap->name,
+			    &gpp.gpp_skip_dsn);
 			break;
 		case G_PART_PARM_START:
 			error = g_part_parm_quad(req, ap->name,
@@ -1901,6 +1968,7 @@ g_part_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	struct g_part_entry *entry;
 	struct g_part_table *table;
 	struct root_hold_token *rht;
+	struct g_geom_alias *gap;
 	int attr, depth;
 	int error;
 
@@ -1913,10 +1981,12 @@ g_part_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 
 	/*
 	 * Create a GEOM with consumer and hook it up to the provider.
-	 * With that we become part of the topology. Optain read access
+	 * With that we become part of the topology. Obtain read access
 	 * to the provider.
 	 */
 	gp = g_new_geomf(mp, "%s", pp->name);
+	LIST_FOREACH(gap, &pp->geom->aliases, ga_next)
+		g_geom_add_alias(gp, gap->ga_alias);
 	cp = g_new_consumer(gp);
 	cp->flags |= G_CF_DIRECT_SEND | G_CF_DIRECT_RECEIVE;
 	error = g_attach(cp, pp);
@@ -2164,6 +2234,7 @@ g_part_start(struct bio *bp)
 	struct g_part_table *table;
 	struct g_kerneldump *gkd;
 	struct g_provider *pp;
+	void (*done_func)(struct bio *) = g_std_done;
 	char buf[64];
 
 	biotrack(bp, __func__);
@@ -2208,7 +2279,13 @@ g_part_start(struct bio *bp)
 			return;
 		if (g_handleattr_int(bp, "GEOM::fwsectors", table->gpt_sectors))
 			return;
-		if (g_handleattr_int(bp, "PART::isleaf", table->gpt_isleaf))
+		/*
+		 * allow_nesting overrides "isleaf" to false _unless_ the
+		 * provider offset is zero, since otherwise we would recurse.
+		 */
+		if (g_handleattr_int(bp, "PART::isleaf",
+			table->gpt_isleaf &&
+			(allow_nesting == 0 || entry->gpe_offset == 0)))
 			return;
 		if (g_handleattr_int(bp, "PART::depth", table->gpt_depth))
 			return;
@@ -2218,6 +2295,10 @@ g_part_start(struct bio *bp)
 		if (g_handleattr_str(bp, "PART::type",
 		    G_PART_TYPE(table, entry, buf, sizeof(buf))))
 			return;
+		if (!strcmp("GEOM::physpath", bp->bio_attribute)) {
+			done_func = g_part_get_physpath_done;
+			break;
+		}
 		if (!strcmp("GEOM::kerneldump", bp->bio_attribute)) {
 			/*
 			 * Check that the partition is suitable for kernel
@@ -2254,7 +2335,7 @@ g_part_start(struct bio *bp)
 		g_io_deliver(bp, ENOMEM);
 		return;
 	}
-	bp2->bio_done = g_std_done;
+	bp2->bio_done = done_func;
 	g_io_request(bp2, cp);
 }
 

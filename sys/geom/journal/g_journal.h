@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005-2006 Pawel Jakub Dawidek <pjd@FreeBSD.org>
  * All rights reserved.
  *
@@ -47,28 +49,10 @@
 #ifdef _KERNEL
 extern int g_journal_debug;
 
-#define	GJ_DEBUG(lvl, ...)	do {					\
-	if (g_journal_debug >= (lvl)) {					\
-		printf("GEOM_JOURNAL");					\
-		if (g_journal_debug > 0)				\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf("\n");						\
-	}								\
-} while (0)
-#define	GJ_LOGREQ(lvl, bp, ...)	do {					\
-	if (g_journal_debug >= (lvl)) {					\
-		printf("GEOM_JOURNAL");					\
-		if (g_journal_debug > 0)				\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf(" ");						\
-		g_print_bio(bp);					\
-		printf("\n");						\
-	}								\
-} while (0)
+#define	GJ_DEBUG(lvl, ...) \
+    _GEOM_DEBUG("GEOM_JOURNAL", g_journal_debug, (lvl), NULL, __VA_ARGS__)
+#define	GJ_LOGREQ(lvl, bp, ...) \
+    _GEOM_DEBUG("GEOM_JOURNAL", g_journal_debug, (lvl), (bp), __VA_ARGS__)
 
 #define	JEMPTY(sc)	((sc)->sc_journal_offset -			\
 			 (sc)->sc_jprovider->sectorsize ==		\
@@ -181,6 +165,17 @@ struct g_journal_softc {
 		(bp)->bio_next = (pbp)->bio_next;			\
 		(pbp)->bio_next = (bp);					\
 	}								\
+} while (0)
+#define GJQ_LAST(head, bp) do {						\
+	struct bio *_bp;						\
+									\
+	if ((head) == NULL) {						\
+		(bp) = (head);						\
+		break;							\
+	}								\
+	for (_bp = (head); _bp->bio_next != NULL; _bp = _bp->bio_next)	\
+		continue;						\
+	(bp) = (_bp);							\
 } while (0)
 #define	GJQ_FIRST(head)	(head)
 #define	GJQ_REMOVE(head, bp)	do {					\

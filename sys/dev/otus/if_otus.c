@@ -1670,8 +1670,6 @@ otus_sub_rxeof(struct otus_softc *sc, uint8_t *buf, int len, struct mbufq *rxq)
 		struct mbuf mb;
 
 		tap->wr_flags = 0;
-		tap->wr_chan_freq = htole16(ic->ic_ibss_chan->ic_freq);
-		tap->wr_chan_flags = htole16(ic->ic_ibss_chan->ic_flags);
 		tap->wr_antsignal = tail->rssi;
 		tap->wr_rate = 2;	/* In case it can't be found below. */
 		switch (tail->status & AR_RX_STATUS_MT_MASK) {
@@ -2182,6 +2180,7 @@ static int
 otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
     struct otus_data *data, const struct ieee80211_bpf_params *params)
 {
+	const struct ieee80211_txparam *tp = ni->ni_txparms;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211vap *vap = ni->ni_vap;
 	struct ieee80211_frame *wh;
@@ -2190,7 +2189,7 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	uint32_t phyctl;
 	uint16_t macctl, qos;
 	uint8_t qid, rate;
-	int hasqos, xferlen;
+	int hasqos, xferlen, type, ismcast;
 
 	wh = mtod(m, struct ieee80211_frame *);
 	if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
@@ -2228,17 +2227,19 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 		qid = WME_AC_BE;
 	}
 
+	type = wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
+	ismcast = IEEE80211_IS_MULTICAST(wh->i_addr1);
+
 	/* Pickup a rate index. */
-	if (params != NULL) {
+	if (params != NULL)
 		rate = otus_rate_to_hw_rate(sc, params->ibp_rate0);
-	} else if (m->m_flags & M_EAPOL) {
-		/* Get lowest rate */
-		rate = otus_rate_to_hw_rate(sc, 0);
-	} else if (IEEE80211_IS_MULTICAST(wh->i_addr1) ||
-	    (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_DATA) {
-		/* Get lowest rate */
-		rate = otus_rate_to_hw_rate(sc, 0);
-	} else {
+	else if (!!(m->m_flags & M_EAPOL) || type != IEEE80211_FC0_TYPE_DATA)
+		rate = otus_rate_to_hw_rate(sc, tp->mgmtrate);
+	else if (ismcast)
+		rate = otus_rate_to_hw_rate(sc, tp->mcastrate);
+	else if (tp->ucastrate != IEEE80211_FIXED_RATE_NONE)
+		rate = otus_rate_to_hw_rate(sc, tp->ucastrate);
+	else {
 		(void) ieee80211_ratectl_rate(ni, NULL, 0);
 		rate = otus_rate_to_hw_rate(sc, ni->ni_txrate);
 	}
@@ -2249,12 +2250,12 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	/*
 	 * XXX TODO: params for NOACK, ACK, RTS, CTS, etc
 	 */
-	if (IEEE80211_IS_MULTICAST(wh->i_addr1) ||
+	if (ismcast ||
 	    (hasqos && ((qos & IEEE80211_QOS_ACKPOLICY) ==
 	     IEEE80211_QOS_ACKPOLICY_NOACK)))
 		macctl |= AR_TX_MAC_NOACK;
 
-	if (!IEEE80211_IS_MULTICAST(wh->i_addr1)) {
+	if (!ismcast) {
 		if (m->m_pkthdr.len + IEEE80211_CRC_LEN >= vap->iv_rtsthreshold)
 			macctl |= AR_TX_MAC_RTS;
 		else if (ic->ic_flags & IEEE80211_F_USEPROT) {
@@ -2307,63 +2308,63 @@ otus_tx(struct otus_softc *sc, struct ieee80211_node *ni, struct mbuf *m,
 	return 0;
 }
 
+static u_int
+otus_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t val, *hashes = arg;
+
+	val = le32dec(LLADDR(sdl) + 4);
+	/* Get address byte 5 */
+	val = val & 0x0000ff00;
+	val = val >> 8;
+
+	/* As per below, shift it >> 2 to get only 6 bits */
+	val = val >> 2;
+	if (val < 32)
+		hashes[0] |= 1 << val;
+	else
+		hashes[1] |= 1 << (val - 32);
+
+	return (1);
+}
+
+
 int
 otus_set_multi(struct otus_softc *sc)
 {
-	uint32_t lo, hi;
 	struct ieee80211com *ic = &sc->sc_ic;
+	uint32_t hashes[2];
 	int r;
 
 	if (ic->ic_allmulti > 0 || ic->ic_promisc > 0 ||
 	    ic->ic_opmode == IEEE80211_M_MONITOR) {
-		lo = 0xffffffff;
-		hi = 0xffffffff;
+		hashes[0] = 0xffffffff;
+		hashes[1] = 0xffffffff;
 	} else {
 		struct ieee80211vap *vap;
-		struct ifnet *ifp;
-		struct ifmultiaddr *ifma;
 
-		lo = hi = 0;
-		TAILQ_FOREACH(vap, &ic->ic_vaps, iv_next) {
-			ifp = vap->iv_ifp;
-			if_maddr_rlock(ifp);
-			TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-				caddr_t dl;
-				uint32_t val;
-
-				dl = LLADDR((struct sockaddr_dl *) ifma->ifma_addr);
-				val = le32dec(dl + 4);
-				/* Get address byte 5 */
-				val = val & 0x0000ff00;
-				val = val >> 8;
-
-				/* As per below, shift it >> 2 to get only 6 bits */
-				val = val >> 2;
-				if (val < 32)
-					lo |= 1 << val;
-				else
-					hi |= 1 << (val - 32);
-			}
-			if_maddr_runlock(ifp);
-		}
+		hashes[0] = hashes[1] = 0;
+		TAILQ_FOREACH(vap, &ic->ic_vaps, iv_next)
+			if_foreach_llmaddr(vap->iv_ifp, otus_hash_maddr,
+			    hashes);
 	}
 #if 0
 	/* XXX openbsd code */
 	while (enm != NULL) {
 		bit = enm->enm_addrlo[5] >> 2;
 		if (bit < 32)
-			lo |= 1 << bit;
+			hashes[0] |= 1 << bit;
 		else
-			hi |= 1 << (bit - 32);
+			hashes[1] |= 1 << (bit - 32);
 		ETHER_NEXT_MULTI(step, enm);
 	}
 #endif
 
-	hi |= 1U << 31;	/* Make sure the broadcast bit is set. */
+	hashes[1] |= 1U << 31;	/* Make sure the broadcast bit is set. */
 
 	OTUS_LOCK(sc);
-	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_L, lo);
-	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_H, hi);
+	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_L, hashes[0]);
+	otus_write(sc, AR_MAC_REG_GROUP_HASH_TBL_H, hashes[1]);
 	r = otus_write_barrier(sc);
 	/* XXX operating mode? filter? */
 	OTUS_UNLOCK(sc);
@@ -2392,12 +2393,15 @@ otus_updateedca_locked(struct otus_softc *sc)
 {
 #define EXP2(val)	((1 << (val)) - 1)
 #define AIFS(val)	((val) * 9 + 10)
+	struct chanAccParams chp;
 	struct ieee80211com *ic = &sc->sc_ic;
 	const struct wmeParams *edca;
 
+	ieee80211_wme_ic_getparams(ic, &chp);
+
 	OTUS_LOCK_ASSERT(sc);
 
-	edca = ic->ic_wme.wme_chanParams.cap_wmeParams;
+	edca = chp.cap_wmeParams;
 
 	/* Set CWmin/CWmax values. */
 	otus_write(sc, AR_MAC_REG_AC0_CW,
@@ -3104,7 +3108,7 @@ otus_set_operating_mode(struct otus_softc *sc)
 	 */
 	IEEE80211_ADDR_COPY(bssid, zero_macaddr);
 	vap = TAILQ_FIRST(&ic->ic_vaps);
-	macaddr = ic->ic_macaddr;
+	macaddr = vap ? vap->iv_myaddr : ic->ic_macaddr;
 
 	switch (ic->ic_opmode) {
 	case IEEE80211_M_STA:

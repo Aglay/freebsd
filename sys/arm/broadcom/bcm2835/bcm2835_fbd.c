@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 Oleksandr Tymoshenko <gonzo@freebsd.org>
  * Copyright (c) 2012, 2013 The FreeBSD Foundation
  * All rights reserved.
@@ -83,7 +85,13 @@ bcm_fb_init(struct bcmsc_softc *sc, struct bcm2835_fb_config *fb)
 	memset(fb, 0, sizeof(*fb));
 	if (bcm2835_mbox_fb_get_w_h(fb) != 0)
 		return (ENXIO);
-	fb->bpp = FB_DEPTH;
+	if (bcm2835_mbox_fb_get_bpp(fb) != 0)
+		return (ENXIO);
+	if (fb->bpp < FB_DEPTH) {
+		device_printf(sc->dev, "changing fb bpp from %d to %d\n", fb->bpp, FB_DEPTH);
+		fb->bpp = FB_DEPTH;
+	} else
+		device_printf(sc->dev, "keeping existing fb bpp of %d\n", fb->bpp);
 
 	fb->vxres = fb->xres;
 	fb->vyres = fb->yres;
@@ -221,7 +229,7 @@ bcm_fb_attach(device_t dev)
 	/* Newer firmware versions needs an inverted color palette. */
 	sc->fbswap = 0;
 	chosen = OF_finddevice("/chosen");
-	if (chosen != 0 &&
+	if (chosen != -1 &&
 	    OF_getprop(chosen, "bootargs", &bootargs, sizeof(bootargs)) > 0) {
 		p = bootargs;
 		while ((v = strsep(&p, " ")) != NULL) {

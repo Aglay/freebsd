@@ -4,7 +4,7 @@
 # Warning flags for compiling the kernel and components of the kernel:
 #
 CWARNFLAGS?=	-Wall -Wredundant-decls -Wnested-externs -Wstrict-prototypes \
-		-Wmissing-prototypes -Wpointer-arith -Winline -Wcast-qual \
+		-Wmissing-prototypes -Wpointer-arith -Wcast-qual \
 		-Wundef -Wno-pointer-sign ${FORMAT_EXTENSIONS} \
 		-Wmissing-include-dirs -fdiagnostics-show-option \
 		-Wno-unknown-pragmas \
@@ -18,12 +18,13 @@ CWARNFLAGS?=	-Wall -Wredundant-decls -Wnested-externs -Wstrict-prototypes \
 # a false positive.
 .if ${COMPILER_TYPE} == "clang"
 NO_WCONSTANT_CONVERSION=	-Wno-error-constant-conversion
-NO_WSHIFT_COUNT_NEGATIVE=	-Wno-error-shift-count-negative
-NO_WSHIFT_COUNT_OVERFLOW=	-Wno-error-shift-count-overflow
-NO_WSELF_ASSIGN=		-Wno-error-self-assign
+NO_WSHIFT_COUNT_NEGATIVE=	-Wno-shift-count-negative
+NO_WSHIFT_COUNT_OVERFLOW=	-Wno-shift-count-overflow
+NO_WSELF_ASSIGN=		-Wno-self-assign
 NO_WUNNEEDED_INTERNAL_DECL=	-Wno-error-unneeded-internal-declaration
 NO_WSOMETIMES_UNINITIALIZED=	-Wno-error-sometimes-uninitialized
 NO_WCAST_QUAL=			-Wno-error-cast-qual
+NO_WTAUTOLOGICAL_POINTER_COMPARE= -Wno-tautological-pointer-compare
 # Several other warnings which might be useful in some cases, but not severe
 # enough to error out the whole kernel build.  Display them anyway, so there is
 # some incentive to fix them eventually.
@@ -34,13 +35,7 @@ CWARNEXTRA?=	-Wno-error-tautological-compare -Wno-error-empty-body \
 CWARNEXTRA+=	-Wno-error-shift-negative-value
 .endif
 .if ${COMPILER_VERSION} >= 40000
-CWARNEXTRA+=	-Wno-error-address-of-packed-member
-.endif
-
-CLANG_NO_IAS= -no-integrated-as
-.if ${COMPILER_VERSION} < 30500
-# XXX: clang < 3.5 integrated-as doesn't grok .codeNN directives
-CLANG_NO_IAS34= -no-integrated-as
+CWARNEXTRA+=	-Wno-address-of-packed-member
 .endif
 .endif
 
@@ -48,6 +43,7 @@ CLANG_NO_IAS34= -no-integrated-as
 .if ${COMPILER_VERSION} >= 40800
 # Catch-all for all the things that are in our tree, but for which we're
 # not yet ready for this compiler.
+NO_WUNUSED_BUT_SET_VARIABLE = -Wno-unused-but-set-variable
 CWARNEXTRA?=	-Wno-error=address				\
 		-Wno-error=aggressive-loop-optimizations	\
 		-Wno-error=array-bounds				\
@@ -58,19 +54,37 @@ CWARNEXTRA?=	-Wno-error=address				\
 		-Wno-error=maybe-uninitialized			\
 		-Wno-error=overflow				\
 		-Wno-error=sequence-point			\
-		-Wno-error=strict-overflow			\
-		-Wno-error=unused-but-set-variable
+		-Wno-unused-but-set-variable
 .if ${COMPILER_VERSION} >= 60100
 CWARNEXTRA+=	-Wno-error=misleading-indentation		\
 		-Wno-error=nonnull-compare			\
 		-Wno-error=shift-overflow			\
 		-Wno-error=tautological-compare
 .endif
+.if ${COMPILER_VERSION} >= 70100
+CWARNEXTRA+=	-Wno-error=stringop-overflow
+.endif
+.if ${COMPILER_VERSION} >= 70200
+CWARNEXTRA+=	-Wno-error=memset-elt-size
+.endif
+.if ${COMPILER_VERSION} >= 80000
+CWARNEXTRA+=	-Wno-error=packed-not-aligned
+.endif
+.if ${COMPILER_VERSION} >= 90100
+CWARNEXTRA+=	-Wno-address-of-packed-member
+.endif
 .else
 # For gcc 4.2, eliminate the too-often-wrong warnings about uninitialized vars.
 CWARNEXTRA?=	-Wno-uninitialized
+# GCC 4.2 doesn't have -Wno-error=cast-qual, so just disable the warning for
+# the few files that are already known to generate cast-qual warnings.
+NO_WCAST_QUAL= -Wno-cast-qual
+NO_WNONNULL=	-Wno-nonnull
 .endif
 .endif
+
+# This warning is utter nonsense
+CWARNFLAGS+=	-Wno-format-zero-length
 
 # External compilers may not support our format extensions.  Allow them
 # to be disabled.  WARNING: format checking is disabled in this case.
@@ -120,9 +134,23 @@ CFLAGS += -ffixed-x18
 INLINE_LIMIT?=	8000
 .endif
 
+#
+# For RISC-V we specify the soft-float ABI (lp64) to avoid the use of floating
+# point registers within the kernel. We also specify the "medium" code model,
+# which generates code suitable for a 2GiB addressing range located at any
+# offset, allowing modules to be located anywhere in the 64-bit address space.
+# Note that clang and GCC refer to this code model as "medium" and "medany"
+# respectively.
+#
 .if ${MACHINE_CPUARCH} == "riscv"
+CFLAGS+=	-march=rv64imafdc -mabi=lp64
+CFLAGS.clang+=	-mcmodel=medium
 CFLAGS.gcc+=	-mcmodel=medany
 INLINE_LIMIT?=	8000
+
+.if ${LINKER_FEATURES:Mriscv-relaxations} == ""
+CFLAGS+=	-mno-relax
+.endif
 .endif
 
 #
@@ -173,10 +201,16 @@ CFLAGS.gcc+=	-mno-spe
 .endif
 
 #
-# Use dot symbols on powerpc64 to make ddb happy
+# Use dot symbols (or, better, the V2 ELF ABI) on powerpc64 to make
+# DDB happy. ELFv2, if available, has some other efficiency benefits.
 #
 .if ${MACHINE_ARCH} == "powerpc64"
+.if ${COMPILER_VERSION} >= 40900
+CFLAGS.gcc+=	-mabi=elfv2
+.else
 CFLAGS.gcc+=	-mcall-aixdesc
+.endif
+CFLAGS.clang+=	-mabi=elfv2
 .endif
 
 #
@@ -185,9 +219,6 @@ CFLAGS.gcc+=	-mcall-aixdesc
 .if ${MACHINE_CPUARCH} == "mips"
 CFLAGS+=	-msoft-float
 INLINE_LIMIT?=	8000
-.if ${MACHINE_ARCH:Mmips*hf} != ""
-CFLAGS+= -DCPU_HAVEFPU
-.endif
 .endif
 
 #
@@ -201,7 +232,7 @@ CFLAGS+=	-ffreestanding
 # gcc and clang opimizers take advantage of this.  The kernel makes
 # use of signed integer wraparound mechanics so we need the compiler
 # to treat it as a wraparound and not take shortcuts.
-# 
+#
 CFLAGS+=	-fwrapv
 
 #
@@ -210,6 +241,14 @@ CFLAGS+=	-fwrapv
 .if ${MK_SSP} != "no" && \
     ${MACHINE_CPUARCH} != "arm" && ${MACHINE_CPUARCH} != "mips"
 CFLAGS+=	-fstack-protector
+.endif
+
+#
+# Retpoline speculative execution vulnerability mitigation (CVE-2017-5715)
+#
+.if defined(COMPILER_FEATURES) && ${COMPILER_FEATURES:Mretpoline} != "" && \
+    ${MK_KERNEL_RETPOLINE} != "no"
+CFLAGS+=	-mretpoline
 .endif
 
 #
@@ -224,6 +263,7 @@ CFLAGS+=	-gdwarf-2
 .endif
 
 CFLAGS+= ${CWARNFLAGS:M*} ${CWARNFLAGS.${.IMPSRC:T}}
+CFLAGS+= ${CWARNFLAGS.${COMPILER_TYPE}}
 CFLAGS+= ${CFLAGS.${COMPILER_TYPE}} ${CFLAGS.${.IMPSRC:T}}
 
 # Tell bmake not to mistake standard targets for things to be searched for
@@ -232,7 +272,7 @@ PHONY_NOTMAIN = afterdepend afterinstall all beforedepend beforeinstall \
 		beforelinking build build-tools buildfiles buildincludes \
 		checkdpadd clean cleandepend cleandir cleanobj configure \
 		depend distclean distribute exe \
-		html includes install installfiles installincludes lint \
+		html includes install installfiles installincludes \
 		obj objlink objs objwarn \
 		realinstall regress \
 		tags whereobj
@@ -258,13 +298,17 @@ CFLAGS+=        -std=${CSTD}
 LD_EMULATION_aarch64=aarch64elf
 LD_EMULATION_amd64=elf_x86_64_fbsd
 LD_EMULATION_arm=armelf_fbsd
-LD_EMULATION_armeb=armelfb_fbsd
 LD_EMULATION_armv6=armelf_fbsd
+LD_EMULATION_armv7=armelf_fbsd
 LD_EMULATION_i386=elf_i386_fbsd
 LD_EMULATION_mips= elf32btsmip_fbsd
+LD_EMULATION_mipshf= elf32btsmip_fbsd
 LD_EMULATION_mips64= elf64btsmip_fbsd
+LD_EMULATION_mips64hf= elf64btsmip_fbsd
 LD_EMULATION_mipsel= elf32ltsmip_fbsd
+LD_EMULATION_mipselhf= elf32ltsmip_fbsd
 LD_EMULATION_mips64el= elf64ltsmip_fbsd
+LD_EMULATION_mips64elhf= elf64ltsmip_fbsd
 LD_EMULATION_mipsn32= elf32btsmipn32_fbsd
 LD_EMULATION_mipsn32el= elf32btsmipn32_fbsd   # I don't think this is a thing that works
 LD_EMULATION_powerpc= elf32ppc_fbsd

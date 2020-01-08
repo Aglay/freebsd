@@ -3,6 +3,8 @@
  */
 
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004 Maksim Yevmenkin <m_evmenkin@yahoo.com>
  * All rights reserved.
  *
@@ -31,11 +33,11 @@
  * $FreeBSD$
  */
 
-#include "opt_compat.h"
 #include "opt_kbd.h"
 
 #include <sys/param.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/fcntl.h>
 #include <sys/kbio.h>
 #include <sys/kernel.h>
@@ -577,9 +579,7 @@ static keyboard_switch_t vkbdsw = {
 	.clear_state =	vkbd_clear_state,
 	.get_state =	vkbd_get_state,
 	.set_state =	vkbd_set_state,
-	.get_fkeystr =	genkbd_get_fkeystr,
 	.poll =		vkbd_poll,
-	.diag =		genkbd_diag,
 };
 
 static int	typematic(int delay, int rate);

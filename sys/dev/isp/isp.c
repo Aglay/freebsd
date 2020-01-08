@@ -1,5 +1,7 @@
 /*-
- *  Copyright (c) 2009-2017 Alexander Motin <mav@FreeBSD.org>
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ *  Copyright (c) 2009-2018 Alexander Motin <mav@FreeBSD.org>
  *  Copyright (c) 1997-2009 by Matthew Jacob
  *  All rights reserved.
  *
@@ -224,7 +226,10 @@ isp_reset(ispsoftc_t *isp, int do_load_defaults)
 			btype = "2532";
 			break;
 		case ISP_HA_FC_2600:
-			btype = "2031";
+			btype = "2600";
+			break;
+		case ISP_HA_FC_2700:
+			btype = "2700";
 			break;
 		default:
 			break;
@@ -871,6 +876,7 @@ isp_reset(ispsoftc_t *isp, int do_load_defaults)
 			}
 		}
 	} else if (IS_26XX(isp)) {
+		isp_prt(isp, ISP_LOGDEBUG1, "loading firmware from flash");
 		MBSINIT(&mbs, MBOX_LOAD_FLASH_FIRMWARE, MBLOGALL, 5000000);
 		mbs.ibitm = 0x01;
 		mbs.obitm = 0x07;
@@ -908,7 +914,10 @@ isp_reset(ispsoftc_t *isp, int do_load_defaults)
 	 * we still need to (re)start it.
 	 */
 	MBSINIT(&mbs, MBOX_EXEC_FIRMWARE, MBLOGALL, 5000000);
-	if (IS_24XX(isp)) {
+	if (IS_26XX(isp)) {
+		mbs.param[1] = code_org >> 16;
+		mbs.param[2] = code_org;
+	} else if (IS_24XX(isp)) {
 		mbs.param[1] = code_org >> 16;
 		mbs.param[2] = code_org;
 		if (isp->isp_loaded_fw) {
@@ -949,7 +958,7 @@ isp_reset(ispsoftc_t *isp, int do_load_defaults)
 	 * Ask the chip for the current firmware version.
 	 * This should prove that the new firmware is working.
 	 */
-	MBSINIT(&mbs, MBOX_ABOUT_FIRMWARE, MBLOGALL, 0);
+	MBSINIT(&mbs, MBOX_ABOUT_FIRMWARE, MBLOGALL, 5000000);
 	isp_mboxcmd(isp, &mbs);
 	if (mbs.param[0] != MBOX_COMMAND_COMPLETE) {
 		return;
@@ -1631,6 +1640,7 @@ isp_fibre_init(ispsoftc_t *isp)
 	fcparam *fcp;
 	isp_icb_t local, *icbp = &local;
 	mbreg_t mbs;
+	int ownloopid;
 
 	/*
 	 * We only support one channel on non-24XX cards
@@ -1709,12 +1719,19 @@ isp_fibre_init(ispsoftc_t *isp)
 	}
 	icbp->icb_retry_delay = fcp->isp_retry_delay;
 	icbp->icb_retry_count = fcp->isp_retry_count;
-	if (fcp->isp_loopid < LOCAL_LOOP_LIM) {
-		icbp->icb_hardaddr = fcp->isp_loopid;
-		if (isp->isp_confopts & ISP_CFG_OWNLOOPID)
-			icbp->icb_fwoptions |= ICBOPT_HARD_ADDRESS;
-		else
-			icbp->icb_fwoptions |= ICBOPT_PREV_ADDRESS;
+	icbp->icb_hardaddr = fcp->isp_loopid;
+	ownloopid = (isp->isp_confopts & ISP_CFG_OWNLOOPID) != 0;
+	if (icbp->icb_hardaddr >= LOCAL_LOOP_LIM) {
+		icbp->icb_hardaddr = 0;
+		ownloopid = 0;
+	}
+
+	/*
+	 * Our life seems so much better with 2200s and later with
+	 * the latest f/w if we set Hard Address.
+	 */
+	if (ownloopid || ISP_FW_NEWER_THAN(isp, 2, 2, 5)) {
+		icbp->icb_fwoptions |= ICBOPT_HARD_ADDRESS;
 	}
 
 	/*
@@ -1951,6 +1968,7 @@ isp_fibre_init_2400(ispsoftc_t *isp)
 	isp_icb_2400_t local, *icbp = &local;
 	mbreg_t mbs;
 	int chan;
+	int ownloopid = 0;
 
 	/*
 	 * Check to see whether all channels have *some* kind of role
@@ -2009,7 +2027,7 @@ isp_fibre_init_2400(ispsoftc_t *isp)
 	}
 
 	icbp->icb_execthrottle = DEFAULT_EXEC_THROTTLE(isp);
-	if (icbp->icb_execthrottle < 1) {
+	if (icbp->icb_execthrottle < 1 && !IS_26XX(isp)) {
 		isp_prt(isp, ISP_LOGERR, "bad execution throttle of %d- using %d", DEFAULT_EXEC_THROTTLE(isp), ICB_DFLT_THROTTLE);
 		icbp->icb_execthrottle = ICB_DFLT_THROTTLE;
 	}
@@ -2023,13 +2041,16 @@ isp_fibre_init_2400(ispsoftc_t *isp)
 			icbp->icb_xchgcnt >>= 1;
 	}
 
-	if (fcp->isp_loopid < LOCAL_LOOP_LIM) {
-		icbp->icb_hardaddr = fcp->isp_loopid;
-		if (isp->isp_confopts & ISP_CFG_OWNLOOPID)
-			icbp->icb_fwoptions1 |= ICB2400_OPT1_HARD_ADDRESS;
-		else
-			icbp->icb_fwoptions1 |= ICB2400_OPT1_PREV_ADDRESS;
+
+	ownloopid = (isp->isp_confopts & ISP_CFG_OWNLOOPID) != 0;
+	icbp->icb_hardaddr = fcp->isp_loopid;
+	if (icbp->icb_hardaddr >= LOCAL_LOOP_LIM) {
+		icbp->icb_hardaddr = 0;
+		ownloopid = 0;
 	}
+
+	if (ownloopid)
+		icbp->icb_fwoptions1 |= ICB2400_OPT1_HARD_ADDRESS;
 
 	if (isp->isp_confopts & ISP_CFG_NOFCTAPE) {
 		icbp->icb_fwoptions2 &= ~ICB2400_OPT2_FCTAPE;
@@ -2111,11 +2132,15 @@ isp_fibre_init_2400(ispsoftc_t *isp)
 	} else if (isp->isp_confopts & ISP_CFG_16GB) {
 		icbp->icb_fwoptions3 &= ~ICB2400_OPT3_RATE_MASK;
 		icbp->icb_fwoptions3 |= ICB2400_OPT3_RATE_16GB;
+	} else if (isp->isp_confopts & ISP_CFG_32GB) {
+		icbp->icb_fwoptions3 &= ~ICB2400_OPT3_RATE_MASK;
+		icbp->icb_fwoptions3 |= ICB2400_OPT3_RATE_32GB;
 	} else {
 		switch (icbp->icb_fwoptions3 & ICB2400_OPT3_RATE_MASK) {
 		case ICB2400_OPT3_RATE_4GB:
 		case ICB2400_OPT3_RATE_8GB:
 		case ICB2400_OPT3_RATE_16GB:
+		case ICB2400_OPT3_RATE_32GB:
 		case ICB2400_OPT3_RATE_AUTO:
 			break;
 		case ICB2400_OPT3_RATE_2GB:
@@ -2131,6 +2156,9 @@ isp_fibre_init_2400(ispsoftc_t *isp)
 			icbp->icb_fwoptions3 |= ICB2400_OPT3_RATE_AUTO;
 			break;
 		}
+	}
+	if (ownloopid == 0) {
+		icbp->icb_fwoptions3 |= ICB2400_OPT3_SOFTID;
 	}
 	icbp->icb_logintime = ICB_LOGIN_TOV;
 
@@ -2244,13 +2272,12 @@ isp_fibre_init_2400(ispsoftc_t *isp)
 					pi.vp_port_options |= ICB2400_VPOPT_INI_ENABLE;
 				if ((fcp2->role & ISP_ROLE_TARGET) == 0)
 					pi.vp_port_options |= ICB2400_VPOPT_TGT_DISABLE;
-			}
-			if (fcp2->isp_loopid < LOCAL_LOOP_LIM) {
-				pi.vp_port_loopid = fcp2->isp_loopid;
-				if (isp->isp_confopts & ISP_CFG_OWNLOOPID)
-					pi.vp_port_options |= ICB2400_VPOPT_HARD_ADDRESS;
-				else
-					pi.vp_port_options |= ICB2400_VPOPT_PREV_ADDRESS;
+				if (fcp2->isp_loopid < LOCAL_LOOP_LIM) {
+					pi.vp_port_loopid = fcp2->isp_loopid;
+					if (isp->isp_confopts & ISP_CFG_OWNLOOPID)
+						pi.vp_port_options |= ICB2400_VPOPT_HARD_ADDRESS;
+				}
+
 			}
 			MAKE_NODE_NAME_FROM_WWN(pi.vp_port_portname, fcp2->isp_wwpn);
 			MAKE_NODE_NAME_FROM_WWN(pi.vp_port_nodename, fcp2->isp_wwnn);
@@ -2329,8 +2356,6 @@ isp_fc_enable_vp(ispsoftc_t *isp, int chan)
 		vp.vp_mod_ports[0].loopid = fcp->isp_loopid;
 		if (isp->isp_confopts & ISP_CFG_OWNLOOPID)
 			vp.vp_mod_ports[0].options |= ICB2400_VPOPT_HARD_ADDRESS;
-		else
-			vp.vp_mod_ports[0].options |= ICB2400_VPOPT_PREV_ADDRESS;
 	}
 	MAKE_NODE_NAME_FROM_WWN(vp.vp_mod_ports[0].wwpn, fcp->isp_wwpn);
 	MAKE_NODE_NAME_FROM_WWN(vp.vp_mod_ports[0].wwnn, fcp->isp_wwnn);
@@ -2766,6 +2791,7 @@ isp_getpdb(ispsoftc_t *isp, int chan, uint16_t id, isp_pdb_t *pdb)
 	if (IS_24XX(isp)) {
 		isp_get_pdb_24xx(isp, isp->isp_iocb, &un.bill);
 		pdb->handle = un.bill.pdb_handle;
+		pdb->prli_word0 = un.bill.pdb_prli_svc0;
 		pdb->prli_word3 = un.bill.pdb_prli_svc3;
 		pdb->portid = BITS2WORD_24XX(un.bill.pdb_portid_bits);
 		ISP_MEMCPY(pdb->portname, un.bill.pdb_portname, 8);
@@ -2782,6 +2808,7 @@ isp_getpdb(ispsoftc_t *isp, int chan, uint16_t id, isp_pdb_t *pdb)
 	} else {
 		isp_get_pdb_21xx(isp, isp->isp_iocb, &un.fred);
 		pdb->handle = un.fred.pdb_loopid;
+		pdb->prli_word0 = un.fred.pdb_prli_svc0;
 		pdb->prli_word3 = un.fred.pdb_prli_svc3;
 		pdb->portid = BITS2WORD(un.fred.pdb_portid_bits);
 		ISP_MEMCPY(pdb->portname, un.fred.pdb_portname, 8);
@@ -3080,6 +3107,8 @@ not_on_fabric:
 		if (mbs.param[0] == MBOX_COMMAND_COMPLETE) {
 			if (mbs.param[1] == MBGSD_10GB)
 				fcp->isp_gbspeed = 10;
+			else if (mbs.param[1] == MBGSD_32GB)
+				fcp->isp_gbspeed = 32;
 			else if (mbs.param[1] == MBGSD_16GB)
 				fcp->isp_gbspeed = 16;
 			else if (mbs.param[1] == MBGSD_8GB)
@@ -3169,6 +3198,7 @@ isp_pdb_sync(ispsoftc_t *isp, int chan)
 			lp->state = FC_PORTDB_STATE_VALID;
 			isp_async(isp, ISPASYNC_DEV_CHANGED, chan, lp);
 			lp->portid = lp->new_portid;
+			lp->prli_word0 = lp->new_prli_word0;
 			lp->prli_word3 = lp->new_prli_word3;
 			break;
 		case FC_PORTDB_STATE_VALID:
@@ -3220,7 +3250,9 @@ isp_pdb_add_update(ispsoftc_t *isp, int chan, isp_pdb_t *pdb)
 		/* Old device, nothing new. */
 		if (lp->portid == pdb->portid &&
 		    lp->handle == pdb->handle &&
-		    lp->prli_word3 == pdb->prli_word3) {
+		    lp->prli_word3 == pdb->prli_word3 &&
+		    ((pdb->prli_word0 & PRLI_WD0_EST_IMAGE_PAIR) ==
+		     (lp->prli_word0 & PRLI_WD0_EST_IMAGE_PAIR))) {
 			if (lp->state != FC_PORTDB_STATE_NEW)
 				lp->state = FC_PORTDB_STATE_VALID;
 			isp_prt(isp, ISP_LOG_SANCFG,
@@ -3233,6 +3265,7 @@ isp_pdb_add_update(ispsoftc_t *isp, int chan, isp_pdb_t *pdb)
 		lp->state = FC_PORTDB_STATE_CHANGED;
 		lp->handle = pdb->handle;
 		lp->new_portid = pdb->portid;
+		lp->new_prli_word0 = pdb->prli_word0;
 		lp->new_prli_word3 = pdb->prli_word3;
 		isp_prt(isp, ISP_LOG_SANCFG,
 		    "Chan %d Port 0x%06x@0x%04x is changed",
@@ -3250,6 +3283,7 @@ isp_pdb_add_update(ispsoftc_t *isp, int chan, isp_pdb_t *pdb)
 	lp->probational = 0;
 	lp->state = FC_PORTDB_STATE_NEW;
 	lp->portid = lp->new_portid = pdb->portid;
+	lp->prli_word0 = lp->new_prli_word0 = pdb->prli_word0;
 	lp->prli_word3 = lp->new_prli_word3 = pdb->prli_word3;
 	lp->handle = pdb->handle;
 	lp->port_wwn = wwpn;
@@ -5888,6 +5922,13 @@ isp_parse_async_fc(ispsoftc_t *isp, uint16_t mbox)
 		isp_prt(isp, ISP_LOGERR, "Temperature alert (subcode 0x%x)",
 		    ISP_READ(isp, OUTMAILBOX1));
 		break;
+	case ASYNC_TRANSCEIVER_INSERTION:
+		isp_prt(isp, ISP_LOGDEBUG0, "Transceiver insertion (0x%x)",
+		    ISP_READ(isp, OUTMAILBOX1));
+		break;
+	case ASYNC_TRANSCEIVER_REMOVAL:
+		isp_prt(isp, ISP_LOGDEBUG0, "Transceiver removal");
+		break;
 	case ASYNC_AUTOLOAD_FW_COMPLETE:
 		isp_prt(isp, ISP_LOGDEBUG0, "Autoload FW init complete");
 		break;
@@ -6709,7 +6750,7 @@ static const char *scsi_mbcmd_names[] = {
 static const uint32_t mbpfc[] = {
 	ISP_FC_OPMAP(0x01, 0x01),	/* 0x00: MBOX_NO_OP */
 	ISP_FC_OPMAP(0x1f, 0x01),	/* 0x01: MBOX_LOAD_RAM */
-	ISP_FC_OPMAP_HALF(0x07, 0xff, 0x00, 0x03),	/* 0x02: MBOX_EXEC_FIRMWARE */
+	ISP_FC_OPMAP_HALF(0x07, 0xff, 0x00, 0x1f),	/* 0x02: MBOX_EXEC_FIRMWARE */
 	ISP_FC_OPMAP(0xdf, 0x01),	/* 0x03: MBOX_DUMP_RAM */
 	ISP_FC_OPMAP(0x07, 0x07),	/* 0x04: MBOX_WRITE_RAM_WORD */
 	ISP_FC_OPMAP(0x03, 0x07),	/* 0x05: MBOX_READ_RAM_WORD */
@@ -6812,7 +6853,7 @@ static const uint32_t mbpfc[] = {
 	ISP_FC_OPMAP(0x07, 0x01),	/* 0x66: MBOX_TARGET_RESET */
 	ISP_FC_OPMAP(0x07, 0x01),	/* 0x67: MBOX_CLEAR_TASK_SET */
 	ISP_FC_OPMAP(0x07, 0x01),	/* 0x68: MBOX_ABORT_TASK_SET */
-	ISP_FC_OPMAP(0x01, 0x07),	/* 0x69: MBOX_GET_FW_STATE */
+	ISP_FC_OPMAP_HALF(0x00, 0x01, 0x0f, 0x1f),	/* 0x69: MBOX_GET_FW_STATE */
 	ISP_FC_OPMAP_HALF(0x6, 0x03, 0x0, 0xcf),	/* 0x6a: MBOX_GET_PORT_NAME */
 	ISP_FC_OPMAP(0xcf, 0x01),	/* 0x6b: MBOX_GET_LINK_STATUS */
 	ISP_FC_OPMAP(0x0f, 0x01),	/* 0x6c: MBOX_INIT_LIP_RESET */

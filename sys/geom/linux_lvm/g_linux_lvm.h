@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Andrew Thompson <thompsa@FreeBSD.org>
  * All rights reserved.
  *
@@ -26,16 +28,8 @@
  * $FreeBSD$
  */
 
-#define	G_LLVM_DEBUG(lvl, ...)	do {					\
-	if (g_llvm_debug >= (lvl)) {					\
-		printf("GEOM_LINUX_LVM");				\
-		if (g_llvm_debug > 0)					\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf("\n");						\
-	}								\
-} while (0)
+#define	G_LLVM_DEBUG(lvl, ...) \
+    _GEOM_DEBUG("GEOM_LINUX_LVM", g_llvm_debug, (lvl), NULL, __VA_ARGS__)
 
 #define	G_LLVM_CLASS_NAME	"LINUX_LVM"
 #define	G_LLVM_NAMELEN		128

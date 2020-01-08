@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -164,11 +164,11 @@
  *              StringBuffer      Buffer containing the comment being processed
  *              c1                Current input
  *
- * RETURN:      none
+ * RETURN:      None
  *
  * DESCRIPTION: Process a single line comment of a c Style comment. This
  *              function captures a line of a c style comment in a char* and
- *              places the comment in the approperiate global buffer.
+ *              places the comment in the appropriate global buffer.
  *
  ******************************************************************************/
 
@@ -186,15 +186,15 @@ CvProcessComment (
     char                    *FinalCommentString;
 
 
-    if (Gbl_CaptureComments && CurrentState.CaptureComments)
+    if (AcpiGbl_CaptureComments && CurrentState.CaptureComments)
     {
         *StringBuffer = (char) c1;
         ++StringBuffer;
         *StringBuffer = 0;
 
         CvDbgPrint ("Multi-line comment\n");
-        CommentString = UtStringCacheCalloc (strlen (MsgBuffer) + 1);
-        strcpy (CommentString, MsgBuffer);
+        CommentString = UtLocalCacheCalloc (strlen (AslGbl_MsgBuffer) + 1);
+        strcpy (CommentString, AslGbl_MsgBuffer);
 
         CvDbgPrint ("CommentString: %s\n", CommentString);
 
@@ -208,7 +208,7 @@ CvProcessComment (
 
         if (LineToken)
         {
-            FinalLineToken = UtStringCacheCalloc (strlen (LineToken) + 1);
+            FinalLineToken = UtLocalCacheCalloc (strlen (LineToken) + 1);
             strcpy (FinalLineToken, LineToken);
 
             /* Get rid of any carriage returns */
@@ -217,14 +217,15 @@ CvProcessComment (
             {
                 FinalLineToken[strlen(FinalLineToken)-1] = 0;
             }
+
             CvAddToCommentList (FinalLineToken);
             LineToken = strtok (NULL, "\n");
             while (LineToken != NULL)
             {
                 /*
                  * It is assumed that each line has some sort of indentation.
-                 * This means that we need to find the first character that is not
-                 * a white space within each line.
+                 * This means that we need to find the first character that
+                 * is not a white space within each line.
                  */
                 CharStart = FALSE;
                 for (i = 0; (i < (strlen (LineToken) + 1)) && !CharStart; i++)
@@ -236,7 +237,8 @@ CvProcessComment (
                         LineToken [0] = ' '; /* Pad for Formatting */
                     }
                 }
-                FinalLineToken = UtStringCacheCalloc (strlen (LineToken) + 1);
+
+                FinalLineToken = UtLocalCacheCalloc (strlen (LineToken) + 1);
                 strcat (FinalLineToken, LineToken);
 
                 /* Get rid of any carriage returns */
@@ -245,32 +247,36 @@ CvProcessComment (
                 {
                     FinalLineToken[strlen(FinalLineToken) - 1] = 0;
                 }
+
                 CvAddToCommentList (FinalLineToken);
                 LineToken = strtok (NULL,"\n");
             }
         }
 
         /*
-         * If this only spans a single line, check to see whether if this comment
-         * appears on the same line as a line of code. If does, retain it's
-         * position for stylistic reasons. If it doesn't, add it to the comment
-         * List so that it can be associated with the next node that's created.
+         * If this only spans a single line, check to see whether if this
+         * comment appears on the same line as a line of code. If does,
+         * retain it's position for stylistic reasons. If it doesn't,
+         * add it to the comment list so that it can be associated with
+         * the next node that's created.
          */
         else
         {
            /*
-            * if this is not a regular comment, pad with extra spaces that appeared
-            * in the original source input to retain the original spacing.
+            * If this is not a regular comment, pad with extra spaces that
+            * appeared in the original source input to retain the original
+            * spacing.
             */
             FinalCommentString =
-                UtStringCacheCalloc (strlen (CommentString) +
+                UtLocalCacheCalloc (strlen (CommentString) +
                 CurrentState.SpacesBefore + 1);
 
-            for (i=0; (CurrentState.CommentType != ASL_COMMENT_STANDARD) &&
-                (i < CurrentState.SpacesBefore); ++i)
+            for (i = 0; (CurrentState.CommentType != ASL_COMMENT_STANDARD) &&
+                (i < CurrentState.SpacesBefore); i++)
             {
                  FinalCommentString[i] = ' ';
             }
+
             strcat (FinalCommentString, CommentString);
             CvPlaceComment (CurrentState.CommentType, FinalCommentString);
         }
@@ -288,7 +294,7 @@ CvProcessComment (
  * RETURN:      none
  *
  * DESCRIPTION: Process a single line comment. This function captures a comment
- *              in a char* and places the comment in the approperiate global
+ *              in a char* and places the comment in the appropriate global
  *              buffer through CvPlaceComment
  *
  ******************************************************************************/
@@ -303,17 +309,17 @@ CvProcessCommentType2 (
     char                    *FinalCommentString;
 
 
-    if (Gbl_CaptureComments && CurrentState.CaptureComments)
+    if (AcpiGbl_CaptureComments && CurrentState.CaptureComments)
     {
         *StringBuffer = 0; /* null terminate */
         CvDbgPrint ("Single-line comment\n");
-        CommentString = UtStringCacheCalloc (strlen (MsgBuffer) + 1);
-        strcpy (CommentString, MsgBuffer);
+        CommentString = UtLocalCacheCalloc (strlen (AslGbl_MsgBuffer) + 1);
+        strcpy (CommentString, AslGbl_MsgBuffer);
 
-        /* If this comment lies on the same line as the latest parse node,
-         * assign it to that node's CommentAfter field. Saving in this field
-         * will allow us to support comments that come after code on the same
-         * line as the code itself. For example,
+        /* If this comment lies on the same line as the latest parse op,
+         * assign it to that op's CommentAfter field. Saving in this field
+         * will allow us to support comments that come after code on the
+         * same line as the code itself. For example,
          * Name(A,"") //comment
          *
          * will be retained rather than transformed into
@@ -327,34 +333,39 @@ CvProcessCommentType2 (
          *
          * would be lexically analyzed as a single comment.
          *
-         * Create a new string with the approperiate spaces. Since we need
+         * Create a new string with the appropriate spaces. Since we need
          * to account for the proper spacing, the actual comment,
          * extra 2 spaces so that this comment can be converted to the "/ *"
-         * style and the null terminator, the string would look something like
+         * style and the null terminator, the string would look something
+         * like:
          *
          * [ (spaces) (comment)  ( * /) ('\0') ]
          *
          */
-        FinalCommentString = UtStringCacheCalloc (CurrentState.SpacesBefore +
+        FinalCommentString = UtLocalCacheCalloc (CurrentState.SpacesBefore +
             strlen (CommentString) + 3 + 1);
 
-        for (i=0; (CurrentState.CommentType!=1) && (i<CurrentState.SpacesBefore); ++i)
+        for (i = 0; (CurrentState.CommentType != 1) &&
+            (i < CurrentState.SpacesBefore); i++)
         {
             FinalCommentString[i] = ' ';
         }
+
         strcat (FinalCommentString, CommentString);
 
         /* convert to a "/ *" style comment  */
 
         strcat (FinalCommentString, " */");
-        FinalCommentString [CurrentState.SpacesBefore + strlen (CommentString) + 3] = 0;
+        FinalCommentString [CurrentState.SpacesBefore +
+            strlen (CommentString) + 3] = 0;
 
         /* get rid of the carriage return */
 
         if (FinalCommentString[strlen (FinalCommentString) - 1] == 0x0D)
         {
-            FinalCommentString[strlen(FinalCommentString)-1] = 0;
+            FinalCommentString[strlen(FinalCommentString) - 1] = 0;
         }
+
         CvPlaceComment (CurrentState.CommentType, FinalCommentString);
     }
 }
@@ -366,10 +377,10 @@ CvProcessCommentType2 (
  *
  * PARAMETERS:  Op                 - Calculate all comments of this Op
  *
- * RETURN:      TotalCommentLength - Length of all comments within this node.
+ * RETURN:      TotalCommentLength - Length of all comments within this op.
  *
- * DESCRIPTION: calculate the length that the each comment takes up within Op.
- *              Comments look like the follwoing: [0xA9 OptionBtye comment 0x00]
+ * DESCRIPTION: Calculate the length that the each comment takes up within Op.
+ *              Comments look like the following: [0xA9 OptionBtye comment 0x00]
  *              therefore, we add 1 + 1 + strlen (comment) + 1 to get the actual
  *              length of this comment.
  *
@@ -384,12 +395,14 @@ CvCalculateCommentLengths(
     ACPI_COMMENT_NODE       *Current = NULL;
 
 
-    if (!Gbl_CaptureComments)
+    if (!AcpiGbl_CaptureComments)
     {
         return (0);
     }
 
-    CvDbgPrint ("==Calculating comment lengths for %s\n",  Op->Asl.ParseOpName);
+    CvDbgPrint ("==Calculating comment lengths for %s\n",
+        Op->Asl.ParseOpName);
+
     if (Op->Asl.FileChanged)
     {
         TotalCommentLength += strlen (Op->Asl.Filename) + 3;
@@ -400,6 +413,7 @@ CvCalculateCommentLengths(
             TotalCommentLength += strlen (Op->Asl.ParentFilename) + 3;
         }
     }
+
     if (Op->Asl.CommentList)
     {
         Current = Op->Asl.CommentList;
@@ -412,6 +426,7 @@ CvCalculateCommentLengths(
             Current = Current->Next;
         }
     }
+
     if (Op->Asl.EndBlkComment)
     {
         Current = Op->Asl.EndBlkComment;
@@ -424,6 +439,7 @@ CvCalculateCommentLengths(
             Current = Current->Next;
         }
     }
+
     if (Op->Asl.InlineComment)
     {
         CommentLength = strlen (Op->Asl.InlineComment)+3;
@@ -431,6 +447,7 @@ CvCalculateCommentLengths(
         CvDbgPrint ("    Comment string: %s\n\n", Op->Asl.InlineComment);
         TotalCommentLength += CommentLength;
     }
+
     if (Op->Asl.EndNodeComment)
     {
         CommentLength = strlen(Op->Asl.EndNodeComment)+3;
@@ -448,9 +465,7 @@ CvCalculateCommentLengths(
     }
 
     CvDbgPrint("\n\n");
-
-    return TotalCommentLength;
-
+    return (TotalCommentLength);
 }
 
 
@@ -482,7 +497,7 @@ CgWriteAmlDefBlockComment(
     char                    *DirectoryPosition;
 
 
-    if (!Gbl_CaptureComments ||
+    if (!AcpiGbl_CaptureComments ||
         (Op->Asl.ParseOpcode != PARSEOP_DEFINITION_BLOCK))
     {
         return;
@@ -490,9 +505,9 @@ CgWriteAmlDefBlockComment(
 
     CvDbgPrint ("Printing comments for a definition block..\n");
 
-    /* first, print the file name comment after changing .asl to .dsl */
+    /* First, print the file name comment after changing .asl to .dsl */
 
-    NewFilename = UtStringCacheCalloc (strlen (Op->Asl.Filename));
+    NewFilename = UtLocalCacheCalloc (strlen (Op->Asl.Filename));
     strcpy (NewFilename, Op->Asl.Filename);
     DirectoryPosition = strrchr (NewFilename, '/');
     Position = strrchr (NewFilename, '.');
@@ -518,15 +533,17 @@ CgWriteAmlDefBlockComment(
 
     Current = Op->Asl.CommentList;
     CommentOption = STD_DEFBLK_COMMENT;
+
     while (Current)
     {
         CgWriteOneAmlComment(Op, Current->Comment, CommentOption);
         CvDbgPrint ("Printing comment: %s\n", Current->Comment);
         Current = Current->Next;
     }
+
     Op->Asl.CommentList = NULL;
 
-    /* print any Inline comments associated with this node */
+    /* Print any Inline comments associated with this node */
 
     if (Op->Asl.CloseBraceComment)
     {
@@ -557,8 +574,8 @@ CgWriteOneAmlComment(
     char*                   CommentToPrint,
     UINT8                   InputOption)
 {
-    UINT8 CommentOption = InputOption;
-    UINT8 CommentOpcode = (UINT8)AML_COMMENT_OP;
+    UINT8                   CommentOption = InputOption;
+    UINT8                   CommentOpcode = (UINT8) AML_COMMENT_OP;
 
 
     if (!CommentToPrint)
@@ -583,8 +600,7 @@ CgWriteOneAmlComment(
  *
  * RETURN:      None
  *
- * DESCRIPTION: write all comments pertaining to the
- *              current parse op
+ * DESCRIPTION: Write all comments pertaining to the current parse op
  *
  ******************************************************************************/
 
@@ -599,7 +615,7 @@ CgWriteAmlComment(
 
 
     if ((Op->Asl.ParseOpcode == PARSEOP_DEFINITION_BLOCK) ||
-         !Gbl_CaptureComments)
+         !AcpiGbl_CaptureComments)
     {
         return;
     }
@@ -609,7 +625,7 @@ CgWriteAmlComment(
     if (Op->Asl.FileChanged)
     {
 
-        /* first, print the file name comment after changing .asl to .dsl */
+        /* First, print the file name comment after changing .asl to .dsl */
 
         NewFilename =
             FlGenerateFilename (Op->Asl.Filename, FILE_SUFFIX_DISASSEMBLY);
@@ -629,7 +645,7 @@ CgWriteAmlComment(
             CgWriteOneAmlComment(Op, ParentFilename, PARENTFILENAME_COMMENT);
         }
 
-        /* prevent multiple writes of the same comment */
+        /* Prevent multiple writes of the same comment */
 
         Op->Asl.FileChanged = FALSE;
     }
@@ -654,6 +670,7 @@ CgWriteAmlComment(
         CgWriteOneAmlComment(Op, Current->Comment, CommentOption);
         Current = Current->Next;
     }
+
     Op->Asl.CommentList = NULL;
 
     Current = Op->Asl.EndBlkComment;
@@ -663,9 +680,10 @@ CgWriteAmlComment(
         CgWriteOneAmlComment(Op, Current->Comment, CommentOption);
         Current = Current->Next;
     }
+
     Op->Asl.EndBlkComment = NULL;
 
-    /* print any Inline comments associated with this node */
+    /* Print any Inline comments associated with this node */
 
     if (Op->Asl.InlineComment)
     {
@@ -694,7 +712,7 @@ CgWriteAmlComment(
  *
  * FUNCTION:    CvCommentNodeCalloc
  *
- * PARAMETERS:  none
+ * PARAMETERS:  None
  *
  * RETURN:      Pointer to the comment node. Aborts on allocation failure
  *
@@ -733,6 +751,7 @@ UINT32
 CvParseOpBlockType (
     ACPI_PARSE_OBJECT       *Op)
 {
+
     if (!Op)
     {
         return (BLOCK_NONE);
@@ -740,8 +759,7 @@ CvParseOpBlockType (
 
     switch (Op->Asl.ParseOpcode)
     {
-
-    /* from aslprimaries.y */
+    /* From aslprimaries.y */
 
     case PARSEOP_VAR_PACKAGE:
     case PARSEOP_BANKFIELD:
@@ -763,7 +781,7 @@ CvParseOpBlockType (
     case PARSEOP_THERMALZONE:
     case PARSEOP_WHILE:
 
-    /* from aslresources.y */
+    /* From aslresources.y */
 
     case PARSEOP_RESOURCETEMPLATE: /* optional parens */
     case PARSEOP_VENDORLONG:
@@ -775,13 +793,12 @@ CvParseOpBlockType (
     case PARSEOP_GPIO_IO:
     case PARSEOP_DMA:
 
-    /*from aslrules.y */
+    /* From aslrules.y */
 
     case PARSEOP_DEFINITION_BLOCK:
         return (BLOCK_PAREN | BLOCK_BRACE);
 
     default:
-
         return (BLOCK_NONE);
     }
 }
@@ -791,7 +808,7 @@ CvParseOpBlockType (
  *
  * FUNCTION:    CvProcessCommentState
  *
- * PARAMETERS:  char
+ * PARAMETERS:  Input           - Input character
  *
  * RETURN:      None
  *
@@ -803,60 +820,59 @@ CvParseOpBlockType (
 
 void
 CvProcessCommentState (
-    char                    input)
+    char                    Input)
 {
 
-    if (input != ' ')
+    if (Input != ' ')
     {
-        Gbl_CommentState.SpacesBefore = 0;
+        AslGbl_CommentState.SpacesBefore = 0;
     }
 
-    switch (input)
+    switch (Input)
     {
     case '\n':
 
-        Gbl_CommentState.CommentType = ASL_COMMENT_STANDARD;
+        AslGbl_CommentState.CommentType = ASL_COMMENT_STANDARD;
         break;
 
     case ' ':
 
         /* Keep the CommentType the same */
 
-        Gbl_CommentState.SpacesBefore++;
+        AslGbl_CommentState.SpacesBefore++;
         break;
 
     case '(':
 
-        Gbl_CommentState.CommentType = ASL_COMMENT_OPEN_PAREN;
+        AslGbl_CommentState.CommentType = ASL_COMMENT_OPEN_PAREN;
         break;
 
     case ')':
 
-        Gbl_CommentState.CommentType = ASL_COMMENT_CLOSE_PAREN;
+        AslGbl_CommentState.CommentType = ASL_COMMENT_CLOSE_PAREN;
         break;
 
     case '{':
 
-        Gbl_CommentState.CommentType = ASL_COMMENT_STANDARD;
-        Gbl_CommentState.ParsingParenBraceNode = NULL;
+        AslGbl_CommentState.CommentType = ASL_COMMENT_STANDARD;
+        AslGbl_CommentState.ParsingParenBraceNode = NULL;
         CvDbgPrint ("End Parsing paren/Brace node!\n");
         break;
 
     case '}':
 
-        Gbl_CommentState.CommentType = ASL_COMMENT_CLOSE_BRACE;
+        AslGbl_CommentState.CommentType = ASL_COMMENT_CLOSE_BRACE;
         break;
 
     case ',':
 
-        Gbl_CommentState.CommentType = ASLCOMMENT_INLINE;
+        AslGbl_CommentState.CommentType = ASLCOMMENT_INLINE;
         break;
 
     default:
 
-        Gbl_CommentState.CommentType = ASLCOMMENT_INLINE;
+        AslGbl_CommentState.CommentType = ASLCOMMENT_INLINE;
         break;
-
     }
 }
 
@@ -865,7 +881,7 @@ CvProcessCommentState (
  *
  * FUNCTION:    CvAddToCommentList
  *
- * PARAMETERS:  toAdd              - Contains the comment to be inserted
+ * PARAMETERS:  ToAdd              - Contains the comment to be inserted
  *
  * RETURN:      None
  *
@@ -876,23 +892,23 @@ CvProcessCommentState (
 
 void
 CvAddToCommentList (
-    char*                   ToAdd)
+    char                    *ToAdd)
 {
-   if (Gbl_Comment_List_Head)
+
+   if (AslGbl_CommentListHead)
    {
-       Gbl_Comment_List_Tail->Next = CvCommentNodeCalloc ();
-       Gbl_Comment_List_Tail = Gbl_Comment_List_Tail->Next;
+       AslGbl_CommentListTail->Next = CvCommentNodeCalloc ();
+       AslGbl_CommentListTail = AslGbl_CommentListTail->Next;
    }
    else
    {
-       Gbl_Comment_List_Head = CvCommentNodeCalloc ();
-       Gbl_Comment_List_Tail = Gbl_Comment_List_Head;
+       AslGbl_CommentListHead = CvCommentNodeCalloc ();
+       AslGbl_CommentListTail = AslGbl_CommentListHead;
    }
 
-   Gbl_Comment_List_Tail->Comment = ToAdd;
-
-   return;
+   AslGbl_CommentListTail->Comment = ToAdd;
 }
+
 
 /*******************************************************************************
  *
@@ -907,7 +923,7 @@ CvAddToCommentList (
  *
  ******************************************************************************/
 
-char*
+char *
 CvAppendInlineComment (
     char                    *InlineComment,
     char                    *ToAdd)
@@ -918,21 +934,22 @@ CvAppendInlineComment (
 
     if (!InlineComment)
     {
-        return ToAdd;
+        return (ToAdd);
     }
+
     if (!ToAdd)
     {
-        return InlineComment;
+        return (InlineComment);
     }
 
     Size = strlen (ToAdd);
     Size += strlen (InlineComment);
-    Str = UtStringCacheCalloc (Size+1);
+    Str = UtLocalCacheCalloc (Size + 1);
+
     strcpy (Str, InlineComment);
     strcat (Str, ToAdd);
-    Str[Size+1] = 0;
-
-    return Str;
+    Str[Size +1] = 0;
+    return (Str);
 }
 
 
@@ -940,13 +957,13 @@ CvAppendInlineComment (
  *
  * FUNCTION:    CvPlaceComment
  *
- * PARAMETERS:  Int           - Type
- *              char*         - CommentString
+ * PARAMETERS:  UINT8               - Type
+ *              char *              - CommentString
  *
  * RETURN:      None
  *
  * DESCRIPTION: Given type and CommentString, this function places the
- *              CommentString in the approperiate global comment list or char*
+ *              CommentString in the appropriate global comment list or char*
  *
  ******************************************************************************/
 
@@ -959,8 +976,8 @@ CvPlaceComment(
     ACPI_PARSE_OBJECT       *ParenBraceNode;
 
 
-    LatestParseNode = Gbl_CommentState.Latest_Parse_Node;
-    ParenBraceNode  = Gbl_CommentState.ParsingParenBraceNode;
+    LatestParseNode = AslGbl_CommentState.LatestParseOp;
+    ParenBraceNode  = AslGbl_CommentState.ParsingParenBraceNode;
     CvDbgPrint ("Placing comment %s for type %d\n", CommentString, Type);
 
     switch (Type)
@@ -979,8 +996,8 @@ CvPlaceComment(
 
     case ASL_COMMENT_OPEN_PAREN:
 
-        Gbl_Inline_Comment_Buffer =
-            CvAppendInlineComment(Gbl_Inline_Comment_Buffer,
+        AslGbl_InlineCommentBuffer =
+            CvAppendInlineComment(AslGbl_InlineCommentBuffer,
             CommentString);
         break;
 
@@ -1008,6 +1025,5 @@ CvPlaceComment(
     default:
 
         break;
-
     }
 }

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -32,9 +34,15 @@
  */
 
 #define	WR(p, size) do { \
-	if (write(STDOUT_FILENO, p, size) != (ssize_t)size) \
-		oerr(); \
-	} while(0)
+	ssize_t res; \
+	res = write(STDOUT_FILENO, p, size); \
+	if (res != (ssize_t)size) { \
+		if (res == -1) \
+			oerr(); \
+		else \
+			errx(1, "stdout"); \
+	} \
+} while (0)
 
 #define TAILMAPLEN (4<<20)
 
@@ -70,3 +78,4 @@ int maparound(struct mapinfo *, off_t);
 void printfn(const char *, int);
 
 extern int Fflag, fflag, qflag, rflag, rval, no_files;
+extern fileargs_t *fa;

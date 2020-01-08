@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -222,6 +224,10 @@ struct nstat {
 #define	st_ctime		st_ctim.tv_sec
 #if __BSD_VISIBLE
 #define	st_birthtime		st_birthtim.tv_sec
+#define	st_atimensec		st_atim.tv_nsec
+#define	st_mtimensec		st_mtim.tv_nsec
+#define	st_ctimensec		st_ctim.tv_nsec
+#define	st_birthtimensec	st_birthtim.tv_nsec
 #endif
 
 /* For compatibility. */

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 NetApp, Inc.
  * All rights reserved.
  *
@@ -32,6 +34,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/pcpu.h>
 
@@ -49,6 +52,12 @@ __FBSDID("$FreeBSD$");
 #ifdef DDB
 #include <ddb/ddb.h>
 #endif
+
+SYSCTL_DECL(_hw_vmm_vmx);
+
+static int no_flush_rsb;
+SYSCTL_INT(_hw_vmm_vmx, OID_AUTO, no_flush_rsb, CTLFLAG_RW,
+    &no_flush_rsb, 0, "Do not flush RSB upon vmexit");
 
 static uint64_t
 vmcs_fix_regval(uint32_t encoding, uint64_t val)
@@ -111,6 +120,8 @@ vmcs_field_encoding(int ident)
 		return (VMCS_GUEST_PDPTE2);
 	case VM_REG_GUEST_PDPTE3:
 		return (VMCS_GUEST_PDPTE3);
+	case VM_REG_GUEST_ENTRY_INST_LENGTH:
+		return (VMCS_ENTRY_INST_LENGTH);
 	default:
 		return (-1);
 	}
@@ -401,8 +412,15 @@ vmcs_init(struct vmcs *vmcs)
 		goto done;
 
 	/* instruction pointer */
-	if ((error = vmwrite(VMCS_HOST_RIP, (u_long)vmx_exit_guest)) != 0)
-		goto done;
+	if (no_flush_rsb) {
+		if ((error = vmwrite(VMCS_HOST_RIP,
+		    (u_long)vmx_exit_guest)) != 0)
+			goto done;
+	} else {
+		if ((error = vmwrite(VMCS_HOST_RIP,
+		    (u_long)vmx_exit_guest_flush_rsb)) != 0)
+			goto done;
+	}
 
 	/* link pointer */
 	if ((error = vmwrite(VMCS_LINK_POINTER, ~0)) != 0)

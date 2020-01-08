@@ -30,10 +30,6 @@
 struct mbuf;
 struct rtentry;
 
-#ifdef HAVE_NETDNET_DNETDB_H
-#include <netdnet/dnetdb.h>
-#endif
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,12 +70,6 @@ typedef union etheraddress etheraddr;	/* Ethernet address */
 #define AREAMASK	0176000		/* mask for area field */
 #define	AREASHIFT	10		/* bit-offset for area field */
 #define NODEMASK	01777		/* mask for node address field */
-
-#define DN_MAXADDL	20		/* max size of DECnet address */
-struct dn_naddr {
-	uint16_t	a_len;		/* length of address */
-	uint8_t a_addr[DN_MAXADDL]; /* address as bytes */
-};
 
 /*
  * Define long and short header formats.
@@ -492,10 +482,6 @@ static int print_elist(const char *, u_int);
 static int print_nsp(netdissect_options *, const u_char *, u_int);
 static void print_reason(netdissect_options *, int);
 
-#ifndef HAVE_NETDNET_DNETDB_H_DNET_HTOA
-extern char *dnet_htoa(struct dn_naddr *);
-#endif
-
 void
 decnet_print(netdissect_options *ndo,
              register const u_char *ap, register u_int length,
@@ -542,6 +528,7 @@ decnet_print(netdissect_options *ndo,
 	    length -= padlen;
 	    caplen -= padlen;
 	    rhp = (const union routehdr *)&(ap[sizeof(short)]);
+	    ND_TCHECK(rhp->rh_short.sh_flags);
 	    mflags = EXTRACT_LE_8BITS(rhp->rh_short.sh_flags);
 	}
 
@@ -613,6 +600,7 @@ print_decnet_ctlmsg(netdissect_options *ndo,
                     register const union routehdr *rhp, u_int length,
                     u_int caplen)
 {
+	/* Our caller has already checked for mflags */
 	int mflags = EXTRACT_LE_8BITS(rhp->rh_short.sh_flags);
 	register const union controlmsg *cmp = (const union controlmsg *)rhp;
 	int src, dst, info, blksize, eco, ueco, hello, other, vers;
@@ -1249,23 +1237,4 @@ dnnum_string(netdissect_options *ndo, u_short dnaddr)
 		(*ndo->ndo_error)(ndo, "dnnum_string: malloc");
 	snprintf(str, siz, "%d.%d", area, node);
 	return(str);
-}
-
-const char *
-dnname_string(netdissect_options *ndo, u_short dnaddr)
-{
-#ifdef HAVE_DNET_HTOA
-	struct dn_naddr dna;
-	char *dnname;
-
-	dna.a_len = sizeof(short);
-	memcpy((char *)dna.a_addr, (char *)&dnaddr, sizeof(short));
-	dnname = dnet_htoa(&dna);
-	if(dnname != NULL)
-		return (strdup(dnname));
-	else
-		return(dnnum_string(ndo, dnaddr));
-#else
-	return(dnnum_string(ndo, dnaddr));	/* punt */
-#endif
 }

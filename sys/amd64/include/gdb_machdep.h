@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004 Marcel Moolenaar
  * All rights reserved.
  *
@@ -29,9 +31,10 @@
 #ifndef _MACHINE_GDB_MACHDEP_H_
 #define	_MACHINE_GDB_MACHDEP_H_
 
-#define	GDB_BUFSZ	(GDB_NREGS * 16)
+#define	GDB_BUFSZ	4096
 #define	GDB_NREGS	56
 #define	GDB_REG_PC	16
+_Static_assert(GDB_BUFSZ >= (GDB_NREGS * 16), "buffer fits 'g' regs");
 
 static __inline size_t
 gdb_cpu_regsz(int regnum)
@@ -45,8 +48,10 @@ gdb_cpu_query(void)
 	return (0);
 }
 
+void *gdb_begin_write(void);
 void *gdb_cpu_getreg(int, size_t *);
 void gdb_cpu_setreg(int, void *);
 int gdb_cpu_signal(int, int);
+void gdb_end_write(void *);
 
 #endif /* !_MACHINE_GDB_MACHDEP_H_ */

@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2016 Matt Macy <mmacy@nextbsd.org>
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2016 Nicole Graziano <nicole@nextbsd.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -96,10 +98,10 @@
 /* Tunables */
 
 /*
- * EM_TXD: Maximum number of Transmit Descriptors
+ * EM_MAX_TXD: Maximum number of Transmit Descriptors
  * Valid Range: 80-256 for 82542 and 82543-based adapters
  *              80-4096 for others
- * Default Value: 256
+ * Default Value: 1024
  *   This value is the number of transmit descriptors allocated by the driver.
  *   Increasing this value allows the driver to queue more transmits. Each
  *   descriptor is 16 bytes.
@@ -111,12 +113,13 @@
 #define EM_MAX_TXD		4096
 #define EM_DEFAULT_TXD          1024
 #define EM_DEFAULT_MULTI_TXD	4096
+#define IGB_MAX_TXD		4096
 
 /*
- * EM_RXD - Maximum number of receive Descriptors
+ * EM_MAX_RXD - Maximum number of receive Descriptors
  * Valid Range: 80-256 for 82542 and 82543-based adapters
  *              80-4096 for others
- * Default Value: 256
+ * Default Value: 1024
  *   This value is the number of receive descriptors allocated by the driver.
  *   Increasing this value allows the driver to buffer more incoming packets.
  *   Each descriptor is 16 bytes.  A receive buffer is also allocated for each
@@ -129,6 +132,7 @@
 #define EM_MAX_RXD		4096
 #define EM_DEFAULT_RXD          1024
 #define EM_DEFAULT_MULTI_RXD	4096
+#define IGB_MAX_RXD		4096
 
 /*
  * EM_TIDV - Transmit Interrupt Delay Value
@@ -235,6 +239,22 @@
 #define EM_EEPROM_APME			0x400;
 #define EM_82544_APME			0x0004;
 
+
+/* Support AutoMediaDetect for Marvell M88 PHY in i354 */
+#define IGB_MEDIA_RESET			(1 << 0)
+
+/* Define the starting Interrupt rate per Queue */
+#define IGB_INTS_PER_SEC        8000
+#define IGB_DEFAULT_ITR         ((1000000/IGB_INTS_PER_SEC) << 2)
+
+#define IGB_LINK_ITR            2000
+#define I210_LINK_DELAY		1000
+
+#define IGB_TXPBSIZE		20408
+#define IGB_HDR_BUF		128
+#define IGB_PKTTYPE_MASK	0x0000FFF0
+#define IGB_DMCTLX_DCFLUSH_DIS	0x80000000  /* Disable DMA Coalesce Flush */
+
 /*
  * Driver state logic for the detection of a hung state
  * in hardware.  Set TX_HUNG whenever a TX packet is used
@@ -315,22 +335,24 @@
 
 #define EM_MAX_SCATTER		40
 #define EM_VFTA_SIZE		128
-#define EM_TSO_SIZE		(65535 + sizeof(struct ether_vlan_header))
+#define EM_TSO_SIZE		65535
 #define EM_TSO_SEG_SIZE		4096	/* Max dma segment size */
 #define EM_MSIX_MASK		0x01F00000 /* For 82574 use */
 #define EM_MSIX_LINK		0x01000000 /* For 82574 use */
 #define ETH_ZLEN		60
-#define ETH_ADDR_LEN		6
-#define EM_CSUM_OFFLOAD		7	/* Offload bits in mbuf flag */
-#define IGB_CSUM_OFFLOAD	0x0E0F	/* Offload bits in mbuf flag */
+#define EM_CSUM_OFFLOAD		(CSUM_IP | CSUM_IP_UDP | CSUM_IP_TCP) /* Offload bits in mbuf flag */
+#define IGB_CSUM_OFFLOAD	(CSUM_IP | CSUM_IP_UDP | CSUM_IP_TCP | \
+				 CSUM_IP_SCTP | CSUM_IP6_UDP | CSUM_IP6_TCP | \
+				 CSUM_IP6_SCTP)	/* Offload bits in mbuf flag */
+
 
 #define IGB_PKTTYPE_MASK	0x0000FFF0
 #define IGB_DMCTLX_DCFLUSH_DIS	0x80000000  /* Disable DMA Coalesce Flush */
 
 /*
  * 82574 has a nonstandard address for EIAC
- * and since its only used in MSIX, and in
- * the em driver only 82574 uses MSIX we can
+ * and since its only used in MSI-X, and in
+ * the em driver only 82574 uses MSI-X we can
  * solve it just using this define.
  */
 #define EM_EIAC 0x000DC
@@ -445,7 +467,6 @@ struct adapter {
 	struct resource *memory;
 	struct resource *flash;
 	struct resource	*ioport;
-	int		io_rid;
 
 	struct resource	*res;
 	void		*tag;
@@ -455,11 +476,11 @@ struct adapter {
 	struct ifmedia	*media;
 	int		msix;
 	int		if_flags;
-	int		min_frame_size;
 	int		em_insert_vlan_header;
 	u32		ims;
 	bool		in_detach;
 
+	u32		flags;
 	/* Task for FAST handling */
 	struct grouptask link_task;
 
@@ -497,7 +518,6 @@ struct adapter {
 
 	u64		que_mask;
 
-	
 	struct em_int_delay_info tx_int_delay;
 	struct em_int_delay_info tx_abs_int_delay;
 	struct em_int_delay_info rx_int_delay;
@@ -507,13 +527,11 @@ struct adapter {
 	/* Misc stats maintained by the driver */
 	unsigned long	dropped_pkts;
 	unsigned long	link_irq;
-	unsigned long	mbuf_defrag_failed;
-	unsigned long	no_tx_dma_setup;
-	unsigned long	no_tx_map_avail;
 	unsigned long	rx_overruns;
 	unsigned long	watchdog_events;
 
 	struct e1000_hw_stats stats;
+	u16		vf_ifp;
 };
 
 /********************************************************************************
@@ -532,26 +550,6 @@ typedef struct _em_vendor_info_t {
 } em_vendor_info_t;
 
 void em_dump_rs(struct adapter *);
-
-#define	EM_CORE_LOCK_INIT(_sc, _name) \
-	mtx_init(&(_sc)->core_mtx, _name, "EM Core Lock", MTX_DEF)
-#define	EM_TX_LOCK_INIT(_sc, _name) \
-	mtx_init(&(_sc)->tx_mtx, _name, "EM TX Lock", MTX_DEF)
-#define	EM_RX_LOCK_INIT(_sc, _name) \
-	mtx_init(&(_sc)->rx_mtx, _name, "EM RX Lock", MTX_DEF)
-#define	EM_CORE_LOCK_DESTROY(_sc)	mtx_destroy(&(_sc)->core_mtx)
-#define	EM_TX_LOCK_DESTROY(_sc)		mtx_destroy(&(_sc)->tx_mtx)
-#define	EM_RX_LOCK_DESTROY(_sc)		mtx_destroy(&(_sc)->rx_mtx)
-#define	EM_CORE_LOCK(_sc)		mtx_lock(&(_sc)->core_mtx)
-#define	EM_TX_LOCK(_sc)			mtx_lock(&(_sc)->tx_mtx)
-#define	EM_TX_TRYLOCK(_sc)		mtx_trylock(&(_sc)->tx_mtx)
-#define	EM_RX_LOCK(_sc)			mtx_lock(&(_sc)->rx_mtx)
-#define	EM_CORE_UNLOCK(_sc)		mtx_unlock(&(_sc)->core_mtx)
-#define	EM_TX_UNLOCK(_sc)		mtx_unlock(&(_sc)->tx_mtx)
-#define	EM_RX_UNLOCK(_sc)		mtx_unlock(&(_sc)->rx_mtx)
-#define	EM_CORE_LOCK_ASSERT(_sc)	mtx_assert(&(_sc)->core_mtx, MA_OWNED)
-#define	EM_TX_LOCK_ASSERT(_sc)		mtx_assert(&(_sc)->tx_mtx, MA_OWNED)
-#define	EM_RX_LOCK_ASSERT(_sc)		mtx_assert(&(_sc)->rx_mtx, MA_OWNED)
 
 #define EM_RSSRK_SIZE	4
 #define EM_RSSRK_VAL(key, i)		(key[(i) * EM_RSSRK_SIZE] | \

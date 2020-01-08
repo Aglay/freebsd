@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993, 1994
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -35,10 +37,8 @@
  * SUCH DAMAGE.
  */
 
-#if defined(LIBC_SCCS) && !defined(lint)
-static char sccsid[] = "@(#)fnmatch.c	8.2 (Berkeley) 4/16/94";
-#endif /* LIBC_SCCS and not lint */
 #include <sys/cdefs.h>
+__SCCSID("@(#)fnmatch.c	8.2 (Berkeley) 4/16/94");
 __FBSDID("$FreeBSD$");
 
 /*
@@ -184,7 +184,8 @@ fnmatch1(const char *pattern, const char *string, const char *stringstart,
 			if (!(flags & FNM_NOESCAPE)) {
 				pclen = mbrtowc(&pc, pattern, MB_LEN_MAX,
 				    &patmbs);
-				if (pclen == (size_t)-1 || pclen == (size_t)-2)
+				if (pclen == 0 || pclen == (size_t)-1 ||
+				    pclen == (size_t)-2)
 					return (FNM_NOMATCH);
 				pattern += pclen;
 			}
@@ -248,7 +249,7 @@ rangematch(const char *pattern, wchar_t test, int flags, char **newp,
 	 * consistency with the regular expression syntax.
 	 * J.T. Conklin (conklin@ngai.kaleida.com)
 	 */
-	if ( (negate = (*pattern == '!' || *pattern == '^')) )
+	if ((negate = (*pattern == '!' || *pattern == '^')))
 		++pattern;
 
 	if (flags & FNM_CASEFOLD)

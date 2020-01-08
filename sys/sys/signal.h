@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -313,11 +315,13 @@ struct siginfo32 {
 #define BUS_ADRALN	1	/* Invalid address alignment.		*/
 #define BUS_ADRERR	2	/* Nonexistent physical address.	*/
 #define BUS_OBJERR	3	/* Object-specific hardware error.	*/
+#define BUS_OOMERR	100	/* Non-standard: No memory.		*/
 
 /* codes for SIGSEGV */
 #define SEGV_MAPERR	1	/* Address not mapped to object.	*/
 #define SEGV_ACCERR	2	/* Invalid permissions for mapped	*/
 				/* object.				*/
+#define	SEGV_PKUERR	100	/* x86: PKU violation			*/
 
 /* codes for SIGFPE */
 #define FPE_INTOVF	1	/* Integer overflow.			*/

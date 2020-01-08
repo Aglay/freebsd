@@ -1,6 +1,7 @@
 /*-
- * Copyright (c) 2004-2005 M. Warner Losh.
- * All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2004-2005 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -47,6 +48,7 @@ static int fdc_pccard_attach(device_t);
 
 static const struct pccard_product fdc_pccard_products[] = {
 	PCMCIA_CARD(YEDATA, EXTERNAL_FDD),
+	{ NULL }
 };
 	
 static int

@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1983, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -254,7 +256,9 @@ void		addarc(nltype *, nltype *, long);
 bool		addcycle(arctype **, arctype **);
 void		addlist(struct stringlist *, char *);
 void		alignentries(void);
+#ifdef WITH_AOUT
 int		aout_getnfile(const char *, char ***);
+#endif
 int		arccmp(arctype *, arctype *);
 arctype		*arclookup(nltype *, nltype *);
 void		asgnsamples(void);

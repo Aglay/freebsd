@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2012 Oleksandr Tymoshenko.
  * Copyright (c) 1994-1998 Mark Brinicombe.
  * Copyright (c) 1994 Brini.
@@ -79,7 +81,7 @@ bcm2835_late_init(platform_t plat)
 	int len;
 
 	system = OF_finddevice("/system");
-	if (system != 0) {
+	if (system != -1) {
 		len = OF_getencprop(system, "linux,serial", cells,
 		    sizeof(cells));
 		if (len > 0)
@@ -133,10 +135,11 @@ static platform_method_t bcm2835_methods[] = {
 
 	PLATFORMMETHOD_END,
 };
-FDT_PLATFORM_DEF(bcm2835, "bcm2835", 0, "raspberrypi,model-b", 100);
+FDT_PLATFORM_DEF2(bcm2835, bcm2835_legacy, "bcm2835 (legacy)", 0, "raspberrypi,model-b", 100);
+FDT_PLATFORM_DEF2(bcm2835, bcm2835, "bcm2835", 0, "brcm,bcm2835", 100);
 #endif
 
-#ifdef SOC_BCM2836
+#if defined(SOC_BCM2836) || defined(SOC_BRCM_BCM2837)
 static platform_method_t bcm2836_methods[] = {
 	PLATFORMMETHOD(platform_devmap_init,	bcm2836_devmap_init),
 	PLATFORMMETHOD(platform_late_init,	bcm2835_late_init),
@@ -149,5 +152,7 @@ static platform_method_t bcm2836_methods[] = {
 
 	PLATFORMMETHOD_END,
 };
-FDT_PLATFORM_DEF(bcm2836, "bcm2836", 0, "brcm,bcm2709", 100);
-#endif
+FDT_PLATFORM_DEF2(bcm2836, bcm2836_legacy, "bcm2836 (legacy)", 0, "brcm,bcm2709", 100);
+FDT_PLATFORM_DEF2(bcm2836, bcm2836, "bcm2836", 0, "brcm,bcm2836", 100);
+FDT_PLATFORM_DEF2(bcm2836, bcm2837, "bcm2837", 0, "brcm,bcm2837", 100);
+#endif	/* defined(SOC_BCM2836) || defined(SOC_BRCM_BCM2837) */

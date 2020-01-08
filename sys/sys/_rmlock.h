@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2007 Stephan Uphoff <ups@FreeBSD.org>
  * All rights reserved.
  *
@@ -64,6 +66,16 @@ struct rm_priotracker {
 	struct thread *rmp_thread;
 	int rmp_flags;
 	LIST_ENTRY(rm_priotracker) rmp_qentry;
+};
+
+#include <sys/_mutex.h>
+
+struct rmslock {
+	struct mtx mtx;
+	int	writers;
+	int	readers;
+	int	*readers_pcpu;
+	int	*readers_influx;
 };
 
 #endif /* !_SYS__RMLOCK_H_ */

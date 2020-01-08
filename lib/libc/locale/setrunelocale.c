@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -38,7 +40,7 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#define __RUNETYPE_INTERNAL 1
+#define	__RUNETYPE_INTERNAL 1
 
 #include <runetype.h>
 #include <errno.h>
@@ -72,7 +74,7 @@ destruct_ctype(void *v)
 {
 	struct xlocale_ctype *l = v;
 
-	if (&_DefaultRuneLocale != l->runes) 
+	if (&_DefaultRuneLocale != l->runes)
 		free(l->runes);
 	free(l);
 }
@@ -81,7 +83,7 @@ const _RuneLocale *
 __getCurrentRuneLocale(void)
 {
 
-	return XLOCALE_CTYPE(__get_locale())->runes;
+	return (XLOCALE_CTYPE(__get_locale())->runes);
 }
 
 static void
@@ -110,9 +112,8 @@ __setrunelocale(struct xlocale_ctype *l, const char *encoding)
 	}
 
 	/* Range checking not needed, encoding length already checked before */
-	asprintf(&path, "%s/%s/LC_CTYPE", _PathLocale, encoding);
-	if (path == NULL)
-		return (0);
+	if (asprintf(&path, "%s/%s/LC_CTYPE", _PathLocale, encoding) == -1)
+		return (errno);
 
 	if ((rl = _Read_RuneMagi(path)) == NULL) {
 		free(path);
@@ -144,7 +145,7 @@ __setrunelocale(struct xlocale_ctype *l, const char *encoding)
 	else if (strcmp(rl->__encoding, "EUC-TW") == 0)
 		ret = _EUC_TW_init(l, rl);
 	else if (strcmp(rl->__encoding, "GB18030") == 0)
- 		ret = _GB18030_init(l, rl);
+		ret = _GB18030_init(l, rl);
 	else if (strcmp(rl->__encoding, "GB2312") == 0)
 		ret = _GB2312_init(l, rl);
 	else if (strcmp(rl->__encoding, "GBK") == 0)
@@ -159,6 +160,21 @@ __setrunelocale(struct xlocale_ctype *l, const char *encoding)
 	if (ret == 0) {
 		/* Free the old runes if it exists. */
 		free_runes(saved.runes);
+		/* Reset the mbstates */
+		memset(&l->c16rtomb, 0, sizeof(l->c16rtomb));
+		memset(&l->c32rtomb, 0, sizeof(l->c32rtomb));
+		memset(&l->mblen, 0, sizeof(l->mblen));
+		memset(&l->mbrlen, 0, sizeof(l->mbrlen));
+		memset(&l->mbrtoc16, 0, sizeof(l->mbrtoc16));
+		memset(&l->mbrtoc32, 0, sizeof(l->mbrtoc32));
+		memset(&l->mbrtowc, 0, sizeof(l->mbrtowc));
+		memset(&l->mbsnrtowcs, 0, sizeof(l->mbsnrtowcs));
+		memset(&l->mbsrtowcs, 0, sizeof(l->mbsrtowcs));
+		memset(&l->mbtowc, 0, sizeof(l->mbtowc));
+		memset(&l->wcrtomb, 0, sizeof(l->wcrtomb));
+		memset(&l->wcsnrtombs, 0, sizeof(l->wcsnrtombs));
+		memset(&l->wcsrtombs, 0, sizeof(l->wcsrtombs));
+		memset(&l->wctomb, 0, sizeof(l->wctomb));
 	} else {
 		/* Restore the saved version if this failed. */
 		memcpy(l, &saved, sizeof(struct xlocale_ctype));
@@ -204,10 +220,9 @@ __ctype_load(const char *locale, locale_t unused __unused)
 	struct xlocale_ctype *l = calloc(sizeof(struct xlocale_ctype), 1);
 
 	l->header.header.destructor = destruct_ctype;
-	if (__setrunelocale(l, locale))
-	{
+	if (__setrunelocale(l, locale)) {
 		free(l);
-		return NULL;
+		return (NULL);
 	}
-	return l;
+	return (l);
 }

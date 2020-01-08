@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2001, Jake Burkholder
  * Copyright (C) 1994, David Greenman
  * Copyright (c) 1990, 1993
@@ -89,7 +91,8 @@ void trap(struct trapframe *tf);
 void syscall(struct trapframe *tf);
 
 static int trap_cecc(void);
-static int trap_pfault(struct thread *td, struct trapframe *tf);
+static bool trap_pfault(struct thread *td, struct trapframe *tf, int *signo,
+    int *ucode);
 
 extern char copy_fault[];
 extern char copy_nofault_begin[];
@@ -98,8 +101,6 @@ extern char copy_nofault_end[];
 extern char fs_fault[];
 extern char fs_nofault_begin[];
 extern char fs_nofault_end[];
-extern char fs_nofault_intr_begin[];
-extern char fs_nofault_intr_end[];
 
 extern char fas_fault[];
 extern char fas_nofault_begin[];
@@ -257,7 +258,7 @@ trap(struct trapframe *tf)
 	struct thread *td;
 	struct proc *p;
 	int error;
-	int sig;
+	int sig, ucode;
 	register_t addr;
 	ksiginfo_t ksi;
 
@@ -277,6 +278,7 @@ trap(struct trapframe *tf)
 		td->td_pticks = 0;
 		td->td_frame = tf;
 		addr = tf->tf_tpc;
+		ucode = (int)tf->tf_type; /* XXX not POSIX */
 		if (td->td_cowgen != p->p_cowgen)
 			thread_cow_update(td);
 
@@ -286,7 +288,8 @@ trap(struct trapframe *tf)
 			addr = tf->tf_sfar;
 			/* FALLTHROUGH */
 		case T_INSTRUCTION_MISS:
-			sig = trap_pfault(td, tf);
+			if (trap_pfault(td, tf, &sig, &ucode))
+				sig = 0;
 			break;
 		case T_FILL:
 			sig = rwindow_load(td, tf, 2);
@@ -299,6 +302,10 @@ trap(struct trapframe *tf)
 			break;
 		case T_CORRECTED_ECC_ERROR:
 			sig = trap_cecc();
+			break;
+		case T_BREAKPOINT:
+			sig = SIGTRAP;
+			ucode = TRAP_BRKPT;
 			break;
 		default:
 			if (tf->tf_type > T_MAX)
@@ -322,7 +329,7 @@ trap(struct trapframe *tf)
 				kdb_enter(KDB_WHY_TRAPSIG, "trapsig");
 			ksiginfo_init_trap(&ksi);
 			ksi.ksi_signo = sig;
-			ksi.ksi_code = (int)tf->tf_type; /* XXX not POSIX */
+			ksi.ksi_code = ucode;
 			ksi.ksi_addr = (void *)addr;
 			ksi.ksi_trapno = (int)tf->tf_type;
 			trapsignal(td, &ksi);
@@ -353,7 +360,7 @@ trap(struct trapframe *tf)
 		case T_DATA_MISS:
 		case T_DATA_PROTECTION:
 		case T_INSTRUCTION_MISS:
-			error = trap_pfault(td, tf);
+			error = !trap_pfault(td, tf, &sig, &ucode);
 			break;
 		case T_DATA_EXCEPTION:
 		case T_MEM_ADDRESS_NOT_ALIGNED:
@@ -438,8 +445,8 @@ trap_cecc(void)
 	return (0);
 }
 
-static int
-trap_pfault(struct thread *td, struct trapframe *tf)
+static bool
+trap_pfault(struct thread *td, struct trapframe *tf, int *signo, int *ucode)
 {
 	vm_map_t map;
 	struct proc *p;
@@ -476,14 +483,6 @@ trap_pfault(struct thread *td, struct trapframe *tf)
 	}
 
 	if (ctx != TLB_CTX_KERNEL) {
-		if ((tf->tf_tstate & TSTATE_PRIV) != 0 &&
-		    (tf->tf_tpc >= (u_long)fs_nofault_intr_begin &&
-		    tf->tf_tpc <= (u_long)fs_nofault_intr_end)) {
-			tf->tf_tpc = (u_long)fs_fault;
-			tf->tf_tnpc = tf->tf_tpc + 4;
-			return (0);
-		}
-
 		/* This is a fault on non-kernel virtual memory. */
 		map = &p->p_vmspace->vm_map;
 	} else {
@@ -511,27 +510,27 @@ trap_pfault(struct thread *td, struct trapframe *tf)
 	}
 
 	/* Fault in the page. */
-	rv = vm_fault(map, va, prot, VM_FAULT_NORMAL);
+	rv = vm_fault_trap(map, va, prot, VM_FAULT_NORMAL, signo, ucode);
 
 	CTR3(KTR_TRAP, "trap_pfault: return td=%p va=%#lx rv=%d",
 	    td, va, rv);
 	if (rv == KERN_SUCCESS)
-		return (0);
+		return (true);
 	if (ctx != TLB_CTX_KERNEL && (tf->tf_tstate & TSTATE_PRIV) != 0) {
 		if (tf->tf_tpc >= (u_long)fs_nofault_begin &&
 		    tf->tf_tpc <= (u_long)fs_nofault_end) {
 			tf->tf_tpc = (u_long)fs_fault;
 			tf->tf_tnpc = tf->tf_tpc + 4;
-			return (0);
+			return (true);
 		}
 		if (tf->tf_tpc >= (u_long)copy_nofault_begin &&
 		    tf->tf_tpc <= (u_long)copy_nofault_end) {
 			tf->tf_tpc = (u_long)copy_fault;
 			tf->tf_tnpc = tf->tf_tpc + 4;
-			return (0);
+			return (true);
 		}
 	}
-	return ((rv == KERN_PROTECTION_FAILURE) ? SIGBUS : SIGSEGV);
+	return (false);
 }
 
 /* Maximum number of arguments that can be passed via the out registers. */
@@ -561,8 +560,6 @@ cpu_fetch_syscall_args(struct thread *td)
 		regcnt--;
 	}
 
-	if (p->p_sysent->sv_mask)
-		sa->code &= p->p_sysent->sv_mask;
 	if (sa->code >= p->p_sysent->sv_size)
 		sa->callp = &p->p_sysent->sv_table[0];
 	else
@@ -598,7 +595,6 @@ void
 syscall(struct trapframe *tf)
 {
 	struct thread *td;
-	int error;
 
 	td = curthread;
 	td->td_frame = tf;
@@ -613,6 +609,6 @@ syscall(struct trapframe *tf)
 	td->td_pcb->pcb_tpc = tf->tf_tpc;
 	TF_DONE(tf);
 
-	error = syscallenter(td);
-	syscallret(td, error);
+	syscallenter(td);
+	syscallret(td);
 }

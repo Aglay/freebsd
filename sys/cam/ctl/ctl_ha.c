@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2015 Alexander Motin <mav@FreeBSD.org>
  * All rights reserved.
  *
@@ -28,23 +30,23 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
-#include <sys/systm.h>
+#include <sys/condvar.h>
+#include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
-#include <sys/types.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
-#include <sys/module.h>
-#include <sys/mutex.h>
-#include <sys/condvar.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
+#include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/proc.h>
-#include <sys/conf.h>
 #include <sys/queue.h>
-#include <sys/sysctl.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
+#include <sys/sysctl.h>
+#include <sys/systm.h>
 #include <sys/uio.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>

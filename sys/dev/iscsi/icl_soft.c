@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2012 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -39,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/capsicum.h>
 #include <sys/condvar.h>
 #include <sys/conf.h>
+#include <sys/gsb_crc32.h>
 #include <sys/file.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
@@ -1170,6 +1173,11 @@ void
 icl_soft_conn_free(struct icl_conn *ic)
 {
 
+#ifdef DIAGNOSTIC
+	KASSERT(ic->ic_outstanding_pdus == 0,
+	    ("destroying session with %d outstanding PDUs",
+	     ic->ic_outstanding_pdus));
+#endif
 	cv_destroy(&ic->ic_send_cv);
 	cv_destroy(&ic->ic_receive_cv);
 	kobj_delete((struct kobj *)ic, M_ICL_SOFT);
@@ -1410,11 +1418,6 @@ icl_soft_conn_close(struct icl_conn *ic)
 
 	KASSERT(STAILQ_EMPTY(&ic->ic_to_send),
 	    ("destroying session with non-empty send queue"));
-#ifdef DIAGNOSTIC
-	KASSERT(ic->ic_outstanding_pdus == 0,
-	    ("destroying session with %d outstanding PDUs",
-	     ic->ic_outstanding_pdus));
-#endif
 	ICL_CONN_UNLOCK(ic);
 }
 
@@ -1449,6 +1452,9 @@ icl_soft_limits(struct icl_drv_limits *idl)
 {
 
 	idl->idl_max_recv_data_segment_length = 128 * 1024;
+	idl->idl_max_send_data_segment_length = 128 * 1024;
+	idl->idl_max_burst_length = 262144;
+	idl->idl_first_burst_length = 65536;
 
 	return (0);
 }

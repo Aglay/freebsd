@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) Comtrol Corporation <support@comtrol.com>
  * All rights reserved.
  *
@@ -40,10 +42,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/fcntl.h>
 #include <sys/malloc.h>
-#include <sys/tty.h>
 #include <sys/conf.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <machine/resource.h>
 #include <machine/bus.h>
 #include <sys/bus.h>

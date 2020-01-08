@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006-2008 Stanislav Sedov <stas@FreeBSD.org>
  * All rights reserved.
  *
@@ -48,9 +50,14 @@ __FBSDID("$FreeBSD$");
 #include <sys/pmckern.h>
 #include <sys/cpuctl.h>
 
+#include <vm/vm.h>
+#include <vm/vm_param.h>
+#include <vm/pmap.h>
+
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
+#include <x86/ucode.h>
 
 static d_open_t cpuctl_open;
 static d_ioctl_t cpuctl_ioctl;
@@ -71,6 +78,7 @@ static int cpuctl_do_cpuid(int cpu, cpuctl_cpuid_args_t *data,
     struct thread *td);
 static int cpuctl_do_cpuid_count(int cpu, cpuctl_cpuid_count_args_t *data,
     struct thread *td);
+static int cpuctl_do_eval_cpu_features(int cpu, struct thread *td);
 static int cpuctl_do_update(int cpu, cpuctl_update_args_t *data,
     struct thread *td);
 static int update_intel(int cpu, cpuctl_update_args_t *args,
@@ -157,7 +165,8 @@ cpuctl_ioctl(struct cdev *dev, u_long cmd, caddr_t data,
 	}
 	/* Require write flag for "write" requests. */
 	if ((cmd == CPUCTL_MSRCBIT || cmd == CPUCTL_MSRSBIT ||
-	    cmd == CPUCTL_UPDATE || cmd == CPUCTL_WRMSR) &&
+	    cmd == CPUCTL_UPDATE || cmd == CPUCTL_WRMSR ||
+	    cmd == CPUCTL_EVAL_CPU_FEATURES) &&
 	    (flags & FWRITE) == 0)
 		return (EPERM);
 	switch (cmd) {
@@ -184,6 +193,9 @@ cpuctl_ioctl(struct cdev *dev, u_long cmd, caddr_t data,
 	case CPUCTL_CPUID_COUNT:
 		ret = cpuctl_do_cpuid_count(cpu,
 		    (cpuctl_cpuid_count_args_t *)data, td);
+		break;
+	case CPUCTL_EVAL_CPU_FEATURES:
+		ret = cpuctl_do_eval_cpu_features(cpu, td);
 		break;
 	default:
 		ret = EINVAL;
@@ -322,15 +334,28 @@ cpuctl_do_update(int cpu, cpuctl_update_args_t *data, struct thread *td)
 	return (ret);
 }
 
+struct ucode_update_data {
+	void *ptr;
+	int cpu;
+	int ret;
+};
+
+static void
+ucode_intel_load_rv(void *arg)
+{
+	struct ucode_update_data *d;
+
+	d = arg;
+	if (PCPU_GET(cpuid) == d->cpu)
+		d->ret = ucode_intel_load(d->ptr, true, NULL, NULL);
+}
+
 static int
 update_intel(int cpu, cpuctl_update_args_t *args, struct thread *td)
 {
+	struct ucode_update_data d;
 	void *ptr;
-	uint64_t rev0, rev1;
-	uint32_t tmp[4];
-	int is_bound;
-	int oldcpu;
-	int ret;
+	int is_bound, oldcpu, ret;
 
 	if (args->size == 0 || args->data == NULL) {
 		DPRINTF("[cpuctl,%d]: zero-sized firmware image", __LINE__);
@@ -351,32 +376,25 @@ update_intel(int cpu, cpuctl_update_args_t *args, struct thread *td)
 		DPRINTF("[cpuctl,%d]: copyin %p->%p of %zd bytes failed",
 		    __LINE__, args->data, ptr, args->size);
 		ret = EFAULT;
-		goto fail;
+		goto out;
 	}
 	oldcpu = td->td_oncpu;
 	is_bound = cpu_sched_is_bound(td);
 	set_cpu(cpu, td);
-	critical_enter();
-	rdmsr_safe(MSR_BIOS_SIGN, &rev0); /* Get current microcode revision. */
-
-	/*
-	 * Perform update.
-	 */
-	wrmsr_safe(MSR_BIOS_UPDT_TRIG, (uintptr_t)(ptr));
-	wrmsr_safe(MSR_BIOS_SIGN, 0);
-
-	/*
-	 * Serialize instruction flow.
-	 */
-	do_cpuid(0, tmp);
-	critical_exit();
-	rdmsr_safe(MSR_BIOS_SIGN, &rev1); /* Get new microcode revision. */
+	d.ptr = ptr;
+	d.cpu = cpu;
+	smp_rendezvous(NULL, ucode_intel_load_rv, NULL, &d);
 	restore_cpu(oldcpu, is_bound, td);
-	if (rev1 > rev0)
-		ret = 0;
-	else
-		ret = EEXIST;
-fail:
+	ret = d.ret;
+
+	/*
+	 * Replace any existing update.  This ensures that the new update
+	 * will be reloaded automatically during ACPI resume.
+	 */
+	if (ret == 0)
+		ptr = ucode_update(ptr);
+
+out:
 	free(ptr, M_CPUCTL);
 	return (ret);
 }
@@ -501,6 +519,38 @@ fail:
 	free(ptr, M_CPUCTL);
 	return (ret);
 }
+
+static int
+cpuctl_do_eval_cpu_features(int cpu, struct thread *td)
+{
+	int is_bound = 0;
+	int oldcpu;
+
+	KASSERT(cpu >= 0 && cpu <= mp_maxid,
+	    ("[cpuctl,%d]: bad cpu number %d", __LINE__, cpu));
+
+#ifdef __i386__
+	if (cpu_id == 0)
+		return (ENODEV);
+#endif
+	oldcpu = td->td_oncpu;
+	is_bound = cpu_sched_is_bound(td);
+	set_cpu(cpu, td);
+	identify_cpu1();
+	identify_cpu2();
+	hw_ibrs_recalculate();
+	restore_cpu(oldcpu, is_bound, td);
+	hw_ssb_recalculate(true);
+#ifdef __amd64__
+	amd64_syscall_ret_flush_l1d_recalc();
+	pmap_allow_2m_x_ept_recalculate();
+#endif
+	hw_mds_recalculate();
+	x86_taa_recalculate();
+	printcpuinfo();
+	return (0);
+}
+
 
 int
 cpuctl_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)

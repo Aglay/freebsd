@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -86,6 +88,7 @@ void	 addfile(const char *);
 void	 badcnt(const char *);
 void	 badconv(const char *);
 void	 badfmt(const char *);
+void	 badnoconv(void);
 void	 badsfmt(void);
 void	 bpad(PR *);
 void	 conv_c(PR *, u_char *, size_t);

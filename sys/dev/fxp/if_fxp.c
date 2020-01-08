@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-NetBSD
+ *
  * Copyright (c) 1995, David Greenman
  * Copyright (c) 2001 Jonathan Lemon <jlemon@freebsd.org>
  * All rights reserved.
@@ -243,7 +245,7 @@ static void		fxp_discard_rfabuf(struct fxp_softc *sc,
 			    struct fxp_rx *rxp);
 static int		fxp_new_rfabuf(struct fxp_softc *sc,
 			    struct fxp_rx *rxp);
-static int		fxp_mc_addrs(struct fxp_softc *sc);
+static void		fxp_mc_addrs(struct fxp_softc *sc);
 static void		fxp_mc_setup(struct fxp_softc *sc);
 static uint16_t		fxp_eeprom_getword(struct fxp_softc *sc, int offset,
 			    int autosize);
@@ -305,6 +307,8 @@ static devclass_t fxp_devclass;
 
 DRIVER_MODULE_ORDERED(fxp, pci, fxp_driver, fxp_devclass, NULL, NULL,
     SI_ORDER_ANY);
+MODULE_PNP_INFO("U16:vendor;U16:device", pci, fxp, fxp_ident_table,
+    nitems(fxp_ident_table) - 1);
 DRIVER_MODULE(miibus, fxp, miibus_driver, miibus_devclass, NULL, NULL);
 
 static struct resource_spec fxp_res_spec_mem[] = {
@@ -1623,7 +1627,7 @@ fxp_encap(struct fxp_softc *sc, struct mbuf **m_head)
 		cbp->tbd_number = nseg;
 	/* Configure TSO. */
 	if (m->m_pkthdr.csum_flags & CSUM_TSO) {
-		cbp->tbd[-1].tb_size = htole32(m->m_pkthdr.tso_segsz << 16);
+		cbp->tbdtso.tb_size = htole32(m->m_pkthdr.tso_segsz << 16);
 		cbp->tbd[1].tb_size |= htole32(tcp_payload << 16);
 		cbp->ipcb_ip_schedule |= FXP_IPCB_LARGESEND_ENABLE |
 		    FXP_IPCB_IP_CHECKSUM_ENABLE |
@@ -2972,27 +2976,37 @@ fxp_ioctl(if_t ifp, u_long command, caddr_t data)
 	return (error);
 }
 
+static u_int
+fxp_setup_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct fxp_softc *sc = arg;
+	struct fxp_cb_mcs *mcsp = sc->mcsp;
+
+	if (mcsp->mc_cnt < MAXMCADDR)
+		bcopy(LLADDR(sdl), mcsp->mc_addr[mcsp->mc_cnt * ETHER_ADDR_LEN],
+		    ETHER_ADDR_LEN);
+	mcsp->mc_cnt++;
+	return (1);
+}
+
 /*
  * Fill in the multicast address list and return number of entries.
  */
-static int
+static void
 fxp_mc_addrs(struct fxp_softc *sc)
 {
 	struct fxp_cb_mcs *mcsp = sc->mcsp;
 	if_t ifp = sc->ifp;
-	int nmcasts = 0;
 
 	if ((if_getflags(ifp) & IFF_ALLMULTI) == 0) {
-		if_maddr_rlock(ifp);
-		if_setupmultiaddr(ifp, mcsp->mc_addr, &nmcasts, MAXMCADDR);
-		if (nmcasts >= MAXMCADDR) {
+		mcsp->mc_cnt = 0;
+		if_foreach_llmaddr(sc->ifp, fxp_setup_maddr, sc);
+		if (mcsp->mc_cnt >= MAXMCADDR) {
 			if_setflagbits(ifp, IFF_ALLMULTI, 0);
-			nmcasts = 0;
+			mcsp->mc_cnt = 0;
 		}
-		if_maddr_runlock(ifp);
 	}
-	mcsp->mc_cnt = htole16(nmcasts * ETHER_ADDR_LEN);
-	return (nmcasts);
+	mcsp->mc_cnt = htole16(mcsp->mc_cnt * ETHER_ADDR_LEN);
 }
 
 /*

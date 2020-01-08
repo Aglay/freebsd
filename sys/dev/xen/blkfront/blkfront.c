@@ -602,8 +602,8 @@ xbd_dump(void *arg, void *virtual, vm_offset_t physical, off_t offset,
 	int sbp;
 	int rc = 0;
 
-	if (length <= 0)
-		return (rc);
+	if (length == 0)
+		return (0);
 
 	xbd_quiesce(sc);	/* All quiet on the western front. */
 
@@ -1227,11 +1227,40 @@ xbd_connect(struct xbd_softc *sc)
 	int err, feature_barrier, feature_flush;
 	int i, j;
 
-	if (sc->xbd_state == XBD_STATE_CONNECTED || 
-	    sc->xbd_state == XBD_STATE_SUSPENDED)
-		return;
-
 	DPRINTK("blkfront.c:connect:%s.\n", xenbus_get_otherend_path(dev));
+
+	if (sc->xbd_state == XBD_STATE_SUSPENDED) {
+		return;
+	}
+
+	if (sc->xbd_state == XBD_STATE_CONNECTED) {
+		struct disk *disk;
+
+		disk = sc->xbd_disk;
+		if (disk == NULL) {
+			return;
+		}
+		err = xs_gather(XST_NIL, xenbus_get_otherend_path(dev),
+		    "sectors", "%lu", &sectors, NULL);
+		if (err != 0) {
+			xenbus_dev_error(dev, err,
+			    "reading sectors at %s",
+			    xenbus_get_otherend_path(dev));
+			return;
+		}
+		disk->d_mediasize = disk->d_sectorsize * sectors;
+		err = disk_resize(disk, M_NOWAIT);
+		if (err) {
+			xenbus_dev_error(dev, err,
+			    "unable to resize disk %s%u",
+			    disk->d_name, disk->d_unit);
+			return;
+		}
+		device_printf(sc->xbd_dev,
+		    "changed capacity to %jd\n",
+		    (intmax_t)disk->d_mediasize);
+		return;
+	}
 
 	err = xs_gather(XST_NIL, xenbus_get_otherend_path(dev),
 	    "sectors", "%lu", &sectors,
@@ -1333,7 +1362,10 @@ xbd_connect(struct xbd_softc *sc)
 		if (sc->xbd_max_request_indirectpages > 0) {
 			indirectpages = contigmalloc(
 			    PAGE_SIZE * sc->xbd_max_request_indirectpages,
-			    M_XENBLOCKFRONT, M_ZERO, 0, ~0, PAGE_SIZE, 0);
+			    M_XENBLOCKFRONT, M_ZERO | M_NOWAIT, 0, ~0,
+			    PAGE_SIZE, 0);
+			if (indirectpages == NULL)
+				sc->xbd_max_request_indirectpages = 0;
 		} else {
 			indirectpages = NULL;
 		}
@@ -1345,8 +1377,12 @@ xbd_connect(struct xbd_softc *sc)
 			    &cm->cm_indirectionrefs[j]))
 				break;
 		}
-		if (j < sc->xbd_max_request_indirectpages)
+		if (j < sc->xbd_max_request_indirectpages) {
+			contigfree(indirectpages,
+			    PAGE_SIZE * sc->xbd_max_request_indirectpages,
+			    M_XENBLOCKFRONT);
 			break;
+		}
 		cm->cm_indirectionpages = indirectpages;
 		xbd_free_command(cm);
 	}

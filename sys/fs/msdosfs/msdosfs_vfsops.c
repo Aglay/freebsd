@@ -2,6 +2,8 @@
 /*	$NetBSD: msdosfs_vfsops.c,v 1.51 1997/11/17 15:36:58 ws Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1994, 1995, 1997 Wolfgang Solfrank.
  * Copyright (C) 1994, 1995, 1997 TooLs GmbH.
  * All rights reserved.
@@ -74,6 +76,10 @@
 #include <fs/msdosfs/denode.h>
 #include <fs/msdosfs/fat.h>
 #include <fs/msdosfs/msdosfsmount.h>
+
+#ifdef MSDOSFS_DEBUG
+#include <sys/rwlock.h>
+#endif
 
 static const char msdosfs_lock_msg[] = "fatlk";
 
@@ -295,26 +301,35 @@ msdosfs_mount(struct mount *mp)
 			if (error)
 				error = priv_check(td, PRIV_VFS_MOUNT_PERM);
 			if (error) {
-				VOP_UNLOCK(devvp, 0);
+				VOP_UNLOCK(devvp);
 				return (error);
 			}
-			VOP_UNLOCK(devvp, 0);
+			VOP_UNLOCK(devvp);
 			g_topology_lock();
 			error = g_access(pmp->pm_cp, 0, 1, 0);
 			g_topology_unlock();
 			if (error)
 				return (error);
 
+			/* Now that the volume is modifiable, mark it dirty. */
+			error = markvoldirty_upgrade(pmp, true, true);
+			if (error) {
+				/*
+				 * If dirtying the superblock failed, drop GEOM
+				 * 'w' refs (we're still RO).
+				 */
+				g_topology_lock();
+				(void)g_access(pmp->pm_cp, 0, -1, 0);
+				g_topology_unlock();
+
+				return (error);
+			}
+
 			pmp->pm_fmod = 1;
 			pmp->pm_flags &= ~MSDOSFSMNT_RONLY;
 			MNT_ILOCK(mp);
 			mp->mnt_flag &= ~MNT_RDONLY;
 			MNT_IUNLOCK(mp);
-
-			/* Now that the volume is modifiable, mark it dirty. */
-			error = markvoldirty(pmp, 1);
-			if (error)
-				return (error); 
 		}
 	}
 	/*
@@ -400,7 +415,7 @@ mountmsdosfs(struct vnode *devvp, struct mount *mp)
 	dev = devvp->v_rdev;
 	if (atomic_cmpset_acq_ptr((uintptr_t *)&dev->si_mountpt, 0,
 	    (uintptr_t)mp) == 0) {
-		VOP_UNLOCK(devvp, 0);
+		VOP_UNLOCK(devvp);
 		return (EBUSY);
 	}
 	g_topology_lock();
@@ -408,13 +423,16 @@ mountmsdosfs(struct vnode *devvp, struct mount *mp)
 	g_topology_unlock();
 	if (error != 0) {
 		atomic_store_rel_ptr((uintptr_t *)&dev->si_mountpt, 0);
-		VOP_UNLOCK(devvp, 0);
+		VOP_UNLOCK(devvp);
 		return (error);
 	}
 	dev_ref(dev);
-	VOP_UNLOCK(devvp, 0);
-
 	bo = &devvp->v_bufobj;
+	VOP_UNLOCK(devvp);
+	if (dev->si_iosize_max != 0)
+		mp->mnt_iosize_max = dev->si_iosize_max;
+	if (mp->mnt_iosize_max > MAXPHYS)
+		mp->mnt_iosize_max = MAXPHYS;
 
 	/*
 	 * Read the boot sector of the filesystem, and then check the
@@ -692,10 +710,8 @@ mountmsdosfs(struct vnode *devvp, struct mount *mp)
 	if (ronly)
 		pmp->pm_flags |= MSDOSFSMNT_RONLY;
 	else {
-		if ((error = markvoldirty(pmp, 1)) != 0) {
-			(void)markvoldirty(pmp, 0);
+		if ((error = markvoldirty(pmp, 1)) != 0)
 			goto error_exit;
-		}
 		pmp->pm_fmod = 1;
 	}
 	mp->mnt_data =  pmp;
@@ -853,7 +869,6 @@ msdosfs_fsiflush(struct msdosfsmount *pmp, int waitfor)
 	error = bread(pmp->pm_devvp, pmp->pm_fsinfo, pmp->pm_BytesPerSec,
 	    NOCRED, &bp);
 	if (error != 0) {
-		brelse(bp);
 		goto unlock;
 	}
 	fp = (struct fsinfo *)bp->b_data;
@@ -910,14 +925,16 @@ loop:
 		}
 		error = vget(vp, LK_EXCLUSIVE | LK_NOWAIT | LK_INTERLOCK, td);
 		if (error) {
-			if (error == ENOENT)
+			if (error == ENOENT) {
+				MNT_VNODE_FOREACH_ALL_ABORT(mp, nvp);
 				goto loop;
+			}
 			continue;
 		}
 		error = VOP_FSYNC(vp, waitfor, td);
 		if (error)
 			allerror = error;
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		vrele(vp);
 	}
 
@@ -929,7 +946,7 @@ loop:
 		error = VOP_FSYNC(pmp->pm_devvp, waitfor, td);
 		if (error)
 			allerror = error;
-		VOP_UNLOCK(pmp->pm_devvp, 0);
+		VOP_UNLOCK(pmp->pm_devvp);
 	}
 
 	error = msdosfs_fsiflush(pmp, waitfor);

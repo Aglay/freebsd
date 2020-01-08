@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2005 Peter Grehan
  * All rights reserved.
  *
@@ -70,13 +72,12 @@ static struct kobj_ops	mmu_kernel_kops;
  */
 struct pmap kernel_pmap_store;
 
-struct msgbuf *msgbufp;
 vm_offset_t    msgbuf_phys;
 
 vm_offset_t kernel_vm_end;
-vm_paddr_t phys_avail[PHYS_AVAIL_SZ];
 vm_offset_t virtual_avail;
 vm_offset_t virtual_end;
+caddr_t crashdumpmap;
 
 int pmap_bootstrapped;
 
@@ -144,7 +145,7 @@ pmap_enter(pmap_t pmap, vm_offset_t va, vm_page_t p, vm_prot_t prot,
     u_int flags, int8_t psind)
 {
 
-	CTR6(KTR_PMAP, "pmap_enter(%p, %#x, %p, %#x, %x, %d)", pmap, va,
+	CTR6(KTR_PMAP, "pmap_enter(%p, %#x, %p, %#x, %#x, %d)", pmap, va,
 	    p, prot, flags, psind);
 	return (MMU_ENTER(mmu_obj, pmap, va, p, prot, flags, psind));
 }
@@ -381,11 +382,11 @@ pmap_zero_page_area(vm_page_t m, int off, int size)
 }
 
 int
-pmap_mincore(pmap_t pmap, vm_offset_t addr, vm_paddr_t *locked_pa)
+pmap_mincore(pmap_t pmap, vm_offset_t addr, vm_paddr_t *pap)
 {
 
 	CTR3(KTR_PMAP, "%s(%p, %#x)", __func__, pmap, addr);
-	return (MMU_MINCORE(mmu_obj, pmap, addr, locked_pa));
+	return (MMU_MINCORE(mmu_obj, pmap, addr, pap));
 }
 
 void
@@ -510,6 +511,23 @@ pmap_kremove(vm_offset_t va)
 	return (MMU_KREMOVE(mmu_obj, va));
 }
 
+int
+pmap_map_user_ptr(pmap_t pm, volatile const void *uaddr, void **kaddr,
+    size_t ulen, size_t *klen)
+{
+
+	CTR2(KTR_PMAP, "%s(%p)", __func__, uaddr);
+	return (MMU_MAP_USER_PTR(mmu_obj, pm, uaddr, kaddr, ulen, klen));
+}
+
+int
+pmap_decode_kernel_ptr(vm_offset_t addr, int *is_user, vm_offset_t *decoded)
+{
+
+	CTR2(KTR_PMAP, "%s(%#jx)", __func__, (uintmax_t)addr);
+	return (MMU_DECODE_KERNEL_PTR(mmu_obj, addr, is_user, decoded));
+}
+
 boolean_t
 pmap_dev_direct_mapped(vm_paddr_t pa, vm_size_t size)
 {
@@ -550,6 +568,27 @@ dumpsys_pa_init(void)
 	return (MMU_SCAN_INIT(mmu_obj));
 }
 
+size_t
+dumpsys_scan_pmap(void)
+{
+	CTR1(KTR_PMAP, "%s()", __func__);
+	return (MMU_SCAN_PMAP(mmu_obj));
+}
+
+void *
+dumpsys_dump_pmap_init(unsigned blkpgs)
+{
+	CTR1(KTR_PMAP, "%s()", __func__);
+	return (MMU_DUMP_PMAP_INIT(mmu_obj, blkpgs));
+}
+
+void *
+dumpsys_dump_pmap(void *ctx, void *buf, u_long *nbytes)
+{
+	CTR1(KTR_PMAP, "%s()", __func__);
+	return (MMU_DUMP_PMAP(mmu_obj, ctx, buf, nbytes));
+}
+
 vm_offset_t
 pmap_quick_enter_page(vm_page_t m)
 {
@@ -569,6 +608,13 @@ pmap_change_attr(vm_offset_t addr, vm_size_t size, vm_memattr_t mode)
 {
 	CTR4(KTR_PMAP, "%s(%#x, %#zx, %d)", __func__, addr, size, mode);
 	return (MMU_CHANGE_ATTR(mmu_obj, addr, size, mode));
+}
+
+void
+pmap_page_array_startup(long pages)
+{
+	CTR2(KTR_PMAP, "%s(%ld)", __func__, pages);
+	MMU_PAGE_ARRAY_STARTUP(mmu_obj, pages);
 }
 
 /*
@@ -601,4 +647,28 @@ pmap_mmu_install(char *name, int prio)
 	return (FALSE);
 }
 
+const char *
+pmap_mmu_name(void)
+{
+	return (mmu_obj->ops->cls->name);
+}
+
 int unmapped_buf_allowed;
+
+boolean_t
+pmap_is_valid_memattr(pmap_t pmap __unused, vm_memattr_t mode)
+{
+
+	switch (mode) {
+	case VM_MEMATTR_DEFAULT:
+	case VM_MEMATTR_UNCACHEABLE:
+	case VM_MEMATTR_CACHEABLE:
+	case VM_MEMATTR_WRITE_COMBINING:
+	case VM_MEMATTR_WRITE_BACK:
+	case VM_MEMATTR_WRITE_THROUGH:
+	case VM_MEMATTR_PREFETCHABLE:
+		return (TRUE);
+	default:
+		return (FALSE);
+	}
+}

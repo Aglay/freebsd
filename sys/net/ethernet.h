@@ -74,6 +74,9 @@ struct ether_addr {
 #define	ETHER_IS_BROADCAST(addr) \
 	(((addr)[0] & (addr)[1] & (addr)[2] & \
 	  (addr)[3] & (addr)[4] & (addr)[5]) == 0xff)
+#define	ETHER_IS_ZERO(addr) \
+	(((addr)[0] | (addr)[1] | (addr)[2] | \
+	  (addr)[3] | (addr)[4] | (addr)[5]) == 0x00)
 
 /*
  * 802.1q Virtual LAN header.
@@ -344,11 +347,15 @@ struct ether_vlan_header {
 #define	ETHERTYPE_PPPOE		0x8864	/* PPP Over Ethernet Session Stage */
 #define	ETHERTYPE_LANPROBE	0x8888	/* HP LanProbe test? */
 #define	ETHERTYPE_PAE		0x888e	/* EAPOL PAE/802.1x */
+#define	ETHERTYPE_QINQ		0x88A8	/* 802.1ad VLAN stacking */
 #define	ETHERTYPE_LOOPBACK	0x9000	/* Loopback: used to test interfaces */
+#define	ETHERTYPE_8021Q9100	0x9100	/* IEEE 802.1Q stacking (proprietary) */
 #define	ETHERTYPE_LBACK		ETHERTYPE_LOOPBACK	/* DEC MOP loopback */
 #define	ETHERTYPE_XNSSM		0x9001	/* 3Com (Formerly Bridge Communications), XNS Systems Management */
 #define	ETHERTYPE_TCPSM		0x9002	/* 3Com (Formerly Bridge Communications), TCP/IP Systems Management */
 #define	ETHERTYPE_BCLOOP	0x9003	/* 3Com (Formerly Bridge Communications), loopback detection */
+#define	ETHERTYPE_8021Q9200	0x9200	/* IEEE 802.1Q stacking (proprietary) */
+#define	ETHERTYPE_8021Q9300	0x9300	/* IEEE 802.1Q stacking (proprietary) */
 #define	ETHERTYPE_DEBNI		0xAAAA	/* DECNET? Used by VAX 6220 DEBNI */
 #define	ETHERTYPE_SONIX		0xFAF5	/* Sonix Arpeggio */
 #define	ETHERTYPE_VITAL		0xFF00	/* BBN VITAL-LanBridge cache wakeups */
@@ -384,7 +391,23 @@ struct ether_vlan_header {
 	}								\
 } while (0)
 
+/*
+ * Names for 802.1q priorities ("802.1p").  Notice that in this scheme,
+ * (0 < 1), allowing default 0-tagged traffic to take priority over background
+ * tagged traffic.
+ */
+#define	IEEE8021Q_PCP_BK	1	/* Background (lowest) */
+#define	IEEE8021Q_PCP_BE	0	/* Best effort (default) */
+#define	IEEE8021Q_PCP_EE	2	/* Excellent effort */
+#define	IEEE8021Q_PCP_CA	3	/* Critical applications */
+#define	IEEE8021Q_PCP_VI	4	/* Video, < 100ms latency */
+#define	IEEE8021Q_PCP_VO	5	/* Video, < 10ms latency */
+#define	IEEE8021Q_PCP_IC	6	/* Internetwork control */
+#define	IEEE8021Q_PCP_NC	7	/* Network control (highest) */
+
 #ifdef _KERNEL
+
+#include <sys/_eventhandler.h>
 
 struct ifnet;
 struct mbuf;
@@ -405,6 +428,13 @@ extern	char *ether_sprintf(const u_int8_t *);
 void	ether_vlan_mtap(struct bpf_if *, struct mbuf *,
 	    void *, u_int);
 struct mbuf  *ether_vlanencap(struct mbuf *, uint16_t);
+bool	ether_8021q_frame(struct mbuf **mp, struct ifnet *ife, struct ifnet *p,
+	    uint16_t vid, uint8_t pcp);
+void	ether_gen_addr(struct ifnet *ifp, struct ether_addr *hwaddr);
+
+/* new ethernet interface attached event */
+typedef void (*ether_ifattach_event_handler_t)(void *, struct ifnet *);
+EVENTHANDLER_DECLARE(ether_ifattach_event, ether_ifattach_event_handler_t);
 
 #else /* _KERNEL */
 

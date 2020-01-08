@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2007 Lukas Ertl
  * All rights reserved.
  *
@@ -161,4 +163,6 @@ gv_bio_done(struct gv_softc *sc, struct bio *bp)
 		gv_plex_raid5_done(p, bp);
 		break;
 	}
+
+	gv_drive_done(s->drive_sc);
 }

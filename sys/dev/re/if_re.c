@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1997, 1998-2003
  *	Bill Paul <wpaul@windriver.com>.  All rights reserved.
  *
@@ -126,6 +128,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 
+#include <net/debugnet.h>
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_arp.h>
@@ -277,6 +280,7 @@ static void re_tick		(void *);
 static void re_int_task		(void *, int);
 static void re_start		(struct ifnet *);
 static void re_start_locked	(struct ifnet *);
+static void re_start_tx		(struct rl_softc *);
 static int re_ioctl		(struct ifnet *, u_long, caddr_t);
 static void re_init		(void *);
 static void re_init_locked	(struct rl_softc *);
@@ -304,6 +308,8 @@ static void re_reset		(struct rl_softc *);
 static void re_setwol		(struct rl_softc *);
 static void re_clrwol		(struct rl_softc *);
 static void re_set_linkspeed	(struct rl_softc *);
+
+DEBUGNET_DEFINE(re);
 
 #ifdef DEV_NETMAP	/* see ixgbe.c for details */
 #include <dev/netmap/if_re_netmap.h>
@@ -643,6 +649,20 @@ re_miibus_statchg(device_t dev)
 	 */
 }
 
+static u_int
+re_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint32_t h, *hashes = arg;
+
+	h = ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN) >> 26;
+	if (h < 32)
+		hashes[0] |= (1 << h);
+	else
+		hashes[1] |= (1 << (h - 32));
+
+	return (1);
+}
+
 /*
  * Set the RX configuration and 64-bit multicast hash filter.
  */
@@ -650,9 +670,8 @@ static void
 re_set_rxmode(struct rl_softc *sc)
 {
 	struct ifnet		*ifp;
-	struct ifmultiaddr	*ifma;
-	uint32_t		hashes[2] = { 0, 0 };
-	uint32_t		h, rxfilt;
+	uint32_t		h, hashes[2] = { 0, 0 };
+	uint32_t		rxfilt;
 
 	RL_LOCK_ASSERT(sc);
 
@@ -677,18 +696,7 @@ re_set_rxmode(struct rl_softc *sc)
 		goto done;
 	}
 
-	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		h = ether_crc32_be(LLADDR((struct sockaddr_dl *)
-		    ifma->ifma_addr), ETHER_ADDR_LEN) >> 26;
-		if (h < 32)
-			hashes[0] |= (1 << h);
-		else
-			hashes[1] |= (1 << (h - 32));
-	}
-	if_maddr_runlock(ifp);
+	if_foreach_llmaddr(ifp, re_hash_maddr, hashes);
 
 	if (hashes[0] != 0 || hashes[1] != 0) {
 		/*
@@ -1735,7 +1743,10 @@ re_attach(device_t dev)
 	if (error) {
 		device_printf(dev, "couldn't set up irq\n");
 		ether_ifdetach(ifp);
+		goto fail;
 	}
+
+	DEBUGNET_SET(ifp, re);
 
 fail:
 	if (error)
@@ -2931,7 +2942,7 @@ re_start_locked(struct ifnet *ifp)
 #ifdef DEV_NETMAP
 	/* XXX is this necessary ? */
 	if (ifp->if_capenable & IFCAP_NETMAP) {
-		struct netmap_kring *kring = &NA(ifp)->tx_rings[0];
+		struct netmap_kring *kring = NA(ifp)->tx_rings[0];
 		if (sc->rl_ldata.rl_tx_prodidx != kring->nr_hwcur) {
 			/* kick the tx unit */
 			CSR_WRITE_1(sc, sc->rl_txstart, RL_TXSTART_START);
@@ -2979,8 +2990,14 @@ re_start_locked(struct ifnet *ifp)
 		return;
 	}
 
-	/* Flush the TX descriptors */
+	re_start_tx(sc);
+}
 
+static void
+re_start_tx(struct rl_softc *sc)
+{
+
+	/* Flush the TX descriptors */
 	bus_dmamap_sync(sc->rl_ldata.rl_tx_list_tag,
 	    sc->rl_ldata.rl_tx_list_map,
 	    BUS_DMASYNC_PREWRITE|BUS_DMASYNC_PREREAD);
@@ -4076,3 +4093,59 @@ sysctl_hw_re_int_mod(SYSCTL_HANDLER_ARGS)
 	return (sysctl_int_range(oidp, arg1, arg2, req, RL_TIMER_MIN,
 	    RL_TIMER_MAX));
 }
+
+#ifdef DEBUGNET
+static void
+re_debugnet_init(struct ifnet *ifp, int *nrxr, int *ncl, int *clsize)
+{
+	struct rl_softc *sc;
+
+	sc = if_getsoftc(ifp);
+	RL_LOCK(sc);
+	*nrxr = sc->rl_ldata.rl_rx_desc_cnt;
+	*ncl = DEBUGNET_MAX_IN_FLIGHT;
+	*clsize = (ifp->if_mtu > RL_MTU &&
+	    (sc->rl_flags & RL_FLAG_JUMBOV2) != 0) ? MJUM9BYTES : MCLBYTES;
+	RL_UNLOCK(sc);
+}
+
+static void
+re_debugnet_event(struct ifnet *ifp __unused, enum debugnet_ev event __unused)
+{
+}
+
+static int
+re_debugnet_transmit(struct ifnet *ifp, struct mbuf *m)
+{
+	struct rl_softc *sc;
+	int error;
+
+	sc = if_getsoftc(ifp);
+	if ((if_getdrvflags(ifp) & (IFF_DRV_RUNNING | IFF_DRV_OACTIVE)) !=
+	    IFF_DRV_RUNNING || (sc->rl_flags & RL_FLAG_LINK) == 0)
+		return (EBUSY);
+
+	error = re_encap(sc, &m);
+	if (error == 0)
+		re_start_tx(sc);
+	return (error);
+}
+
+static int
+re_debugnet_poll(struct ifnet *ifp, int count)
+{
+	struct rl_softc *sc;
+	int error;
+
+	sc = if_getsoftc(ifp);
+	if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) == 0 ||
+	    (sc->rl_flags & RL_FLAG_LINK) == 0)
+		return (EBUSY);
+
+	re_txeof(sc);
+	error = re_rxeof(sc, NULL);
+	if (error != 0 && error != EAGAIN)
+		return (error);
+	return (0);
+}
+#endif /* DEBUGNET */

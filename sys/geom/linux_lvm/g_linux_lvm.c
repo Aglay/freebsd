@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Andrew Thompson <thompsa@FreeBSD.org>
  * All rights reserved.
  *
@@ -38,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <sys/endian.h>
 
 #include <geom/linux_lvm/g_linux_lvm.h>
@@ -1188,3 +1191,4 @@ static struct g_class g_llvm_class = {
 };
 
 DECLARE_GEOM_CLASS(g_llvm_class, g_linux_lvm);
+MODULE_VERSION(geom_linux_lvm, 0);

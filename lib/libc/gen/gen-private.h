@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -49,7 +51,11 @@ struct _dirdesc {
 	int	dd_len;		/* size of data buffer */
 	off_t	dd_seek;	/* magic cookie returned by getdirentries */
 	int	dd_flags;	/* flags for readdir */
+#ifndef IN_RTLD
 	struct pthread_mutex	*dd_lock;	/* lock */
+#else
+	struct _donotuse	*dd_lock; /* unused in rtld, keep same layout */
+#endif
 	struct _telldir *dd_td;	/* telldir position recording */
 	void	*dd_compat_de;	/* compat dirent */
 };

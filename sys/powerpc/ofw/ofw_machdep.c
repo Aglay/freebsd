@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1996 Wolfgang Solfrank.
  * Copyright (C) 1996 TooLs GmbH.
  * All rights reserved.
@@ -41,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <sys/disk.h>
 #include <sys/fcntl.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/smp.h>
 #include <sys/stat.h>
@@ -57,6 +60,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/vm_param.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 
 #include <machine/bus.h>
 #include <machine/cpu.h>
@@ -64,6 +68,12 @@ __FBSDID("$FreeBSD$");
 #include <machine/platform.h>
 #include <machine/ofw_machdep.h>
 #include <machine/trap.h>
+
+#include <contrib/libfdt/libfdt.h>
+
+#ifdef POWERNV
+#include <powerpc/powernv/opal.h>
+#endif
 
 static void	*fdt;
 int		ofw_real_mode;
@@ -77,24 +87,30 @@ char		save_trap_of[0x2f00];            /* EXC_LAST */
 int		ofwcall(void *);
 static int	openfirmware(void *args);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wfortify-source"
+
 __inline void
 ofw_save_trap_vec(char *save_trap_vec)
 {
-	if (!ofw_real_mode)
+	if (!ofw_real_mode || !hw_direct_map)
                 return;
 
-	bcopy((void *)EXC_RST, save_trap_vec, EXC_LAST - EXC_RST);
+	bcopy((void *)PHYS_TO_DMAP(EXC_RST), save_trap_vec, EXC_LAST - EXC_RST);
 }
 
 static __inline void
 ofw_restore_trap_vec(char *restore_trap_vec)
 {
-	if (!ofw_real_mode)
+	if (!ofw_real_mode || !hw_direct_map)
                 return;
 
-	bcopy(restore_trap_vec, (void *)EXC_RST, EXC_LAST - EXC_RST);
-	__syncicache(EXC_RSVD, EXC_LAST - EXC_RSVD);
+	bcopy(restore_trap_vec, (void *)PHYS_TO_DMAP(EXC_RST),
+	    EXC_LAST - EXC_RST);
+	__syncicache((void *)PHYS_TO_DMAP(EXC_RSVD), EXC_LAST - EXC_RSVD);
 }
+
+#pragma clang diagnostic pop
 
 /*
  * Saved SPRG0-3 from OpenFirmware. Will be restored prior to the callback.
@@ -184,14 +200,6 @@ parse_ofw_memory(phandle_t node, const char *prop, struct mem_region *output)
 	i = 0;
 	j = 0;
 	while (i < sz/sizeof(cell_t)) {
-	      #if !defined(__powerpc64__) && !defined(BOOKE)
-		/* On 32-bit PPC (OEA), ignore regions starting above 4 GB */
-		if (address_cells > 1 && OFmem[i] > 0) {
-			i += address_cells + size_cells;
-			continue;
-		}
-	      #endif
-
 		output[j].mr_start = OFmem[i++];
 		if (address_cells == 2) {
 			output[j].mr_start <<= 32;
@@ -204,54 +212,91 @@ parse_ofw_memory(phandle_t node, const char *prop, struct mem_region *output)
 			output[j].mr_size += OFmem[i++];
 		}
 
-	      #if !defined(__powerpc64__) && !defined(BOOKE)
-		/* Book-E can support 36-bit addresses. */
+		if (output[j].mr_start > BUS_SPACE_MAXADDR)
+			continue;
+
 		/*
-		 * Check for memory regions extending above 32-bit
-		 * memory space, and restrict them to stay there.
+		 * Constrain memory to that which we can access.
+		 * 32-bit AIM can only reference 32 bits of address currently,
+		 * but Book-E can access 36 bits.
 		 */
 		if (((uint64_t)output[j].mr_start +
-		    (uint64_t)output[j].mr_size) >
-		    BUS_SPACE_MAXADDR_32BIT) {
-			output[j].mr_size = BUS_SPACE_MAXADDR_32BIT -
-			    output[j].mr_start;
+		    (uint64_t)output[j].mr_size - 1) >
+		    BUS_SPACE_MAXADDR) {
+			output[j].mr_size = BUS_SPACE_MAXADDR -
+			    output[j].mr_start + 1;
 		}
-	      #endif
 
 		j++;
 	}
-	sz = j*sizeof(output[0]);
 
-	return (sz);
+	return (j);
 }
 
 static int
-excise_fdt_reserved(struct mem_region *avail, int asz)
+parse_numa_ofw_memory(phandle_t node, const char *prop,
+    struct numa_mem_region *output)
 {
-	struct {
-		uint64_t address;
-		uint64_t size;
-	} fdtmap[16];
-	ssize_t fdtmapsize;
-	phandle_t chosen;
-	int i, j, k;
+	cell_t address_cells, size_cells;
+	cell_t OFmem[4 * PHYS_AVAIL_SZ];
+	int sz, i, j;
+	phandle_t phandle;
 
-	chosen = OF_finddevice("/chosen");
-	fdtmapsize = OF_getprop(chosen, "fdtmemreserv", fdtmap, sizeof(fdtmap));
+	sz = 0;
 
-	for (j = 0; j < fdtmapsize/sizeof(fdtmap[0]); j++) {
-		fdtmap[j].address = be64toh(fdtmap[j].address);
-		fdtmap[j].size = be64toh(fdtmap[j].size);
+	/*
+	 * Get #address-cells from root node, defaulting to 1 if it cannot
+	 * be found.
+	 */
+	phandle = OF_finddevice("/");
+	if (OF_getencprop(phandle, "#address-cells", &address_cells,
+	    sizeof(address_cells)) < (ssize_t)sizeof(address_cells))
+		address_cells = 1;
+	if (OF_getencprop(phandle, "#size-cells", &size_cells,
+	    sizeof(size_cells)) < (ssize_t)sizeof(size_cells))
+		size_cells = 1;
+
+	/*
+	 * Get memory.
+	 */
+	if (node == -1 || (sz = OF_getencprop(node, prop,
+	    OFmem, sizeof(OFmem))) <= 0)
+		panic("Physical memory map not found");
+
+	i = 0;
+	j = 0;
+	while (i < sz/sizeof(cell_t)) {
+		output[j].mr_start = OFmem[i++];
+		if (address_cells == 2) {
+			output[j].mr_start <<= 32;
+			output[j].mr_start += OFmem[i++];
+		}
+		output[j].mr_size = OFmem[i++];
+		if (size_cells == 2) {
+			output[j].mr_size <<= 32;
+			output[j].mr_size += OFmem[i++];
+		}
+		j++;
 	}
 
+	return (j);
+}
+
+#ifdef FDT
+static int
+excise_reserved_regions(struct mem_region *avail, int asz,
+			struct mem_region *exclude, int esz)
+{
+	int i, j, k;
+
 	for (i = 0; i < asz; i++) {
-		for (j = 0; j < fdtmapsize/sizeof(fdtmap[0]); j++) {
+		for (j = 0; j < esz; j++) {
 			/*
 			 * Case 1: Exclusion region encloses complete
 			 * available entry. Drop it and move on.
 			 */
-			if (fdtmap[j].address <= avail[i].mr_start &&
-			    fdtmap[j].address + fdtmap[j].size >=
+			if (exclude[j].mr_start <= avail[i].mr_start &&
+			    exclude[j].mr_start + exclude[j].mr_size >=
 			    avail[i].mr_start + avail[i].mr_size) {
 				for (k = i+1; k < asz; k++)
 					avail[k-1] = avail[k];
@@ -266,20 +311,20 @@ excise_fdt_reserved(struct mem_region *avail, int asz)
 			 * a new available entry with the region after
 			 * the excluded region, if any.
 			 */
-			if (fdtmap[j].address >= avail[i].mr_start &&
-			    fdtmap[j].address < avail[i].mr_start +
+			if (exclude[j].mr_start >= avail[i].mr_start &&
+			    exclude[j].mr_start < avail[i].mr_start +
 			    avail[i].mr_size) {
-				if (fdtmap[j].address + fdtmap[j].size < 
+				if (exclude[j].mr_start + exclude[j].mr_size <
 				    avail[i].mr_start + avail[i].mr_size) {
 					avail[asz].mr_start =
-					    fdtmap[j].address + fdtmap[j].size;
+					    exclude[j].mr_start + exclude[j].mr_size;
 					avail[asz].mr_size = avail[i].mr_start +
 					     avail[i].mr_size -
 					     avail[asz].mr_start;
 					asz++;
 				}
 
-				avail[i].mr_size = fdtmap[j].address -
+				avail[i].mr_size = exclude[j].mr_start -
 				    avail[i].mr_start;
 			}
 
@@ -289,13 +334,13 @@ excise_fdt_reserved(struct mem_region *avail, int asz)
 			 * The case of a contained exclusion zone has already
 			 * been caught in case 2.
 			 */
-			if (fdtmap[j].address + fdtmap[j].size >=
-			    avail[i].mr_start && fdtmap[j].address +
-			    fdtmap[j].size < avail[i].mr_start +
+			if (exclude[j].mr_start + exclude[j].mr_size >=
+			    avail[i].mr_start && exclude[j].mr_start +
+			    exclude[j].mr_size < avail[i].mr_start +
 			    avail[i].mr_size) {
 				avail[i].mr_size += avail[i].mr_start;
 				avail[i].mr_start =
-				    fdtmap[j].address + fdtmap[j].size;
+				    exclude[j].mr_start + exclude[j].mr_size;
 				avail[i].mr_size -= avail[i].mr_start;
 			}
 		}
@@ -304,6 +349,159 @@ excise_fdt_reserved(struct mem_region *avail, int asz)
 	return (asz);
 }
 
+static int
+excise_initrd_region(struct mem_region *avail, int asz)
+{
+	phandle_t chosen;
+	uint64_t start, end;
+	ssize_t size;
+	struct mem_region initrdmap[1];
+	pcell_t cell[2];
+
+	chosen = OF_finddevice("/chosen");
+
+	size = OF_getencprop(chosen, "linux,initrd-start", cell, sizeof(cell));
+	if (size < 0)
+		return (asz);
+	else if (size == 4)
+		start = cell[0];
+	else if (size == 8)
+		start = (uint64_t)cell[0] << 32 | cell[1];
+	else {
+		/* Invalid value length */
+		printf("WARNING: linux,initrd-start must be either 4 or 8 bytes long\n");
+		return (asz);
+	}
+
+	size = OF_getencprop(chosen, "linux,initrd-end", cell, sizeof(cell));
+	if (size < 0)
+		return (asz);
+	else if (size == 4)
+		end = cell[0];
+	else if (size == 8)
+		end = (uint64_t)cell[0] << 32 | cell[1];
+	else {
+		/* Invalid value length */
+		printf("WARNING: linux,initrd-end must be either 4 or 8 bytes long\n");
+		return (asz);
+	}
+
+	if (end <= start)
+		return (asz);
+
+	initrdmap[0].mr_start = start;
+	initrdmap[0].mr_size = end - start;
+
+	asz = excise_reserved_regions(avail, asz, initrdmap, 1);
+
+	return (asz);
+}
+
+#ifdef POWERNV
+static int
+excise_msi_region(struct mem_region *avail, int asz)
+{
+        uint64_t start, end;
+        struct mem_region initrdmap[1];
+
+	/*
+	 * This range of physical addresses is used to implement optimized
+	 * 32 bit MSI interrupts on POWER9. Exclude it to avoid accidentally
+	 * using it for DMA, as this will cause an immediate PHB fence.
+	 * While we could theoretically turn off this behavior in the ETU,
+	 * doing so would break 32-bit MSI, so just reserve the range in 
+	 * the physical map instead.
+	 * See section 4.4.2.8 of the PHB4 specification.
+	 */
+	start	= 0x00000000ffff0000ul;
+	end	= 0x00000000fffffffful;
+
+	initrdmap[0].mr_start = start;
+	initrdmap[0].mr_size = end - start;
+
+	asz = excise_reserved_regions(avail, asz, initrdmap, 1);
+
+	return (asz);
+}
+#endif
+
+static int
+excise_fdt_reserved(struct mem_region *avail, int asz)
+{
+	struct mem_region fdtmap[32];
+	ssize_t fdtmapsize;
+	phandle_t chosen;
+	int j, fdtentries;
+
+	chosen = OF_finddevice("/chosen");
+	fdtmapsize = OF_getprop(chosen, "fdtmemreserv", fdtmap, sizeof(fdtmap));
+
+	for (j = 0; j < fdtmapsize/sizeof(fdtmap[0]); j++) {
+		fdtmap[j].mr_start = be64toh(fdtmap[j].mr_start) & ~PAGE_MASK;
+		fdtmap[j].mr_size = round_page(be64toh(fdtmap[j].mr_size));
+	}
+
+	KASSERT(j*sizeof(fdtmap[0]) < sizeof(fdtmap),
+	    ("Exceeded number of FDT reservations"));
+	/* Add a virtual entry for the FDT itself */
+	if (fdt != NULL) {
+		fdtmap[j].mr_start = (vm_offset_t)fdt & ~PAGE_MASK;
+		fdtmap[j].mr_size = round_page(fdt_totalsize(fdt));
+		fdtmapsize += sizeof(fdtmap[0]);
+	}
+
+	fdtentries = fdtmapsize/sizeof(fdtmap[0]);
+	asz = excise_reserved_regions(avail, asz, fdtmap, fdtentries);
+
+	return (asz);
+}
+#endif
+
+/*
+ * This is called during powerpc_init, before the system is really initialized.
+ * It shall provide the total and the available regions of RAM.
+ * The available regions need not take the kernel into account.
+ */
+void
+ofw_numa_mem_regions(struct numa_mem_region *memp, int *memsz)
+{
+	phandle_t phandle;
+	int res, count, msz;
+	char name[31];
+	cell_t associativity[5];
+	struct numa_mem_region *curmemp;
+
+	msz = 0;
+	/*
+	 * Get memory from all the /memory nodes.
+	 */
+	for (phandle = OF_child(OF_peer(0)); phandle != 0;
+	    phandle = OF_peer(phandle)) {
+		if (OF_getprop(phandle, "name", name, sizeof(name)) <= 0)
+			continue;
+		if (strncmp(name, "memory@", strlen("memory@")) != 0)
+			continue;
+
+		count = parse_numa_ofw_memory(phandle, "reg", &memp[msz]);
+		if (count == 0)
+			continue;
+		curmemp = &memp[msz];
+		res = OF_getproplen(phandle, "ibm,associativity");
+		if (res <= 0)
+			continue;
+		MPASS(count == 1);
+		OF_getencprop(phandle, "ibm,associativity",
+			associativity, res);
+		curmemp->mr_domain = associativity[3];
+		if (bootverbose)
+			printf("%s %#jx-%#jx domain(%ju)\n",
+			    name, (uintmax_t)curmemp->mr_start,
+			    (uintmax_t)curmemp->mr_start + curmemp->mr_size,
+			    (uintmax_t)curmemp->mr_domain);
+		msz += count;
+	}
+	*memsz = msz;
+}
 /*
  * This is called during powerpc_init, before the system is really initialized.
  * It shall provide the total and the available regions of RAM.
@@ -332,18 +530,42 @@ ofw_mem_regions(struct mem_region *memp, int *memsz,
 			continue;
 
 		res = parse_ofw_memory(phandle, "reg", &memp[msz]);
-		msz += res/sizeof(struct mem_region);
-		if (OF_getproplen(phandle, "available") >= 0)
+		msz += res;
+
+		/*
+		 * On POWER9 Systems we might have both linux,usable-memory and
+		 * reg properties.  'reg' denotes all available memory, but we
+		 * must use 'linux,usable-memory', a subset, as some memory
+		 * regions are reserved for NVLink.
+		 */
+		if (OF_getproplen(phandle, "linux,usable-memory") >= 0)
+			res = parse_ofw_memory(phandle, "linux,usable-memory",
+			    &availp[asz]);
+		else if (OF_getproplen(phandle, "available") >= 0)
 			res = parse_ofw_memory(phandle, "available",
 			    &availp[asz]);
 		else
 			res = parse_ofw_memory(phandle, "reg", &availp[asz]);
-		asz += res/sizeof(struct mem_region);
+		asz += res;
 	}
 
+#ifdef FDT
 	phandle = OF_finddevice("/chosen");
 	if (OF_hasprop(phandle, "fdtmemreserv"))
 		asz = excise_fdt_reserved(availp, asz);
+
+	/* If the kernel is being loaded through kexec, initrd region is listed
+	 * in /chosen but the region is not marked as reserved, so, we might exclude
+	 * it here.
+	 */
+	if (OF_hasprop(phandle, "linux,initrd-start"))
+		asz = excise_initrd_region(availp, asz);
+#endif
+
+#ifdef POWERNV
+	if (opal_check() == 0)
+		asz = excise_msi_region(availp, asz);
+#endif
 
 	*memsz = msz;
 	*availsz = asz;
@@ -375,18 +597,13 @@ OF_initial_setup(void *fdt_ptr, void *junk, int (*openfirm)(void *))
 #endif
 
 	fdt = fdt_ptr;
-
-	#ifdef FDT_DTB_STATIC
-	/* Check for a statically included blob */
-	if (fdt == NULL)
-		fdt = &fdt_static_dtb;
-	#endif
 }
 
 boolean_t
 OF_bootstrap()
 {
 	boolean_t status = FALSE;
+	int err = 0;
 
 #ifdef AIM
 	if (openfirmware_entry != NULL) {
@@ -403,18 +620,68 @@ OF_bootstrap()
 		if (status != TRUE)
 			return status;
 
-		OF_init(openfirmware);
+		err = OF_init(openfirmware);
 	} else
 #endif
 	if (fdt != NULL) {
-		status = OF_install(OFW_FDT, 0);
+#ifdef FDT
+#ifdef AIM
+		bus_space_tag_t fdt_bt;
+		vm_offset_t tmp_fdt_ptr;
+		vm_size_t fdt_size;
+		uintptr_t fdt_va;
+#endif
 
+		status = OF_install(OFW_FDT, 0);
 		if (status != TRUE)
 			return status;
 
-		OF_init(fdt);
-		OF_interpret("perform-fixup", 0);
+#ifdef AIM /* AIM-only for now -- Book-E does this remapping in early init */
+		/* Get the FDT size for mapping if we can */
+		tmp_fdt_ptr = pmap_early_io_map((vm_paddr_t)fdt, PAGE_SIZE);
+		if (fdt_check_header((void *)tmp_fdt_ptr) != 0) {
+			pmap_early_io_unmap(tmp_fdt_ptr, PAGE_SIZE);
+			return FALSE;
+		}
+		fdt_size = fdt_totalsize((void *)tmp_fdt_ptr);
+		pmap_early_io_unmap(tmp_fdt_ptr, PAGE_SIZE);
+
+		/*
+		 * Map this for real. Use bus_space_map() to take advantage
+		 * of its auto-remapping function once the kernel is loaded.
+		 * This is a dirty hack, but what we have.
+		 */
+#ifdef _LITTLE_ENDIAN
+		fdt_bt = &bs_le_tag;
+#else
+		fdt_bt = &bs_be_tag;
+#endif
+		bus_space_map(fdt_bt, (vm_paddr_t)fdt, fdt_size, 0, &fdt_va);
+		 
+		err = OF_init((void *)fdt_va);
+#else
+		err = OF_init(fdt);
+#endif
+#endif
 	} 
+
+	#ifdef FDT_DTB_STATIC
+	/*
+	 * Check for a statically included blob already in the kernel and
+	 * needing no mapping.
+	 */
+	else {
+		status = OF_install(OFW_FDT, 0);
+		if (status != TRUE)
+			return status;
+		err = OF_init(&fdt_static_dtb);
+	}
+	#endif
+
+	if (err != 0) {
+		OF_install(NULL, 0);
+		status = FALSE;
+	}
 
 	return (status);
 }
@@ -461,7 +728,7 @@ openfirmware_core(void *args)
 	/* Restore initially saved trap vectors */
 	ofw_restore_trap_vec(save_trap_init);
 
-#if defined(AIM) && !defined(__powerpc64__)
+#ifndef __powerpc64__
 	/*
 	 * Clear battable[] translations
 	 */
@@ -526,11 +793,16 @@ openfirmware(void *args)
 		return (-1);
 
 	#ifdef SMP
-	rv_args.args = args;
-	rv_args.in_progress = 1;
-	smp_rendezvous(smp_no_rendezvous_barrier, ofw_rendezvous_dispatch,
-	    smp_no_rendezvous_barrier, &rv_args);
-	result = rv_args.retval;
+	if (cold) {
+		result = openfirmware_core(args);
+	} else {
+		rv_args.args = args;
+		rv_args.in_progress = 1;
+		smp_rendezvous(smp_no_rendezvous_barrier,
+		    ofw_rendezvous_dispatch, smp_no_rendezvous_barrier,
+		    &rv_args);
+		result = rv_args.retval;
+	}
 	#else
 	result = openfirmware_core(args);
 	#endif

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (C) 1998 WIDE Project.
  * All rights reserved.
  *
@@ -107,7 +109,6 @@ __FBSDID("$FreeBSD$");
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_types.h>
-#include <net/raw_cb.h>
 #include <net/vnet.h>
 
 #include <netinet/in.h>
@@ -137,19 +138,19 @@ extern int in6_mcast_loop;
 extern struct domain inet6domain;
 
 static const struct encaptab *pim6_encap_cookie;
-static const struct protosw in6_pim_protosw = {
-	.pr_type =		SOCK_RAW,
-	.pr_domain =		&inet6domain,
-	.pr_protocol =		IPPROTO_PIM,
-	.pr_flags =		PR_ATOMIC|PR_ADDR|PR_LASTHDR,
-	.pr_input =		pim6_input,
-	.pr_output =		rip6_output,
-	.pr_ctloutput =		rip6_ctloutput,
-	.pr_usrreqs =		&rip6_usrreqs
-};
 static int pim6_encapcheck(const struct mbuf *, int, int, void *);
+static int pim6_input(struct mbuf *, int, int, void *);
 
-static VNET_DEFINE(int, ip6_mrouter_ver) = 0;
+static const struct encap_config ipv6_encap_cfg = {
+	.proto = IPPROTO_PIM,
+	.min_length = sizeof(struct ip6_hdr) + PIM_MINLEN,
+	.exact_match = 8,
+	.check = pim6_encapcheck,
+	.input = pim6_input
+};
+
+
+VNET_DEFINE_STATIC(int, ip6_mrouter_ver) = 0;
 #define	V_ip6_mrouter_ver	VNET(ip6_mrouter_ver)
 
 SYSCTL_DECL(_net_inet6);
@@ -202,7 +203,8 @@ sysctl_mif6table(SYSCTL_HANDLER_ARGS)
 	struct mif6_sctl *out;
 	int error;
 
-	out = malloc(sizeof(struct mif6_sctl) * MAXMIFS, M_TEMP, M_WAITOK);
+	out = malloc(sizeof(struct mif6_sctl) * MAXMIFS, M_TEMP,
+	    M_WAITOK | M_ZERO);
 	for (int i = 0; i < MAXMIFS; i++) {
 		out[i].m6_flags		= mif6table[i].m6_flags;
 		out[i].m6_rate_limit	= mif6table[i].m6_rate_limit;
@@ -234,7 +236,7 @@ static struct mtx mif6_mtx;
 #define	MIF6_LOCK_DESTROY()	mtx_destroy(&mif6_mtx)
 
 #ifdef MRT6DEBUG
-static VNET_DEFINE(u_int, mrt6debug) = 0;	/* debug level */
+VNET_DEFINE_STATIC(u_int, mrt6debug) = 0;	/* debug level */
 #define	V_mrt6debug		VNET(mrt6debug)
 #define DEBUG_MFC	0x02
 #define DEBUG_FORWARD	0x04
@@ -287,7 +289,7 @@ SYSCTL_STRUCT(_net_inet6_pim, PIM6CTL_STATS, stats, CTLFLAG_RW,
     "PIM Statistics (struct pim6stat, netinet6/pim6_var.h)");
 
 #define	PIM6STAT_INC(name)	pim6stat.name += 1
-static VNET_DEFINE(int, pim6);
+VNET_DEFINE_STATIC(int, pim6);
 #define	V_pim6		VNET(pim6)
 
 /*
@@ -1693,16 +1695,12 @@ register_send(struct ip6_hdr *ip6, struct mif6 *mif, struct mbuf *m)
  * into the kernel.
  */
 static int
-pim6_encapcheck(const struct mbuf *m, int off, int proto, void *arg)
+pim6_encapcheck(const struct mbuf *m __unused, int off __unused,
+    int proto __unused, void *arg __unused)
 {
 
-#ifdef DIAGNOSTIC
     KASSERT(proto == IPPROTO_PIM, ("not for IPPROTO_PIM"));
-#endif
-    if (proto != IPPROTO_PIM)
-	return 0;	/* not for us; reject the datagram. */
-
-    return 64;		/* claim the datagram. */
+    return (8);		/* claim the datagram. */
 }
 
 /*
@@ -1712,24 +1710,20 @@ pim6_encapcheck(const struct mbuf *m, int off, int proto, void *arg)
  * The only message processed is the REGISTER pim message; the pim header
  * is stripped off, and the inner packet is passed to register_mforward.
  */
-int
-pim6_input(struct mbuf **mp, int *offp, int proto)
+static int
+pim6_input(struct mbuf *m, int off, int proto, void *arg __unused)
 {
 	struct pim *pim; /* pointer to a pim struct */
 	struct ip6_hdr *ip6;
 	int pimlen;
-	struct mbuf *m = *mp;
 	int minlen;
-	int off = *offp;
 
 	PIM6STAT_INC(pim6s_rcv_total);
-
-	ip6 = mtod(m, struct ip6_hdr *);
-	pimlen = m->m_pkthdr.len - *offp;
 
 	/*
 	 * Validate lengths
 	 */
+	pimlen = m->m_pkthdr.len - off;
 	if (pimlen < PIM_MINLEN) {
 		PIM6STAT_INC(pim6s_rcv_tooshort);
 		MRT6_DLOG(DEBUG_PIM, "PIM packet too short");
@@ -1751,20 +1745,15 @@ pim6_input(struct mbuf **mp, int *offp, int proto)
 	 * Make sure that the IP6 and PIM headers in contiguous memory, and
 	 * possibly the PIM REGISTER header
 	 */
-#ifndef PULLDOWN_TEST
-	IP6_EXTHDR_CHECK(m, off, minlen, IPPROTO_DONE);
-	/* adjust pointer */
-	ip6 = mtod(m, struct ip6_hdr *);
-
-	/* adjust mbuf to point to the PIM header */
-	pim = (struct pim *)((caddr_t)ip6 + off);
-#else
-	IP6_EXTHDR_GET(pim, struct pim *, m, off, minlen);
-	if (pim == NULL) {
-		PIM6STAT_INC(pim6s_rcv_tooshort);
-		return (IPPROTO_DONE);
+	if (m->m_len < off + minlen) {
+		m = m_pullup(m, off + minlen);
+		if (m == NULL) {
+			IP6STAT_INC(ip6s_exthdrtoolong);
+			return (IPPROTO_DONE);
+		}
 	}
-#endif
+	ip6 = mtod(m, struct ip6_hdr *);
+	pim = (struct pim *)((caddr_t)ip6 + off);
 
 #define PIM6_CHECKSUM
 #ifdef PIM6_CHECKSUM
@@ -1855,7 +1844,7 @@ pim6_input(struct mbuf **mp, int *offp, int proto)
 			    "of the inner packet",
 			    (eip6->ip6_vfc & IPV6_VERSION));
 			m_freem(m);
-			return (IPPROTO_NONE);
+			return (IPPROTO_DONE);
 		}
 
 		/* verify the inner packet is destined to a mcast group */
@@ -1902,8 +1891,7 @@ pim6_input(struct mbuf **mp, int *offp, int proto)
 	 * encapsulated ip6 header.
 	 */
   pim6_input_to_daemon:
-	rip6_input(&m, offp, proto);
-	return (IPPROTO_DONE);
+	return (rip6_input(&m, &off, proto));
 }
 
 static int
@@ -1916,9 +1904,8 @@ ip6_mroute_modevent(module_t mod, int type, void *unused)
 		MFC6_LOCK_INIT();
 		MIF6_LOCK_INIT();
 
-		pim6_encap_cookie = encap_attach_func(AF_INET6, IPPROTO_PIM,
-			pim6_encapcheck,
-			(const struct protosw *)&in6_pim_protosw, NULL);
+		pim6_encap_cookie = ip6_encap_attach(&ipv6_encap_cfg,
+		    NULL, M_WAITOK);
 		if (pim6_encap_cookie == NULL) {
 			printf("ip6_mroute: unable to attach pim6 encap\n");
 			MIF6_LOCK_DESTROY();
@@ -1939,7 +1926,7 @@ ip6_mroute_modevent(module_t mod, int type, void *unused)
 			return EINVAL;
 
 		if (pim6_encap_cookie) {
-			encap_detach(pim6_encap_cookie);
+			ip6_encap_detach(pim6_encap_cookie);
 			pim6_encap_cookie = NULL;
 		}
 		X_ip6_mrouter_done();

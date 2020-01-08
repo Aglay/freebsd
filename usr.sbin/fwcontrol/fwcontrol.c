@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 2002
  * 	Hidetoshi Shimokawa. All rights reserved.
  * 
@@ -127,7 +129,7 @@ str2node(int fd, const char *nodestr)
 	char *endptr;
 	int i, node;
 
-	if (nodestr == '\0')
+	if (nodestr == NULL || *nodestr == '\0')
 		return (-1);
 
 	/*

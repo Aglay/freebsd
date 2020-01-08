@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (C) 2009 Nathan Whitehorn
  * All rights reserved.
  *
@@ -76,5 +78,9 @@ struct slb {
 	uint64_t	slbv;
 	uint64_t	slbe;
 };
+
+struct pmap;
+void	handle_kernel_slb_spill(int, register_t, register_t);
+int	handle_user_slb_spill(struct pmap *pm, vm_offset_t addr);
 
 #endif /* !_MACHINE_SLB_H_ */

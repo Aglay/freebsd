@@ -2,6 +2,8 @@
 /*	$NetBSD: msdosfsmount.h,v 1.17 1997/11/17 15:37:07 ws Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1994, 1995, 1997 Wolfgang Solfrank.
  * Copyright (C) 1994, 1995, 1997 TooLs GmbH.
  * All rights reserved.
@@ -51,7 +53,7 @@
 #ifndef _MSDOSFS_MSDOSFSMOUNT_H_
 #define	_MSDOSFS_MSDOSFSMOUNT_H_
 
-#ifdef _KERNEL
+#if defined (_KERNEL) || defined(MAKEFS)
 
 #include <sys/types.h>
 #include <sys/lock.h>
@@ -220,8 +222,9 @@ struct msdosfs_fileno {
 #define	MSDOSFS_ASSERT_MP_LOCKED(pmp) \
 	lockmgr_assert(&(pmp)->pm_fatlock, KA_XLOCKED)
 
-#endif /* _KERNEL */
+#endif /* _KERNEL || MAKEFS */
 
+#ifndef MAKEFS
 /*
  *  Arguments to mount MSDOS filesystems.
  */
@@ -239,6 +242,7 @@ struct msdosfs_args {
 	char	*cs_local;	/* Local Charset */
 	mode_t	dirmask;	/* dir  mask to be applied for msdosfs perms */
 };
+#endif /* MAKEFS */
 
 /*
  * Msdosfs mount options:

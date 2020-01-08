@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: MIT-CMU
+ *
  * Mach Operating System
  * Copyright (c) 1991,1990 Carnegie Mellon University
  * All Rights Reserved.
@@ -38,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/kdb.h>
 #include <sys/proc.h>
+#include <sys/systm.h>
 
 #include <machine/kdb.h>
 #include <machine/pcb.h>
@@ -45,8 +48,9 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 
 #include <ddb/ddb.h>
-#include <ddb/db_break.h>
 #include <ddb/db_access.h>
+#include <ddb/db_break.h>
+#include <ddb/db_command.h>
 
 #define	STEP_ONCE	1
 #define	STEP_RETURN	2
@@ -328,8 +332,6 @@ db_clear_single_step(void)
 }
 
 #endif	/* SOFTWARE_SSTEP */
-
-extern int	db_cmd_loop_done;
 
 /* single-step */
 /*ARGSUSED*/

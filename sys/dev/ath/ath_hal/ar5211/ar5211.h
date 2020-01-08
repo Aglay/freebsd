@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: ISC
+ *
  * Copyright (c) 2002-2009 Sam Leffler, Errno Consulting
  * Copyright (c) 2002-2006 Atheros Communications, Inc.
  *
@@ -216,7 +218,7 @@ extern	uint32_t ar5211GetRxDP(struct ath_hal *, HAL_RX_QUEUE);
 extern	void ar5211SetRxDP(struct ath_hal *, uint32_t rxdp, HAL_RX_QUEUE);
 extern	void ar5211EnableReceive(struct ath_hal *);
 extern	HAL_BOOL ar5211StopDmaReceive(struct ath_hal *);
-extern	void ar5211StartPcuReceive(struct ath_hal *);
+extern	void ar5211StartPcuReceive(struct ath_hal *, HAL_BOOL);
 extern	void ar5211StopPcuReceive(struct ath_hal *);
 extern	void ar5211SetMulticastFilter(struct ath_hal *,
 		uint32_t filter0, uint32_t filter1);

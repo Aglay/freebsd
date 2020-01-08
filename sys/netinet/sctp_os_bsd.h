@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2006-2007, by Cisco Systems, Inc. All rights reserved.
  * Copyright (c) 2008-2012, by Randall Stewart. All rights reserved.
  * Copyright (c) 2008-2012, by Michael Tuexen. All rights reserved.
@@ -38,7 +40,6 @@ __FBSDID("$FreeBSD$");
 /*
  * includes
  */
-#include "opt_compat.h"
 #include "opt_inet6.h"
 #include "opt_inet.h"
 #include "opt_sctp.h"
@@ -96,9 +97,6 @@ __FBSDID("$FreeBSD$");
 #include <crypto/sha1.h>
 #include <crypto/sha2/sha256.h>
 
-#ifndef in6pcb
-#define in6pcb		inpcb
-#endif
 /* Declare all the malloc names for all the various mallocs */
 MALLOC_DECLARE(SCTP_M_MAP);
 MALLOC_DECLARE(SCTP_M_STRMI);
@@ -367,10 +365,10 @@ typedef struct callout sctp_os_timer_t;
  */
 
 /* get the v6 hop limit */
-#define SCTP_GET_HLIM(inp, ro)	in6_selecthlim((struct in6pcb *)&inp->ip_inp.inp, (ro ? (ro->ro_rt ? (ro->ro_rt->rt_ifp) : (NULL)) : (NULL)));
+#define SCTP_GET_HLIM(inp, ro)	in6_selecthlim(&inp->ip_inp.inp, (ro ? (ro->ro_rt ? (ro->ro_rt->rt_ifp) : (NULL)) : (NULL)));
 
 /* is the endpoint v6only? */
-#define SCTP_IPV6_V6ONLY(inp)	(((struct inpcb *)inp)->inp_flags & IN6P_IPV6_V6ONLY)
+#define SCTP_IPV6_V6ONLY(sctp_inpcb)	((sctp_inpcb)->ip_inp.inp.inp_flags & IN6P_IPV6_V6ONLY)
 /* is the socket non-blocking? */
 #define SCTP_SO_IS_NBIO(so)	((so)->so_state & SS_NBIO)
 #define SCTP_SET_SO_NBIO(so)	((so)->so_state |= SS_NBIO)
@@ -392,8 +390,8 @@ typedef struct callout sctp_os_timer_t;
 	(sb).sb_mb = NULL;	\
 	(sb).sb_mbcnt = 0;
 
-#define SCTP_SB_LIMIT_RCV(so) so->so_rcv.sb_hiwat
-#define SCTP_SB_LIMIT_SND(so) so->so_snd.sb_hiwat
+#define SCTP_SB_LIMIT_RCV(so) (SOLISTENING(so) ? so->sol_sbrcv_hiwat : so->so_rcv.sb_hiwat)
+#define SCTP_SB_LIMIT_SND(so) (SOLISTENING(so) ? so->sol_sbsnd_hiwat : so->so_snd.sb_hiwat)
 
 /*
  * routes, output, etc.
@@ -403,11 +401,6 @@ typedef struct rtentry sctp_rtentry_t;
 
 #define SCTP_RTALLOC(ro, vrf_id, fibnum) \
 	rtalloc_ign_fib((struct route *)ro, 0UL, fibnum)
-
-/* Future zero copy wakeup/send  function */
-#define SCTP_ZERO_COPY_EVENT(inp, so)
-/* This is re-pulse ourselves for sendbuf */
-#define SCTP_ZERO_COPY_SENDQ_EVENT(inp, so)
 
 /*
  * SCTP protocol specific mbuf flags.
@@ -435,7 +428,7 @@ typedef struct rtentry sctp_rtentry_t;
 	m_clrprotoflags(o_pak); \
 	if (local_stcb && local_stcb->sctp_ep) \
 		result = ip6_output(o_pak, \
-				    ((struct in6pcb *)(local_stcb->sctp_ep))->in6p_outputopts, \
+				    ((struct inpcb *)(local_stcb->sctp_ep))->in6p_outputopts, \
 				    (ro), 0, 0, ifp, NULL); \
 	else \
 		result = ip6_output(o_pak, NULL, (ro), 0, 0, ifp, NULL); \
@@ -449,7 +442,7 @@ sctp_get_mbuf_for_msg(unsigned int space_needed,
 /*
  * SCTP AUTH
  */
-#define SCTP_READ_RANDOM(buf, len)	read_random(buf, len)
+#define SCTP_READ_RANDOM(buf, len)	arc4rand(buf, len, 0)
 
 /* map standard crypto API names */
 #define SCTP_SHA1_CTX		SHA1_CTX

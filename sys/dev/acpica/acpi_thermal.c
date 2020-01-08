@@ -30,6 +30,7 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_acpi.h"
 #include <sys/param.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/bus.h>
 #include <sys/cpu.h>
@@ -535,7 +536,7 @@ acpi_tz_monitor(void *Context)
 	(newactive == TZ_ACTIVE_NONE || newactive > sc->tz_active)) {
 
 	getnanotime(&curtime);
-	timespecsub(&curtime, &sc->tz_cooling_started);
+	timespecsub(&curtime, &sc->tz_cooling_started, &curtime);
 	if (curtime.tv_sec < acpi_tz_min_runtime)
 	    newactive = sc->tz_active;
     }

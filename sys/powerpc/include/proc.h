@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1995, 1996 Wolfgang Solfrank.
  * Copyright (C) 1995, 1996 TooLs GmbH.
  * All rights reserved.
@@ -44,6 +46,10 @@ struct mdthread {
 };
 
 struct mdproc {
+	/*
+	 * Avoid empty structs because they are undefined behavior.
+	 */
+	long	md_spare;
 };
 
 #ifdef __powerpc64__

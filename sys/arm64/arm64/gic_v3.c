@@ -30,6 +30,7 @@
  * SUCH DAMAGE.
  */
 
+#include "opt_acpi.h"
 #include "opt_platform.h"
 
 #include <sys/cdefs.h>
@@ -63,12 +64,18 @@ __FBSDID("$FreeBSD$");
 #include <dev/ofw/ofw_bus_subr.h>
 #endif
 
+#ifdef DEV_ACPI
+#include <contrib/dev/acpica/include/acpi.h>
+#include <dev/acpica/acpivar.h>
+#endif
+
 #include "pic_if.h"
 
 #include <arm/arm/gic_common.h>
 #include "gic_v3_reg.h"
 #include "gic_v3_var.h"
 
+static bus_get_domain_t gic_v3_get_domain;
 static bus_read_ivar_t gic_v3_read_ivar;
 
 static pic_disable_intr_t gic_v3_disable_intr;
@@ -97,6 +104,7 @@ static device_method_t gic_v3_methods[] = {
 	DEVMETHOD(device_detach,	gic_v3_detach),
 
 	/* Bus interface */
+	DEVMETHOD(bus_get_domain,	gic_v3_get_domain),
 	DEVMETHOD(bus_read_ivar,	gic_v3_read_ivar),
 
 	/* Interrupt controller interface */
@@ -175,36 +183,44 @@ uint32_t
 gic_r_read_4(device_t dev, bus_size_t offset)
 {
 	struct gic_v3_softc *sc;
+	struct resource *rdist;
 
 	sc = device_get_softc(dev);
-	return (bus_read_4(sc->gic_redists.pcpu[PCPU_GET(cpuid)], offset));
+	rdist = &sc->gic_redists.pcpu[PCPU_GET(cpuid)]->res;
+	return (bus_read_4(rdist, offset));
 }
 
 uint64_t
 gic_r_read_8(device_t dev, bus_size_t offset)
 {
 	struct gic_v3_softc *sc;
+	struct resource *rdist;
 
 	sc = device_get_softc(dev);
-	return (bus_read_8(sc->gic_redists.pcpu[PCPU_GET(cpuid)], offset));
+	rdist = &sc->gic_redists.pcpu[PCPU_GET(cpuid)]->res;
+	return (bus_read_8(rdist, offset));
 }
 
 void
 gic_r_write_4(device_t dev, bus_size_t offset, uint32_t val)
 {
 	struct gic_v3_softc *sc;
+	struct resource *rdist;
 
 	sc = device_get_softc(dev);
-	bus_write_4(sc->gic_redists.pcpu[PCPU_GET(cpuid)], offset, val);
+	rdist = &sc->gic_redists.pcpu[PCPU_GET(cpuid)]->res;
+	bus_write_4(rdist, offset, val);
 }
 
 void
 gic_r_write_8(device_t dev, bus_size_t offset, uint64_t val)
 {
 	struct gic_v3_softc *sc;
+	struct resource *rdist;
 
 	sc = device_get_softc(dev);
-	bus_write_8(sc->gic_redists.pcpu[PCPU_GET(cpuid)], offset, val);
+	rdist = &sc->gic_redists.pcpu[PCPU_GET(cpuid)]->res;
+	bus_write_8(rdist, offset, val);
 }
 
 /*
@@ -341,12 +357,25 @@ gic_v3_detach(device_t dev)
 	for (rid = 0; rid < (sc->gic_redists.nregions + 1); rid++)
 		bus_release_resource(dev, SYS_RES_MEMORY, rid, sc->gic_res[rid]);
 
-	for (i = 0; i < mp_ncpus; i++)
+	for (i = 0; i <= mp_maxid; i++)
 		free(sc->gic_redists.pcpu[i], M_GIC_V3);
 
 	free(sc->gic_res, M_GIC_V3);
 	free(sc->gic_redists.regions, M_GIC_V3);
 
+	return (0);
+}
+
+static int
+gic_v3_get_domain(device_t dev, device_t child, int *domain)
+{
+	struct gic_v3_devinfo *di;
+
+	di = device_get_ivars(child);
+	if (di->gic_domain < 0)
+		return (ENOENT);
+
+	*domain = di->gic_domain;
 	return (0);
 }
 
@@ -359,11 +388,10 @@ gic_v3_read_ivar(device_t dev, device_t child, int which, uintptr_t *result)
 
 	switch (which) {
 	case GICV3_IVAR_NIRQS:
-		*result = sc->gic_nirqs;
+		*result = (NIRQ - sc->gic_nirqs) / sc->gic_nchildren;
 		return (0);
-	case GICV3_IVAR_REDIST_VADDR:
-		*result = (uintptr_t)rman_get_virtual(
-		    sc->gic_redists.pcpu[PCPU_GET(cpuid)]);
+	case GICV3_IVAR_REDIST:
+		*result = (uintptr_t)sc->gic_redists.pcpu[PCPU_GET(cpuid)];
 		return (0);
 	case GIC_IVAR_HW_REV:
 		KASSERT(
@@ -393,13 +421,11 @@ arm_gic_v3_intr(void *arg)
 	struct intr_pic *pic;
 	uint64_t active_irq;
 	struct trapframe *tf;
-	bool first;
 
-	first = true;
 	pic = sc->gic_pic;
 
 	while (1) {
-		if (CPU_MATCH_ERRATA_CAVIUM_THUNDER_1_1) {
+		if (CPU_MATCH_ERRATA_CAVIUM_THUNDERX_1_1) {
 			/*
 			 * Hardware:		Cavium ThunderX
 			 * Chip revision:	Pass 1.0 (early version)
@@ -557,6 +583,9 @@ do_gic_v3_map_intr(device_t dev, struct intr_map_data *data, u_int *irqp,
 #ifdef FDT
 	struct intr_map_data_fdt *daf;
 #endif
+#ifdef DEV_ACPI
+	struct intr_map_data_acpi *daa;
+#endif
 	u_int irq;
 
 	sc = device_get_softc(dev);
@@ -568,6 +597,14 @@ do_gic_v3_map_intr(device_t dev, struct intr_map_data *data, u_int *irqp,
 		if (gic_map_fdt(dev, daf->ncells, daf->cells, &irq, &pol,
 		    &trig) != 0)
 			return (EINVAL);
+		break;
+#endif
+#ifdef DEV_ACPI
+	case INTR_MAP_DATA_ACPI:
+		daa = (struct intr_map_data_acpi *)data;
+		irq = daa->irq;
+		pol = daa->pol;
+		trig = daa->trig;
 		break;
 #endif
 	case INTR_MAP_DATA_MSI:
@@ -880,7 +917,7 @@ gic_v3_ipi_send(device_t dev, struct intr_irqsrc *isrc, cpuset_t cpus,
 	val = 0;
 
 	/* Iterate through all CPUs in set */
-	for (i = 0; i < mp_ncpus; i++) {
+	for (i = 0; i <= mp_maxid; i++) {
 		/* Move to the next affinity group */
 		if (aff != GIC_AFFINITY(i)) {
 			/* Send the IPI */
@@ -949,7 +986,7 @@ gic_v3_wait_for_rwp(struct gic_v3_softc *sc, enum gic_v3_xdist xdist)
 		res = sc->gic_dist;
 		break;
 	case REDIST:
-		res = sc->gic_redists.pcpu[cpuid];
+		res = &sc->gic_redists.pcpu[cpuid]->res;
 		break;
 	default:
 		KASSERT(0, ("%s: Attempt to wait for unknown RWP", __func__));
@@ -1088,7 +1125,7 @@ gic_v3_redist_alloc(struct gic_v3_softc *sc)
 	u_int cpuid;
 
 	/* Allocate struct resource for all CPU's Re-Distributor registers */
-	for (cpuid = 0; cpuid < mp_ncpus; cpuid++)
+	for (cpuid = 0; cpuid <= mp_maxid; cpuid++)
 		if (CPU_ISSET(cpuid, &all_cpus) != 0)
 			sc->gic_redists.pcpu[cpuid] =
 				malloc(sizeof(*sc->gic_redists.pcpu[0]),
@@ -1143,7 +1180,8 @@ gic_v3_redist_find(struct gic_v3_softc *sc)
 				KASSERT(sc->gic_redists.pcpu[cpuid] != NULL,
 				    ("Invalid pointer to per-CPU redistributor"));
 				/* Copy res contents to its final destination */
-				*sc->gic_redists.pcpu[cpuid] = r_res;
+				sc->gic_redists.pcpu[cpuid]->res = r_res;
+				sc->gic_redists.pcpu[cpuid]->lpi_enabled = false;
 				if (bootverbose) {
 					device_printf(sc->dev,
 					    "CPU%u Re-Distributor has been found\n",

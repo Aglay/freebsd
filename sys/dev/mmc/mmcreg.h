@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2006 M. Warner Losh.  All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2006 M. Warner Losh <imp@FreeBSD.org>
  * Copyright (c) 2017 Marius Strobl <marius@FreeBSD.org>
  * Copyright (c) 2015-2016 Ilya Bakulin <kibab@FreeBSD.org>
  *
@@ -157,34 +159,35 @@ struct mmc_command {
 #define	R1_STATE_PRG	7
 #define	R1_STATE_DIS	8
 
-/* R4 response (SDIO) */
-#define R4_IO_NUM_FUNCTIONS(ocr)	(((ocr) >> 28) & 0x3)
-#define R4_IO_MEM_PRESENT		(0x1<<27)
-#define R4_IO_OCR_MASK			0x00fffff0
+/* R4 responses (SDIO) */
+#define	R4_IO_NUM_FUNCTIONS(ocr)	(((ocr) >> 28) & 0x3)
+#define	R4_IO_MEM_PRESENT		(0x1 << 27)
+#define	R4_IO_OCR_MASK			0x00fffff0
 
 /*
  * R5 responses
  *
  * Types (per SD 2.0 standard)
- *e : error bit
- *s : status bit
- *r : detected and set for the actual command response
- *x : Detected and set during command execution.  The host can get
- *    the status by issuing a command with R1 response.
+ *	e : error bit
+ *	s : status bit
+ *	r : detected and set for the actual command response
+ *	x : Detected and set during command execution.  The host can get
+ *	    the status by issuing a command with R1 response.
  *
  * Clear Condition (per SD 2.0 standard)
- *a : according to the card current state.
- *b : always related to the previous command.  reception of a valid
- *    command will clear it (with a delay of one command).
- *c : clear by read
+ *	a : according to the card current state.
+ *	b : always related to the previous command.  reception of a valid
+ *	    command will clear it (with a delay of one command).
+ *	c : clear by read
  */
-#define R5_COM_CRC_ERROR		(1u << 15)/* er, b */
-#define R5_ILLEGAL_COMMAND		(1u << 14)/* er, b */
-#define R5_IO_CURRENT_STATE_MASK	(3u << 12)/* s, b */
-#define R5_IO_CURRENT_STATE(x) 		(((x) & R5_IO_CURRENT_STATE_MASK) >> 12)
-#define R5_ERROR			(1u << 11)/* erx, c */
-#define R5_FUNCTION_NUMBER		(1u << 9)/* er, c */
-#define R5_OUT_OF_RANGE			(1u << 8)/* er, c */
+#define	R5_COM_CRC_ERROR		(1u << 15)	/* er, b */
+#define	R5_ILLEGAL_COMMAND		(1u << 14)	/* er, b */
+#define	R5_IO_CURRENT_STATE_MASK	(3u << 12)	/* s, b */
+#define	R5_IO_CURRENT_STATE(x)		(((x) & R5_IO_CURRENT_STATE_MASK) >> 12)
+#define	R5_ERROR			(1u << 11)	/* erx, c */
+#define	R5_FUNCTION_NUMBER		(1u << 9)	/* er, c */
+#define	R5_OUT_OF_RANGE			(1u << 8)	/* er, c */
+
 struct mmc_data {
 	size_t len;		/* size of the data */
 	size_t xfer_len;
@@ -194,7 +197,10 @@ struct mmc_data {
 #define	MMC_DATA_READ	(1UL << 1)
 #define	MMC_DATA_STREAM	(1UL << 2)
 #define	MMC_DATA_MULTI	(1UL << 3)
+#define MMC_DATA_BLOCK_SIZE (1UL << 4)
 	struct mmc_request *mrq;
+	size_t block_size;      /* block size for CMD53 */
+	size_t block_count;     /* block count for CMD53 */
 };
 
 struct mmc_request {
@@ -204,6 +210,7 @@ struct mmc_request {
 	void *done_data;		/* requestor set data */
 	uint32_t flags;
 #define	MMC_REQ_DONE	1
+#define	MMC_TUNE_DONE	2
 };
 
 /* Command definitions */
@@ -216,7 +223,7 @@ struct mmc_request {
 #define	SD_SEND_RELATIVE_ADDR	3
 #define	MMC_SET_DSR		4
 #define	MMC_SLEEP_AWAKE		5
-#define IO_SEND_OP_COND		5
+#define	IO_SEND_OP_COND		5
 #define	MMC_SWITCH_FUNC		6
 #define	 MMC_SWITCH_FUNC_CMDS	 0
 #define	 MMC_SWITCH_FUNC_SET	 1
@@ -267,6 +274,13 @@ struct mmc_request {
 #define	MMC_ERASE_GROUP_END	36
 			/* 37 -- reserved old command */
 #define	MMC_ERASE		38
+#define	 MMC_ERASE_ERASE	0x00000000
+#define	 MMC_ERASE_TRIM		0x00000001
+#define	 MMC_ERASE_FULE		0x00000002
+#define	 MMC_ERASE_DISCARD	0x00000003
+#define	 MMC_ERASE_SECURE_ERASE	0x80000000
+#define	 MMC_ERASE_SECURE_TRIM1	0x80000001
+#define	 MMC_ERASE_SECURE_TRIM2	0x80008000
 
 /* Class 9: I/O mode commands */
 #define	MMC_FAST_IO		39
@@ -300,30 +314,30 @@ struct mmc_request {
 /* Class 9: I/O cards (sd) */
 #define	SD_IO_RW_DIRECT		52
 /* CMD52 arguments */
-#define  SD_ARG_CMD52_READ		(0<<31)
-#define  SD_ARG_CMD52_WRITE		(1<<31)
-#define  SD_ARG_CMD52_FUNC_SHIFT		28
-#define  SD_ARG_CMD52_FUNC_MASK		0x7
-#define  SD_ARG_CMD52_EXCHANGE		(1<<27)
-#define  SD_ARG_CMD52_REG_SHIFT		9
-#define  SD_ARG_CMD52_REG_MASK		0x1ffff
-#define  SD_ARG_CMD52_DATA_SHIFT		0
-#define  SD_ARG_CMD52_DATA_MASK		0xff
-#define  SD_R5_DATA(resp)		((resp)[0] & 0xff)
+#define	 SD_ARG_CMD52_READ		(0 << 31)
+#define	 SD_ARG_CMD52_WRITE		(1 << 31)
+#define	 SD_ARG_CMD52_FUNC_SHIFT	28
+#define	 SD_ARG_CMD52_FUNC_MASK		0x7
+#define	 SD_ARG_CMD52_EXCHANGE		(1 << 27)
+#define	 SD_ARG_CMD52_REG_SHIFT		9
+#define	 SD_ARG_CMD52_REG_MASK		0x1ffff
+#define	 SD_ARG_CMD52_DATA_SHIFT	0
+#define	 SD_ARG_CMD52_DATA_MASK		0xff
+#define	 SD_R5_DATA(resp)		((resp)[0] & 0xff)
 
 #define	SD_IO_RW_EXTENDED	53
 /* CMD53 arguments */
-#define  SD_ARG_CMD53_READ		(0<<31)
-#define  SD_ARG_CMD53_WRITE		(1<<31)
-#define  SD_ARG_CMD53_FUNC_SHIFT		28
-#define  SD_ARG_CMD53_FUNC_MASK		0x7
-#define  SD_ARG_CMD53_BLOCK_MODE		(1<<27)
-#define  SD_ARG_CMD53_INCREMENT		(1<<26)
-#define  SD_ARG_CMD53_REG_SHIFT		9
-#define  SD_ARG_CMD53_REG_MASK		0x1ffff
-#define  SD_ARG_CMD53_LENGTH_SHIFT	0
-#define  SD_ARG_CMD53_LENGTH_MASK	0x1ff
-#define  SD_ARG_CMD53_LENGTH_MAX		64 /* XXX should be 511? */
+#define	 SD_ARG_CMD53_READ		(0 << 31)
+#define	 SD_ARG_CMD53_WRITE		(1 << 31)
+#define	 SD_ARG_CMD53_FUNC_SHIFT	28
+#define	 SD_ARG_CMD53_FUNC_MASK		0x7
+#define	 SD_ARG_CMD53_BLOCK_MODE	(1 << 27)
+#define	 SD_ARG_CMD53_INCREMENT		(1 << 26)
+#define	 SD_ARG_CMD53_REG_SHIFT		9
+#define	 SD_ARG_CMD53_REG_MASK		0x1ffff
+#define	 SD_ARG_CMD53_LENGTH_SHIFT	0
+#define	 SD_ARG_CMD53_LENGTH_MASK	0x1ff
+#define	 SD_ARG_CMD53_LENGTH_MAX	64	/* XXX should be 511? */
 
 /* Class 10: Switch function commands */
 #define	SD_SWITCH_FUNC		6
@@ -346,6 +360,8 @@ struct mmc_request {
 /*
  * EXT_CSD fields
  */
+#define	EXT_CSD_FLUSH_CACHE	32	/* W/E */
+#define	EXT_CSD_CACHE_CTRL	33	/* R/W/E */
 #define	EXT_CSD_EXT_PART_ATTR	52	/* R/W, 2 bytes */
 #define	EXT_CSD_ENH_START_ADDR	136	/* R/W, 4 bytes */
 #define	EXT_CSD_ENH_SIZE_MULT	140	/* R/W, 3 bytes */
@@ -374,16 +390,24 @@ struct mmc_request {
 #define	EXT_CSD_ERASE_TO_MULT	223	/* RO */
 #define	EXT_CSD_ERASE_GRP_SIZE	224	/* RO */
 #define	EXT_CSD_BOOT_SIZE_MULT	226	/* RO */
+#define	EXT_CSD_SEC_FEATURE_SUPPORT 231	/* RO */
 #define	EXT_CSD_PWR_CL_200_195	236	/* RO */
 #define	EXT_CSD_PWR_CL_200_360	237	/* RO */
 #define	EXT_CSD_PWR_CL_52_195_DDR 238	/* RO */
 #define	EXT_CSD_PWR_CL_52_360_DDR 239	/* RO */
+#define	EXT_CSD_CACHE_FLUSH_POLICY 249	/* RO */
 #define	EXT_CSD_GEN_CMD6_TIME	248	/* RO */
+#define	EXT_CSD_CACHE_SIZE	249	/* RO, 4 bytes */
 #define	EXT_CSD_PWR_CL_200_360_DDR 253	/* RO */
 
 /*
  * EXT_CSD field definitions
  */
+#define	EXT_CSD_FLUSH_CACHE_FLUSH	0x01
+#define	EXT_CSD_FLUSH_CACHE_BARRIER	0x02
+
+#define	EXT_CSD_CACHE_CTRL_CACHE_EN	0x01
+
 #define	EXT_CSD_EXT_PART_ATTR_DEFAULT		0x0
 #define	EXT_CSD_EXT_PART_ATTR_SYSTEMCODE	0x1
 #define	EXT_CSD_EXT_PART_ATTR_NPERSISTENT	0x2
@@ -431,8 +455,8 @@ struct mmc_request {
 
 #define	EXT_CSD_HS_TIMING_BC		0
 #define	EXT_CSD_HS_TIMING_HS		1
-#define	EXT_CSD_HS_TIMING_DDR200	2
-#define	EXT_CSD_HS_TIMING_DDR400	3
+#define	EXT_CSD_HS_TIMING_HS200		2
+#define	EXT_CSD_HS_TIMING_HS400		3
 #define	EXT_CSD_HS_TIMING_DRV_STR_SHIFT	4
 
 #define	EXT_CSD_POWER_CLASS_8BIT_MASK	0xf0
@@ -448,7 +472,6 @@ struct mmc_request {
 #define	EXT_CSD_CARD_TYPE_HS200_1_2V	0x0020
 #define	EXT_CSD_CARD_TYPE_HS400_1_8V	0x0040
 #define	EXT_CSD_CARD_TYPE_HS400_1_2V	0x0080
-#define	EXT_CSD_CARD_TYPE_HS400ES	0x0100
 
 #define	EXT_CSD_BUS_WIDTH_1	0
 #define	EXT_CSD_BUS_WIDTH_4	1
@@ -456,6 +479,26 @@ struct mmc_request {
 #define	EXT_CSD_BUS_WIDTH_4_DDR	5
 #define	EXT_CSD_BUS_WIDTH_8_DDR	6
 #define	EXT_CSD_BUS_WIDTH_ES	0x80
+
+#define	EXT_CSD_STROBE_SUPPORT_EN	0x01
+
+#define	EXT_CSD_SEC_FEATURE_SUPPORT_ER_EN	0x01
+#define	EXT_CSD_SEC_FEATURE_SUPPORT_BD_BLK_EN	0x04
+#define	EXT_CSD_SEC_FEATURE_SUPPORT_GB_CL_EN	0x10
+#define	EXT_CSD_SEC_FEATURE_SUPPORT_SANITIZE	0x40
+
+#define	EXT_CSD_CACHE_FLUSH_POLICY_FIFO	0x01
+
+/*
+ * Vendor specific EXT_CSD fields
+ */
+/* SanDisk iNAND */
+#define	EXT_CSD_INAND_CMD38			113
+#define	 EXT_CSD_INAND_CMD38_ERASE		0x00
+#define	 EXT_CSD_INAND_CMD38_TRIM		0x01
+#define	 EXT_CSD_INAND_CMD38_SECURE_ERASE	0x80
+#define	 EXT_CSD_INAND_CMD38_SECURE_TRIM1	0x81
+#define	 EXT_CSD_INAND_CMD38_SECURE_TRIM2	0x82
 
 #define	MMC_TYPE_HS_26_MAX		26000000
 #define	MMC_TYPE_HS_52_MAX		52000000
@@ -497,50 +540,59 @@ struct mmc_request {
 /*
  * SDIO Direct & Extended I/O
  */
-#define SD_IO_RW_WR		(1u << 31)
-#define SD_IO_RW_FUNC(x)	(((x) & 0x7) << 28)
-#define SD_IO_RW_RAW		(1u << 27)
-#define SD_IO_RW_INCR		(1u << 26)
-#define SD_IO_RW_ADR(x)		(((x) & 0x1FFFF) << 9)
-#define SD_IO_RW_DAT(x)		(((x) & 0xFF) << 0)
-#define SD_IO_RW_LEN(x)		(((x) & 0xFF) << 0)
+#define	SD_IO_RW_WR		(1u << 31)
+#define	SD_IO_RW_FUNC(x)	(((x) & 0x7) << 28)
+#define	SD_IO_RW_RAW		(1u << 27)
+#define	SD_IO_RW_INCR		(1u << 26)
+#define	SD_IO_RW_ADR(x)		(((x) & 0x1FFFF) << 9)
+#define	SD_IO_RW_DAT(x)		(((x) & 0xFF) << 0)
+#define	SD_IO_RW_LEN(x)		(((x) & 0xFF) << 0)
 
-#define SD_IOE_RW_LEN(x)	(((x) & 0x1FF) << 0)
-#define SD_IOE_RW_BLK		(1u << 27)
+#define	SD_IOE_RW_LEN(x)	(((x) & 0x1FF) << 0)
+#define	SD_IOE_RW_ADR(x)	(((x) & 0x1FFFF) << 9)
+#define	SD_IOE_RW_INCR		(1u << 26)
+#define	SD_IOE_RW_BLK		(1u << 27)
+#define	SD_IOE_RW_FUNC(x)	(((x) & 0x7) << 28)
+#define	SD_IOE_RW_WR		(1u << 31)
 
 /* Card Common Control Registers (CCCR) */
-#define SD_IO_CCCR_START		0x00000
-#define SD_IO_CCCR_SIZE			0x100
-#define SD_IO_CCCR_FN_ENABLE		0x02
-#define SD_IO_CCCR_FN_READY		0x03
-#define SD_IO_CCCR_INT_ENABLE		0x04
-#define SD_IO_CCCR_INT_PENDING		0x05
-#define SD_IO_CCCR_CTL			0x06
-#define  CCCR_CTL_RES			(1<<3)
-#define SD_IO_CCCR_BUS_WIDTH		0x07
-#define  CCCR_BUS_WIDTH_4		(1<<1)
-#define  CCCR_BUS_WIDTH_1		(1<<0)
-#define SD_IO_CCCR_CARDCAP		0x08
-#define SD_IO_CCCR_CISPTR		0x09 /* XXX 9-10, 10-11, or 9-12 */
-
+#define	SD_IO_CCCR_START		0x00000	/* Offset in F0 address space */
+#define	SD_IO_CCCR_SIZE			0x100	/* Total size of CCCR */
+#define	SD_IO_CCCR_FN_ENABLE		0x02	/* Enabled functions */
+#define	SD_IO_CCCR_FN_READY		0x03	/* Function ready status */
+#define	SD_IO_CCCR_INT_ENABLE		0x04	/* Per-function interrupt enable */
+#define	SD_IO_CCCR_INT_PENDING		0x05	/* Per-function interrupt pending */
+#define	SD_IO_CCCR_CTL			0x06	/* I/O Abort register */
+#define	 CCCR_CTL_RES			(1 << 3) /* Perform SDIO reset */
+#define	SD_IO_CCCR_BUS_WIDTH		0x07	/* Bus Width register */
+#define	 CCCR_BUS_WIDTH_4		(1 << 1)
+#define	 CCCR_BUS_WIDTH_1		(1 << 0)
+#define	SD_IO_CCCR_CARDCAP		0x08	/* SDIO card capabilities */
+#define  CCCR_CC_SMB                    (1 << 1) /* CMD53 block mode support */
+#define	SD_IO_CCCR_CISPTR		0x09    /* 0x09 - 0x0B */
+#define SD_IO_CCCR_FN0_BLKSZ            0x10    /* 0x10 - 0x11 */
 /* Function Basic Registers (FBR) */
-#define SD_IO_FBR_START			0x00100
-#define SD_IO_FBR_SIZE			0x00700
+#define	SD_IO_FBR_START			0x00100 /* Offset in F0 address space */
+#define	SD_IO_FBR_SIZE			0x00700 /* Total size of FBR */
+#define SD_IO_FBR_F_SIZE	       	0x00100 /* Size of each function */
+#define SD_IO_FBR_START_F(n)            (SD_IO_FBR_START + (n-1) * SD_IO_FBR_F_SIZE)
+#define SD_IO_FBR_CIS_OFFSET            0x9  /* Offset of this function's info block within CIS area */
+#define SD_IO_FBR_IOBLKSZ               0x10 /* Block size for CMD53 block mode operations */
 
 /* Card Information Structure (CIS) */
-#define SD_IO_CIS_START			0x01000
-#define SD_IO_CIS_SIZE			0x17000
+#define	SD_IO_CIS_START			0x01000 /* Offset in F0 address space */
+#define	SD_IO_CIS_SIZE			0x17000 /* Total size of CIS */
 
 /* CIS tuple codes (based on PC Card 16) */
-#define SD_IO_CISTPL_VERS_1		0x15
-#define SD_IO_CISTPL_MANFID		0x20
-#define SD_IO_CISTPL_FUNCID		0x21
-#define SD_IO_CISTPL_FUNCE		0x22
-#define SD_IO_CISTPL_END		0xff
+#define	SD_IO_CISTPL_VERS_1		0x15
+#define	SD_IO_CISTPL_MANFID		0x20
+#define	SD_IO_CISTPL_FUNCID		0x21
+#define	SD_IO_CISTPL_FUNCE		0x22
+#define	SD_IO_CISTPL_END		0xff
 
 /* CISTPL_FUNCID codes */
 /* OpenBSD incorrectly defines 0x0c as FUNCTION_WLAN */
-/* #define SDMMC_FUNCTION_WLAN		0x0c */
+/* #define	SDMMC_FUNCTION_WLAN		0x0c */
 
 /* OCR bits */
 
@@ -598,8 +650,7 @@ struct mmc_cid {
 	uint8_t fwrev;
 };
 
-struct mmc_csd
-{
+struct mmc_csd {
 	uint8_t csd_structure;
 	uint8_t spec_vers;
 	uint16_t ccc;
@@ -625,16 +676,14 @@ struct mmc_csd
 	    wp_grp_enable:1;
 };
 
-struct mmc_scr
-{
+struct mmc_scr {
 	unsigned char		sda_vsn;
 	unsigned char		bus_widths;
 #define	SD_SCR_BUS_WIDTH_1	(1 << 0)
 #define	SD_SCR_BUS_WIDTH_4	(1 << 2)
 };
 
-struct mmc_sd_status
-{
+struct mmc_sd_status {
 	uint8_t			bus_width;
 	uint8_t			secured_mode;
 	uint16_t		card_type;
@@ -647,6 +696,19 @@ struct mmc_sd_status
 	uint8_t			erase_offset;
 };
 
+struct mmc_quirk {
+	uint32_t mid;
+#define	MMC_QUIRK_MID_ANY	((uint32_t)-1)
+	uint16_t oid;
+#define	MMC_QUIRK_OID_ANY	((uint16_t)-1)
+	const char *pnm;
+	uint32_t quirks;
+#define	MMC_QUIRK_INAND_CMD38	0x0001
+#define	MMC_QUIRK_BROKEN_TRIM	0x0002
+};
+
+#define	MMC_QUIRKS_FMT		"\020" "\001INAND_CMD38" "\002BROKEN_TRIM"
+
 /*
  * Various MMC/SD constants
  */
@@ -656,6 +718,10 @@ struct mmc_sd_status
 
 #define	MMC_PART_GP_MAX	4
 #define	MMC_PART_MAX	8
+
+#define	MMC_TUNING_MAX		64	/* Maximum tuning iterations */
+#define	MMC_TUNING_LEN		64	/* Size of tuning data */
+#define	MMC_TUNING_LEN_HS200	128	/* Size of tuning data in HS200 mode */
 
 /*
  * Older versions of the MMC standard had a variable sector size.  However,

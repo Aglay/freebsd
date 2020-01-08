@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999 Marcel Moolenaar
  * All rights reserved.
  *
@@ -6,24 +8,22 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer 
- *    in this position and unchanged.
+ *    notice, this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  */
 
 #include <sys/cdefs.h>
@@ -61,6 +61,10 @@ static struct linux_prison lprison0 = {
 static unsigned linux_osd_jail_slot;
 
 SYSCTL_NODE(_compat, OID_AUTO, linux, CTLFLAG_RW, 0, "Linux mode");
+
+int linux_preserve_vstatus = 0;
+SYSCTL_INT(_compat_linux, OID_AUTO, preserve_vstatus, CTLFLAG_RWTUN,
+    &linux_preserve_vstatus, 0, "Preserve VSTATUS termios(4) flag");
 
 static int	linux_set_osname(struct thread *td, char *osname);
 static int	linux_set_osrelease(struct thread *td, char *osrelease);
@@ -146,11 +150,12 @@ linux_map_osrel(char *osrelease, int *osrel)
 		return (EINVAL);
 	osrelease = sep + 1;
 	v2 = strtol(osrelease, &sep, 10);
-	if (osrelease == sep || sep != eosrelease)
+	if (osrelease == sep ||
+	    (sep != eosrelease && (sep + 1 >= eosrelease || *sep != '-')))
 		return (EINVAL);
 
-	v = v0 * 1000000 + v1 * 1000 + v2;
-	if (v < 1000000)
+	v = LINUX_KERNVER(v0, v1, v2);
+	if (v < LINUX_KERNVER(1, 0, 0))
 		return (EINVAL);
 
 	if (osrel != NULL)
@@ -434,7 +439,7 @@ linux_osd_jail_register(void)
 
 	linux_osd_jail_slot =
 	    osd_jail_register(linux_prison_destructor, methods);
-	/* Copy the system linux info to any current prisons. */
+	/* Copy the system Linux info to any current prisons. */
 	sx_slock(&allprison_lock);
 	TAILQ_FOREACH(pr, &allprison, pr_list)
 		linux_alloc_prison(pr, NULL);

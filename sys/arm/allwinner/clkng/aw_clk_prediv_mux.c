@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2017 Emmanuel Vadot <manu@freebsd.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -75,7 +74,19 @@ struct aw_clk_prediv_mux_sc {
 static int
 aw_clk_prediv_mux_init(struct clknode *clk, device_t dev)
 {
-	clknode_init_parent_idx(clk, 0);
+	struct aw_clk_prediv_mux_sc *sc;
+	uint32_t val;
+
+	sc = clknode_get_softc(clk);
+
+	DEVICE_LOCK(clk);
+	READ4(clk, sc->offset, &val);
+	DEVICE_UNLOCK(clk);
+
+	/* Init the current parent */
+	val = (val & sc->mux_mask) >> sc->mux_shift;
+	clknode_init_parent_idx(clk, val);
+
 	return (0);
 }
 
@@ -157,7 +168,10 @@ aw_clk_prediv_mux_register(struct clkdom *clkdom, struct aw_clk_prediv_mux_def *
 	sc->prediv.mask = ((1 << clkdef->prediv.width) - 1) << sc->prediv.shift;
 	sc->prediv.value = clkdef->prediv.value;
 	sc->prediv.cond_shift = clkdef->prediv.cond_shift;
-	sc->prediv.cond_mask = ((1 << clkdef->prediv.cond_width) - 1) << sc->prediv.shift;
+	if (clkdef->prediv.cond_width != 0)
+		sc->prediv.cond_mask = ((1 << clkdef->prediv.cond_width) - 1) << sc->prediv.shift;
+	else
+		sc->prediv.cond_mask = clkdef->prediv.cond_mask;
 	sc->prediv.cond_value = clkdef->prediv.cond_value;
 	sc->prediv.flags = clkdef->prediv.flags;
 

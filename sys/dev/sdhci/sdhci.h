@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2008 Alexander Motin <mav@FreeBSD.org>
  * All rights reserved.
  *
@@ -30,8 +32,8 @@
 
 #include "opt_mmccam.h"
 
-#define	DMA_BLOCK_SIZE	4096
-#define	DMA_BOUNDARY	0	/* DMA reload every 4K */
+/* Macro for sizing the SDMA bounce buffer on the SDMA buffer boundary. */
+#define	SDHCI_SDMA_BNDRY_TO_BBUFSZ(bndry)	(4096 * (1 << bndry))
 
 /* Controller doesn't honor resets unless we touch the clock register */
 #define	SDHCI_QUIRK_CLOCK_BEFORE_RESET			(1 << 0)
@@ -91,6 +93,10 @@
 #define	SDHCI_QUIRK_PRESET_VALUE_BROKEN			(1 << 27)
 /* Controller does not support or the support for ACMD12 is broken. */
 #define	SDHCI_QUIRK_BROKEN_AUTO_STOP			(1 << 28)
+/* Controller supports eMMC HS400 mode if SDHCI_CAN_SDR104 is set. */
+#define	SDHCI_QUIRK_MMC_HS400_IF_CAN_SDR104		(1 << 29)
+/* SDMA boundary in SDHCI_BLOCK_SIZE broken - use front-end supplied value. */
+#define	SDHCI_QUIRK_BROKEN_SDMA_BOUNDARY		(1 << 30)
 
 /*
  * Controller registers
@@ -98,6 +104,14 @@
 #define	SDHCI_DMA_ADDRESS	0x00
 
 #define	SDHCI_BLOCK_SIZE	0x04
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_4K	0x00
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_8K	0x01
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_16K	0x02
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_32K	0x03
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_64K	0x04
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_128K	0x05
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_256K	0x06
+#define	 SDHCI_BLKSZ_SDMA_BNDRY_512K	0x07
 #define	 SDHCI_MAKE_BLKSZ(dma, blksz) (((dma & 0x7) << 12) | (blksz & 0xFFF))
 
 #define	SDHCI_BLOCK_COUNT	0x06
@@ -237,6 +251,11 @@
 #define	SDHCI_HOST_CONTROL2	0x3E
 #define	 SDHCI_CTRL2_PRESET_VALUE	0x8000
 #define	 SDHCI_CTRL2_ASYNC_INTR	0x4000
+#define	 SDHCI_CTRL2_64BIT_ENABLE	0x2000
+#define	 SDHCI_CTRL2_HOST_V4_ENABLE	0x1000
+#define	 SDHCI_CTRL2_CMD23_ENABLE	0x0800
+#define	 SDHCI_CTRL2_ADMA2_LENGTH_MODE	0x0400
+#define	 SDHCI_CTRL2_UHS2_IFACE_ENABLE	0x0100
 #define	 SDHCI_CTRL2_SAMPLING_CLOCK	0x0080
 #define	 SDHCI_CTRL2_EXEC_TUNING	0x0040
 #define	 SDHCI_CTRL2_DRIVER_TYPE_MASK	0x0030
@@ -321,6 +340,8 @@
 #define	SDHCI_SPEC_200		1
 #define	SDHCI_SPEC_300		2
 #define	SDHCI_SPEC_400		3
+#define	SDHCI_SPEC_410		4
+#define	SDHCI_SPEC_420		5
 
 SYSCTL_DECL(_hw_sdhci);
 
@@ -328,6 +349,7 @@ extern u_int sdhci_quirk_clear;
 extern u_int sdhci_quirk_set;
 
 struct sdhci_slot {
+	struct mtx	mtx;		/* Slot mutex */
 	u_int		quirks;		/* Chip specific quirks */
 	u_int		caps;		/* Override SDHCI_CAPABILITIES */
 	u_int		caps2;		/* Override SDHCI_CAPABILITIES2 */
@@ -338,6 +360,10 @@ struct sdhci_slot {
 #define	SDHCI_HAVE_DMA			0x01
 #define	SDHCI_PLATFORM_TRANSFER		0x02
 #define	SDHCI_NON_REMOVABLE		0x04
+#define	SDHCI_TUNING_SUPPORTED		0x08
+#define	SDHCI_TUNING_ENABLED		0x10
+#define	SDHCI_SDR50_NEEDS_TUNING	0x20
+#define	SDHCI_SLOT_EMBEDDED		0x40
 	u_char		version;
 	int		timeout;	/* Transfer timeout */
 	uint32_t	max_clk;	/* Max possible freq */
@@ -346,19 +372,34 @@ struct sdhci_slot {
 	bus_dmamap_t	dmamap;
 	u_char		*dmamem;
 	bus_addr_t	paddr;		/* DMA buffer address */
+	uint32_t	sdma_bbufsz;	/* SDMA bounce buffer size */
+	uint8_t		sdma_boundary;	/* SDMA boundary */
 	struct task	card_task;	/* Card presence check task */
 	struct timeout_task
 			card_delayed_task;/* Card insert delayed task */
 	struct callout	card_poll_callout;/* Card present polling callout */
 	struct callout	timeout_callout;/* Card command/data response timeout */
+	struct callout	retune_callout;	/* Re-tuning mode 1 callout */
 	struct mmc_host host;		/* Host parameters */
 	struct mmc_request *req;	/* Current request */
 	struct mmc_command *curcmd;	/* Current command of current request */
 
+	struct mmc_request *tune_req;	/* Tuning request */
+	struct mmc_command *tune_cmd;	/* Tuning command of tuning request */
+	struct mmc_data *tune_data;	/* Tuning data of tuning command */
+	uint32_t	retune_ticks;	/* Re-tuning callout ticks [hz] */
 	uint32_t	intmask;	/* Current interrupt mask */
 	uint32_t	clock;		/* Current clock freq. */
 	size_t		offset;		/* Data buffer offset */
 	uint8_t		hostctrl;	/* Current host control register */
+	uint8_t		retune_count;	/* Controller re-tuning count [s] */
+	uint8_t		retune_mode;	/* Controller re-tuning mode */
+#define	SDHCI_RETUNE_MODE_1	0x00
+#define	SDHCI_RETUNE_MODE_2	0x01
+#define	SDHCI_RETUNE_MODE_3	0x02
+	uint8_t		retune_req;	/* Re-tuning request status */
+#define	SDHCI_RETUNE_REQ_NEEDED	0x01	/* Re-tuning w/o circuit reset needed */
+#define	SDHCI_RETUNE_REQ_RESET	0x02	/* Re-tuning w/ circuit reset needed */
 	u_char		power;		/* Current power */
 	u_char		bus_busy;	/* Bus busy status */
 	u_char		cmd_done;	/* CMD command part done flag */
@@ -368,15 +409,14 @@ struct sdhci_slot {
 #define	STOP_STARTED		2
 #define	SDHCI_USE_DMA		4	/* Use DMA for this req. */
 #define	PLATFORM_DATA_STARTED	8	/* Data xfer is handled by platform */
-	struct mtx	mtx;		/* Slot mutex */
 
 #ifdef MMCCAM
 	/* CAM stuff */
 	union ccb	*ccb;
-	struct cam_devq		*devq;
-	struct cam_sim		*sim;
-	struct mtx		sim_mtx;
-	u_char			card_present; /* XXX Maybe derive this from elsewhere? */
+	struct cam_devq	*devq;
+	struct cam_sim	*sim;
+	struct mtx	sim_mtx;
+	u_char		card_present;	/* XXX Maybe derive this from elsewhere? */
 #endif
 };
 
@@ -392,7 +432,9 @@ int sdhci_cleanup_slot(struct sdhci_slot *slot);
 int sdhci_generic_suspend(struct sdhci_slot *slot);
 int sdhci_generic_resume(struct sdhci_slot *slot);
 int sdhci_generic_update_ios(device_t brdev, device_t reqdev);
+int sdhci_generic_tune(device_t brdev, device_t reqdev, bool hs400);
 int sdhci_generic_switch_vccq(device_t brdev, device_t reqdev);
+int sdhci_generic_retune(device_t brdev, device_t reqdev, bool reset);
 int sdhci_generic_request(device_t brdev, device_t reqdev,
     struct mmc_request *req);
 int sdhci_generic_get_ro(device_t brdev, device_t reqdev);
@@ -404,9 +446,9 @@ bool sdhci_generic_get_card_present(device_t brdev, struct sdhci_slot *slot);
 void sdhci_generic_set_uhs_timing(device_t brdev, struct sdhci_slot *slot);
 void sdhci_handle_card_present(struct sdhci_slot *slot, bool is_present);
 
-#ifdef MMCCAM
-/* CAM-related */
-void sdhci_cam_start_slot(struct sdhci_slot *slot);
-#endif
+#define	SDHCI_VERSION	2
+
+#define	SDHCI_DEPEND(name)						\
+    MODULE_DEPEND(name, sdhci, SDHCI_VERSION, SDHCI_VERSION, SDHCI_VERSION);
 
 #endif	/* __SDHCI_H__ */

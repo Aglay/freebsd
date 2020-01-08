@@ -3,7 +3,9 @@
 
 /* Protocol structures... */
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1995, 1996 The Internet Software Consortium.
  * All rights reserved.
  *
@@ -169,6 +171,7 @@ struct dhcp_packet {
 #define	DHO_STREETTALK_SERVER		75
 #define	DHO_STREETTALK_DA_SERVER	76
 #define DHO_DHCP_USER_CLASS_ID		77
+#define	DHO_URL				114
 #define	DHO_DOMAIN_SEARCH		119
 #define DHO_CLASSLESS_ROUTES		121
 #define DHO_END				255

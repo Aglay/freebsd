@@ -1,6 +1,8 @@
 /*	$NetBSD: if_cdce.c,v 1.4 2004/10/24 12:50:54 augustss Exp $ */
 
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 1997, 1998, 1999, 2000-2003 Bill Paul <wpaul@windriver.com>
  * Copyright (c) 2003-2005 Craig Boston
  * Copyright (c) 2004 Daniel Hartmeier
@@ -48,11 +50,11 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include <sys/gsb_crc32.h>
+#include <sys/eventhandler.h>
 #include <sys/stdint.h>
 #include <sys/stddef.h>
-#include <sys/param.h>
 #include <sys/queue.h>
-#include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/socket.h>
 #include <sys/kernel.h>
@@ -274,6 +276,7 @@ static const STRUCT_USB_HOST_ID cdce_host_devs[] = {
 	{USB_VPI(USB_VENDOR_SHARP, USB_PRODUCT_SHARP_SLA300, CDCE_FLAG_ZAURUS | CDCE_FLAG_NO_UNION)},
 	{USB_VPI(USB_VENDOR_SHARP, USB_PRODUCT_SHARP_SLC700, CDCE_FLAG_ZAURUS | CDCE_FLAG_NO_UNION)},
 	{USB_VPI(USB_VENDOR_SHARP, USB_PRODUCT_SHARP_SLC750, CDCE_FLAG_ZAURUS | CDCE_FLAG_NO_UNION)},
+	{USB_VPI(USB_VENDOR_REALTEK, USB_PRODUCT_REALTEK_RTL8156, 0)},
 
 	{USB_VENDOR(USB_VENDOR_HUAWEI), USB_IFACE_CLASS(UICLASS_VENDOR),
 		USB_IFACE_SUBCLASS(0x02), USB_IFACE_PROTOCOL(0x16),
@@ -283,6 +286,9 @@ static const STRUCT_USB_HOST_ID cdce_host_devs[] = {
 		USB_DRIVER_INFO(0)},
 	{USB_VENDOR(USB_VENDOR_HUAWEI), USB_IFACE_CLASS(UICLASS_VENDOR),
 		USB_IFACE_SUBCLASS(0x02), USB_IFACE_PROTOCOL(0x76),
+		USB_DRIVER_INFO(0)},
+	{USB_VENDOR(USB_VENDOR_HUAWEI), USB_IFACE_CLASS(UICLASS_VENDOR),
+		USB_IFACE_SUBCLASS(0x03), USB_IFACE_PROTOCOL(0x16),
 		USB_DRIVER_INFO(0)},
 };
 

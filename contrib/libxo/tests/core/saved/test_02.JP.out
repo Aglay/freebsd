@@ -1,6 +1,10 @@
 {
   "top": {
     "data": {
+      "name": "em0",
+      "flags": "0x8843",
+      "name": "em0",
+      "flags": "0x8843",
       "what": "braces",
       "length": "abcdef",
       "fd": -1,
@@ -34,7 +38,7 @@
       "unknown": 1010,
       "min": 15,
       "cur": 20,
-      "max": 30,
+      "max": 125,
       "min": 15,
       "cur": 20,
       "max": 125,

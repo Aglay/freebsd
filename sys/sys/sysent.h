@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1988, 1991 The Regents of the University of California.
  * All rights reserved.
  *
@@ -51,6 +53,9 @@ typedef	void	(*systrace_probe_func_t)(struct syscall_args *,
 		    enum systrace_probe_t, int);
 typedef	void	(*systrace_args_func_t)(int, void *, uint64_t *, int *);
 
+#ifdef _KERNEL
+extern bool			systrace_enabled;
+#endif
 extern systrace_probe_func_t	systrace_probe_func;
 
 struct sysent {			/* system call table */
@@ -90,12 +95,11 @@ struct vnode;
 struct sysentvec {
 	int		sv_size;	/* number of entries */
 	struct sysent	*sv_table;	/* pointer to sysent */
-	u_int		sv_mask;	/* optional mask to index */
 	int		sv_errsize;	/* size of errno translation table */
-	int 		*sv_errtbl;	/* errno translation table */
+	const int 	*sv_errtbl;	/* errno translation table */
 	int		(*sv_transtrap)(int, int);
 					/* translate trap-to-signal mapping */
-	int		(*sv_fixup)(register_t **, struct image_params *);
+	int		(*sv_fixup)(uintptr_t *, struct image_params *);
 					/* stack fixup function */
 	void		(*sv_sendsig)(void (*)(int), struct ksiginfo *, struct __sigset *);
 			    		/* send signal */
@@ -105,16 +109,19 @@ struct sysentvec {
 	int		(*sv_coredump)(struct thread *, struct vnode *, off_t, int);
 					/* function to dump core, or NULL */
 	int		(*sv_imgact_try)(struct image_params *);
+	void		(*sv_stackgap)(struct image_params *, uintptr_t *);
+	int		(*sv_copyout_auxargs)(struct image_params *,
+			    uintptr_t);
 	int		sv_minsigstksz;	/* minimum signal stack size */
-	int		sv_pagesize;	/* pagesize */
 	vm_offset_t	sv_minuser;	/* VM_MIN_ADDRESS */
 	vm_offset_t	sv_maxuser;	/* VM_MAXUSER_ADDRESS */
 	vm_offset_t	sv_usrstack;	/* USRSTACK */
 	vm_offset_t	sv_psstrings;	/* PS_STRINGS */
 	int		sv_stackprot;	/* vm protection for stack */
-	register_t	*(*sv_copyout_strings)(struct image_params *);
+	int		(*sv_copyout_strings)(struct image_params *,
+			    uintptr_t *);
 	void		(*sv_setregs)(struct thread *, struct image_params *,
-			    u_long);
+			    uintptr_t);
 	void		(*sv_fixlimit)(struct rlimit *, int);
 	u_long		*sv_maxssiz;
 	u_int		sv_flags;
@@ -129,6 +136,8 @@ struct sysentvec {
 	void		(*sv_schedtail)(struct thread *);
 	void		(*sv_thread_detach)(struct thread *);
 	int		(*sv_trap)(struct thread *);
+	u_long		*sv_hwcap;	/* Value passed in AT_HWCAP. */
+	u_long		*sv_hwcap2;	/* Value passed in AT_HWCAP2. */
 };
 
 #define	SV_ILP32	0x000100	/* 32-bit executable. */
@@ -138,6 +147,7 @@ struct sysentvec {
 #define	SV_SHP		0x010000	/* Shared page. */
 #define	SV_CAPSICUM	0x020000	/* Force cap_enter() on startup. */
 #define	SV_TIMEKEEP	0x040000	/* Shared page timehands. */
+#define	SV_ASLR		0x080000	/* ASLR allowed. */
 
 #define	SV_ABI_MASK	0xff
 #define	SV_ABI_ERRNO(p, e)	((p)->p_sysent->sv_errsize <= 0 ? e :	\
@@ -156,10 +166,6 @@ struct sysentvec {
 extern struct sysentvec aout_sysvec;
 extern struct sysent sysent[];
 extern const char *syscallnames[];
-
-#if defined(__amd64__)
-extern int i386_read_exec;
-#endif
 
 #define	NO_SYSCALL (-1)
 
@@ -230,34 +236,48 @@ struct syscall_helper_data {
 	int syscall_no;
 	int registered;
 };
-#define SYSCALL_INIT_HELPER(syscallname) {			\
+#define SYSCALL_INIT_HELPER_F(syscallname, flags) {		\
     .new_sysent = {						\
 	.sy_narg = (sizeof(struct syscallname ## _args )	\
 	    / sizeof(register_t)),				\
 	.sy_call = (sy_call_t *)& sys_ ## syscallname,		\
-	.sy_auevent = SYS_AUE_##syscallname			\
+	.sy_auevent = SYS_AUE_##syscallname,			\
+	.sy_flags = (flags)					\
     },								\
     .syscall_no = SYS_##syscallname				\
 }
-#define SYSCALL_INIT_HELPER_COMPAT(syscallname) {		\
+#define SYSCALL_INIT_HELPER_COMPAT_F(syscallname, flags) {	\
     .new_sysent = {						\
 	.sy_narg = (sizeof(struct syscallname ## _args )	\
 	    / sizeof(register_t)),				\
 	.sy_call = (sy_call_t *)& syscallname,			\
-	.sy_auevent = SYS_AUE_##syscallname			\
+	.sy_auevent = SYS_AUE_##syscallname,			\
+	.sy_flags = (flags)					\
     },								\
     .syscall_no = SYS_##syscallname				\
 }
+#define SYSCALL_INIT_HELPER(syscallname)			\
+    SYSCALL_INIT_HELPER_F(syscallname, 0)
+#define SYSCALL_INIT_HELPER_COMPAT(syscallname)			\
+    SYSCALL_INIT_HELPER_COMPAT_F(syscallname, 0)
 #define SYSCALL_INIT_LAST {					\
     .syscall_no = NO_SYSCALL					\
 }
 
-int	syscall_register(int *offset, struct sysent *new_sysent,
-	    struct sysent *old_sysent, int flags);
-int	syscall_deregister(int *offset, struct sysent *old_sysent);
 int	syscall_module_handler(struct module *mod, int what, void *arg);
 int	syscall_helper_register(struct syscall_helper_data *sd, int flags);
 int	syscall_helper_unregister(struct syscall_helper_data *sd);
+/* Implementation, exposed for COMPAT code */
+int	kern_syscall_register(struct sysent *sysents, int *offset,
+	    struct sysent *new_sysent, struct sysent *old_sysent, int flags);
+int	kern_syscall_deregister(struct sysent *sysents, int offset,
+	    const struct sysent *old_sysent);
+int	kern_syscall_module_handler(struct sysent *sysents,
+	    struct module *mod, int what, void *arg);
+int	kern_syscall_helper_register(struct sysent *sysents,
+	    struct syscall_helper_data *sd, int flags);
+int	kern_syscall_helper_unregister(struct sysent *sysents,
+	    struct syscall_helper_data *sd);
 
 struct proc;
 const char *syscallname(struct proc *p, u_int code);
@@ -268,8 +288,26 @@ struct nosys_args;
 int	lkmnosys(struct thread *, struct nosys_args *);
 int	lkmressys(struct thread *, struct nosys_args *);
 
-int	syscall_thread_enter(struct thread *td, struct sysent *se);
-void	syscall_thread_exit(struct thread *td, struct sysent *se);
+int	_syscall_thread_enter(struct thread *td, struct sysent *se);
+void	_syscall_thread_exit(struct thread *td, struct sysent *se);
+
+static inline int
+syscall_thread_enter(struct thread *td, struct sysent *se)
+{
+
+	if (__predict_true((se->sy_thrcnt & SY_THR_STATIC) != 0))
+		return (0);
+	return (_syscall_thread_enter(td, se));
+}
+
+static inline void
+syscall_thread_exit(struct thread *td, struct sysent *se)
+{
+
+	if (__predict_true((se->sy_thrcnt & SY_THR_STATIC) != 0))
+		return;
+	_syscall_thread_exit(td, se);
+}
 
 int shared_page_alloc(int size, int align);
 int shared_page_fill(int size, int align, const void *data);

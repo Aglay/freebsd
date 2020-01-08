@@ -22,7 +22,7 @@
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
- * Copyright (c) 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2015, 2018 by Delphix. All rights reserved.
  * Copyright 2016 Joyent, Inc.
  * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>
  */
@@ -47,22 +47,13 @@
 #include "libzfs_impl.h"
 
 #define	ZDIFF_SNAPDIR		"/.zfs/snapshot/"
-#define	ZDIFF_SHARESDIR 	"/.zfs/shares/"
+#define	ZDIFF_SHARESDIR		"/.zfs/shares/"
 #define	ZDIFF_PREFIX		"zfs-diff-%d"
 
 #define	ZDIFF_ADDED	'+'
 #define	ZDIFF_MODIFIED	'M'
 #define	ZDIFF_REMOVED	'-'
 #define	ZDIFF_RENAMED	'R'
-
-static boolean_t
-do_name_cmp(const char *fpath, const char *tpath)
-{
-	char *fname, *tname;
-	fname = strrchr(fpath, '/') + 1;
-	tname = strrchr(tpath, '/') + 1;
-	return (strcmp(fname, tname) == 0);
-}
 
 typedef struct differ_info {
 	zfs_handle_t *zhp;
@@ -110,7 +101,10 @@ get_stats_for_obj(differ_info_t *di, const char *dsname, uint64_t obj,
 		return (0);
 	}
 
-	if (di->zerr == EPERM) {
+	if (di->zerr == ESTALE) {
+		(void) snprintf(pn, maxlen, "(on_delete_queue)");
+		return (0);
+	} else if (di->zerr == EPERM) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
 		    dgettext(TEXT_DOMAIN,
 		    "The sys_config privilege or diff delegated permission "
@@ -120,7 +114,7 @@ get_stats_for_obj(differ_info_t *di, const char *dsname, uint64_t obj,
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
 		    dgettext(TEXT_DOMAIN,
 		    "Unable to determine path or stats for "
-		    "object %lld in %s"), obj, dsname);
+		    "object %jd in %s"), (uintmax_t)obj, dsname);
 		return (-1);
 	}
 }
@@ -262,7 +256,6 @@ static int
 write_inuse_diffs_one(FILE *fp, differ_info_t *di, uint64_t dobj)
 {
 	struct zfs_stat fsb, tsb;
-	boolean_t same_name;
 	mode_t fmode, tmode;
 	char fobjname[MAXPATHLEN], tobjname[MAXPATHLEN];
 	int fobjerr, tobjerr;
@@ -323,7 +316,6 @@ write_inuse_diffs_one(FILE *fp, differ_info_t *di, uint64_t dobj)
 
 	if (fmode != tmode && fsb.zs_gen == tsb.zs_gen)
 		tsb.zs_gen++;	/* Force a generational difference */
-	same_name = do_name_cmp(fobjname, tobjname);
 
 	/* Simple modification or no change */
 	if (fsb.zs_gen == tsb.zs_gen) {
@@ -334,7 +326,7 @@ write_inuse_diffs_one(FILE *fp, differ_info_t *di, uint64_t dobj)
 		if (change) {
 			print_link_change(fp, di, change,
 			    change > 0 ? fobjname : tobjname, &tsb);
-		} else if (same_name) {
+		} else if (strcmp(fobjname, tobjname) == 0) {
 			print_file(fp, di, ZDIFF_MODIFIED, fobjname, &tsb);
 		} else {
 			print_rename(fp, di, fobjname, tobjname, &tsb);
@@ -369,12 +361,12 @@ describe_free(FILE *fp, differ_info_t *di, uint64_t object, char *namebuf,
 
 	if (get_stats_for_obj(di, di->fromsnap, object, namebuf,
 	    maxlen, &sb) != 0) {
-		/* Let it slide, if in the delete queue on from side */
-		if (di->zerr == ENOENT && sb.zs_links == 0) {
-			di->zerr = 0;
-			return (0);
-		}
 		return (-1);
+	}
+	/* Don't print if in the delete queue on from side */
+	if (di->zerr == ESTALE) {
+		di->zerr = 0;
+		return (0);
 	}
 
 	print_file(fp, di, ZDIFF_REMOVED, namebuf, &sb);
@@ -414,8 +406,8 @@ write_free_diffs(FILE *fp, differ_info_t *di, dmu_diff_record_t *dr)
 		} else {
 			(void) snprintf(di->errbuf, sizeof (di->errbuf),
 			    dgettext(TEXT_DOMAIN,
-			    "next allocated object (> %lld) find failure"),
-			    zc.zc_obj);
+			    "next allocated object (> %jd) find failure"),
+			    (uintmax_t)zc.zc_obj);
 			di->zerr = errno;
 			break;
 		}
@@ -480,7 +472,7 @@ differ(void *arg)
 	if (err)
 		return ((void *)-1);
 	if (di->zerr) {
-		ASSERT(di->zerr == EINVAL);
+		ASSERT(di->zerr == EPIPE);
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
 		    dgettext(TEXT_DOMAIN,
 		    "Internal error: bad data from diff IOCTL"));

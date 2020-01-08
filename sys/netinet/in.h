@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -167,7 +169,7 @@ __END_DECLS
 #define	IPPROTO_BLT		30		/* Bulk Data Transfer */
 #define	IPPROTO_NSP		31		/* Network Services */
 #define	IPPROTO_INP		32		/* Merit Internodal */
-#define	IPPROTO_SEP		33		/* Sequential Exchange */
+#define	IPPROTO_DCCP		33		/* Datagram Congestion Control Protocol */
 #define	IPPROTO_3PC		34		/* Third Party Connect */
 #define	IPPROTO_IDPR		35		/* InterDomain Policy Routing */
 #define	IPPROTO_XTP		36		/* XTP */
@@ -289,7 +291,7 @@ __END_DECLS
  * if you trust the remote host to restrict these ports.
  *
  * The default range of ports and the high range can be changed by
- * sysctl(3).  (net.inet.ip.port{hi,low}{first,last}_auto)
+ * sysctl(3).  (net.inet.ip.portrange.{hi,low,}{first,last})
  *
  * Changing those values has bad security implications if you are
  * using a stateless firewall that is allowing packets outside of that
@@ -503,13 +505,9 @@ __END_DECLS
 #define	IP_DEFAULT_MULTICAST_LOOP 1	/* normally hear sends if a member  */
 
 /*
- * The imo_membership vector for each socket is now dynamically allocated at
- * run-time, bounded by USHRT_MAX, and is reallocated when needed, sized
- * according to a power-of-two increment.
+ * Limit for IPv4 multicast memberships
  */
-#define	IP_MIN_MEMBERSHIPS	31
 #define	IP_MAX_MEMBERSHIPS	4095
-#define	IP_MAX_SOURCE_FILTER	1024	/* XXX to be unused */
 
 /*
  * Default resource limits for IPv4 multicast source filtering.

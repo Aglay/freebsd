@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1998 Doug Rabson
  * All rights reserved.
  *
@@ -39,6 +41,15 @@ extern	int	szsigcode32;
 #ifdef __powerpc64__
 extern	char	sigcode64[], sigcode64_elfv2[];
 extern	int	szsigcode64, szsigcode64_elfv2;
+
+extern	uint64_t	*vm_page_dump;
+extern	int	vm_page_dump_size;
+
+struct	dumperinfo;
+int	minidumpsys(struct dumperinfo *);
+int	is_dumpable(vm_paddr_t);
+void	dump_add_page(vm_paddr_t);
+void	dump_drop_page(vm_paddr_t);
 #endif
 
 extern	long	Maxmem;
@@ -61,6 +72,7 @@ void	decr_init(void);
 void	decr_ap_init(void);
 void	decr_tc_init(void);
 
+void	cpu_feature_setup(void);
 void	cpu_setup(u_int);
 
 struct	trapframe;

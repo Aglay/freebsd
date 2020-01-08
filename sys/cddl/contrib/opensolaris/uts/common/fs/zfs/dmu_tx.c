@@ -99,7 +99,7 @@ dmu_tx_hold_dnode_impl(dmu_tx_t *tx, dnode_t *dn, enum dmu_tx_hold_type type,
 	dmu_tx_hold_t *txh;
 
 	if (dn != NULL) {
-		(void) refcount_add(&dn->dn_holds, tx);
+		(void) zfs_refcount_add(&dn->dn_holds, tx);
 		if (tx->tx_txg != 0) {
 			mutex_enter(&dn->dn_mtx);
 			/*
@@ -109,7 +109,7 @@ dmu_tx_hold_dnode_impl(dmu_tx_t *tx, dnode_t *dn, enum dmu_tx_hold_type type,
 			 */
 			ASSERT(dn->dn_assigned_txg == 0);
 			dn->dn_assigned_txg = tx->tx_txg;
-			(void) refcount_add(&dn->dn_tx_holds, tx);
+			(void) zfs_refcount_add(&dn->dn_tx_holds, tx);
 			mutex_exit(&dn->dn_mtx);
 		}
 	}
@@ -117,8 +117,8 @@ dmu_tx_hold_dnode_impl(dmu_tx_t *tx, dnode_t *dn, enum dmu_tx_hold_type type,
 	txh = kmem_zalloc(sizeof (dmu_tx_hold_t), KM_SLEEP);
 	txh->txh_tx = tx;
 	txh->txh_dnode = dn;
-	refcount_create(&txh->txh_space_towrite);
-	refcount_create(&txh->txh_memory_tohold);
+	zfs_refcount_create(&txh->txh_space_towrite);
+	zfs_refcount_create(&txh->txh_memory_tohold);
 	txh->txh_type = type;
 	txh->txh_arg1 = arg1;
 	txh->txh_arg2 = arg2;
@@ -213,9 +213,9 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 	if (len == 0)
 		return;
 
-	(void) refcount_add_many(&txh->txh_space_towrite, len, FTAG);
+	(void) zfs_refcount_add_many(&txh->txh_space_towrite, len, FTAG);
 
-	if (refcount_count(&txh->txh_space_towrite) > 2 * DMU_MAX_ACCESS)
+	if (zfs_refcount_count(&txh->txh_space_towrite) > 2 * DMU_MAX_ACCESS)
 		err = SET_ERROR(EFBIG);
 
 	if (dn == NULL)
@@ -280,7 +280,8 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 static void
 dmu_tx_count_dnode(dmu_tx_hold_t *txh)
 {
-	(void) refcount_add_many(&txh->txh_space_towrite, DNODE_SIZE, FTAG);
+	(void) zfs_refcount_add_many(&txh->txh_space_towrite, DNODE_MIN_SIZE,
+	    FTAG);
 }
 
 void
@@ -298,6 +299,23 @@ dmu_tx_hold_write(dmu_tx_t *tx, uint64_t object, uint64_t off, int len)
 		dmu_tx_count_write(txh, off, len);
 		dmu_tx_count_dnode(txh);
 	}
+}
+
+void
+dmu_tx_hold_remap_l1indirect(dmu_tx_t *tx, uint64_t object)
+{
+	dmu_tx_hold_t *txh;
+
+	ASSERT(tx->tx_txg == 0);
+	txh = dmu_tx_hold_object_impl(tx, tx->tx_objset,
+	    object, THT_WRITE, 0, 0);
+	if (txh == NULL)
+		return;
+
+	dnode_t *dn = txh->txh_dnode;
+	(void) zfs_refcount_add_many(&txh->txh_space_towrite,
+	    1ULL << dn->dn_indblkshift, FTAG);
+	dmu_tx_count_dnode(txh);
 }
 
 void
@@ -403,7 +421,7 @@ dmu_tx_hold_free_impl(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 				return;
 			}
 
-			(void) refcount_add_many(&txh->txh_memory_tohold,
+			(void) zfs_refcount_add_many(&txh->txh_memory_tohold,
 			    1 << dn->dn_indblkshift, FTAG);
 
 			err = dmu_tx_check_ioerr(zio, dn, 1, i);
@@ -464,7 +482,7 @@ dmu_tx_hold_zap_impl(dmu_tx_hold_t *txh, const char *name)
 	 *    - 2 blocks for possibly split leaves,
 	 *    - 2 grown ptrtbl blocks
 	 */
-	(void) refcount_add_many(&txh->txh_space_towrite,
+	(void) zfs_refcount_add_many(&txh->txh_space_towrite,
 	    MZAP_MAX_BLKSZ, FTAG);
 
 	if (dn == NULL)
@@ -554,7 +572,7 @@ dmu_tx_hold_space(dmu_tx_t *tx, uint64_t space)
 	txh = dmu_tx_hold_object_impl(tx, tx->tx_objset,
 	    DMU_NEW_OBJECT, THT_SPACE, space, 0);
 
-	(void) refcount_add_many(&txh->txh_space_towrite, space, FTAG);
+	(void) zfs_refcount_add_many(&txh->txh_space_towrite, space, FTAG);
 }
 
 #ifdef ZFS_DEBUG
@@ -806,8 +824,8 @@ dmu_tx_delay(dmu_tx_t *tx, uint64_t dirty)
 		continue;
 	mutex_exit(&curthread->t_delay_lock);
 #else
-	pause_sbt("dmu_tx_delay", wakeup * SBT_1NS,
-	    zfs_delay_resolution_ns * SBT_1NS, C_ABSOLUTE);
+	pause_sbt("dmu_tx_delay", nstosbt(wakeup),
+	    nstosbt(zfs_delay_resolution_ns), C_ABSOLUTE);
 #endif
 #else
 	hrtime_t delta = wakeup - gethrtime();
@@ -858,7 +876,7 @@ dmu_tx_delay(dmu_tx_t *tx, uint64_t dirty)
  * decreasing performance.
  */
 static int
-dmu_tx_try_assign(dmu_tx_t *tx, txg_how_t txg_how)
+dmu_tx_try_assign(dmu_tx_t *tx, uint64_t txg_how)
 {
 	spa_t *spa = tx->tx_pool->dp_spa;
 
@@ -878,13 +896,13 @@ dmu_tx_try_assign(dmu_tx_t *tx, txg_how_t txg_how)
 		 * of the failuremode setting.
 		 */
 		if (spa_get_failmode(spa) == ZIO_FAILURE_MODE_CONTINUE &&
-		    txg_how != TXG_WAIT)
+		    !(txg_how & TXG_WAIT))
 			return (SET_ERROR(EIO));
 
 		return (SET_ERROR(ERESTART));
 	}
 
-	if (!tx->tx_waited &&
+	if (!tx->tx_dirty_delayed &&
 	    dsl_pool_need_dirty_delay(tx->tx_pool)) {
 		tx->tx_wait_dirty = B_TRUE;
 		return (SET_ERROR(ERESTART));
@@ -914,11 +932,11 @@ dmu_tx_try_assign(dmu_tx_t *tx, txg_how_t txg_how)
 			if (dn->dn_assigned_txg == 0)
 				dn->dn_assigned_txg = tx->tx_txg;
 			ASSERT3U(dn->dn_assigned_txg, ==, tx->tx_txg);
-			(void) refcount_add(&dn->dn_tx_holds, tx);
+			(void) zfs_refcount_add(&dn->dn_tx_holds, tx);
 			mutex_exit(&dn->dn_mtx);
 		}
-		towrite += refcount_count(&txh->txh_space_towrite);
-		tohold += refcount_count(&txh->txh_memory_tohold);
+		towrite += zfs_refcount_count(&txh->txh_space_towrite);
+		tohold += zfs_refcount_count(&txh->txh_memory_tohold);
 	}
 
 	/* needed allocation: worst-case estimate of write space */
@@ -958,7 +976,7 @@ dmu_tx_unassign(dmu_tx_t *tx)
 		mutex_enter(&dn->dn_mtx);
 		ASSERT3U(dn->dn_assigned_txg, ==, tx->tx_txg);
 
-		if (refcount_remove(&dn->dn_tx_holds, tx) == 0) {
+		if (zfs_refcount_remove(&dn->dn_tx_holds, tx) == 0) {
 			dn->dn_assigned_txg = 0;
 			cv_broadcast(&dn->dn_notxholds);
 		}
@@ -972,41 +990,44 @@ dmu_tx_unassign(dmu_tx_t *tx)
 }
 
 /*
- * Assign tx to a transaction group.  txg_how can be one of:
+ * Assign tx to a transaction group; txg_how is a bitmask:
  *
- * (1)	TXG_WAIT.  If the current open txg is full, waits until there's
- *	a new one.  This should be used when you're not holding locks.
- *	It will only fail if we're truly out of space (or over quota).
+ * If TXG_WAIT is set and the currently open txg is full, this function
+ * will wait until there's a new txg. This should be used when no locks
+ * are being held. With this bit set, this function will only fail if
+ * we're truly out of space (or over quota).
  *
- * (2)	TXG_NOWAIT.  If we can't assign into the current open txg without
- *	blocking, returns immediately with ERESTART.  This should be used
- *	whenever you're holding locks.  On an ERESTART error, the caller
- *	should drop locks, do a dmu_tx_wait(tx), and try again.
+ * If TXG_WAIT is *not* set and we can't assign into the currently open
+ * txg without blocking, this function will return immediately with
+ * ERESTART. This should be used whenever locks are being held.  On an
+ * ERESTART error, the caller should drop all locks, call dmu_tx_wait(),
+ * and try again.
  *
- * (3)  TXG_WAITED.  Like TXG_NOWAIT, but indicates that dmu_tx_wait()
- *      has already been called on behalf of this operation (though
- *      most likely on a different tx).
+ * If TXG_NOTHROTTLE is set, this indicates that this tx should not be
+ * delayed due on the ZFS Write Throttle (see comments in dsl_pool.c for
+ * details on the throttle). This is used by the VFS operations, after
+ * they have already called dmu_tx_wait() (though most likely on a
+ * different tx).
  */
 int
-dmu_tx_assign(dmu_tx_t *tx, txg_how_t txg_how)
+dmu_tx_assign(dmu_tx_t *tx, uint64_t txg_how)
 {
 	int err;
 
 	ASSERT(tx->tx_txg == 0);
-	ASSERT(txg_how == TXG_WAIT || txg_how == TXG_NOWAIT ||
-	    txg_how == TXG_WAITED);
+	ASSERT0(txg_how & ~(TXG_WAIT | TXG_NOTHROTTLE));
 	ASSERT(!dsl_pool_sync_context(tx->tx_pool));
 
 	/* If we might wait, we must not hold the config lock. */
-	ASSERT(txg_how != TXG_WAIT || !dsl_pool_config_held(tx->tx_pool));
+	IMPLY((txg_how & TXG_WAIT), !dsl_pool_config_held(tx->tx_pool));
 
-	if (txg_how == TXG_WAITED)
-		tx->tx_waited = B_TRUE;
+	if ((txg_how & TXG_NOTHROTTLE))
+		tx->tx_dirty_delayed = B_TRUE;
 
 	while ((err = dmu_tx_try_assign(tx, txg_how)) != 0) {
 		dmu_tx_unassign(tx);
 
-		if (err != ERESTART || txg_how != TXG_WAIT)
+		if (err != ERESTART || !(txg_how & TXG_WAIT))
 			return (err);
 
 		dmu_tx_wait(tx);
@@ -1043,12 +1064,12 @@ dmu_tx_wait(dmu_tx_t *tx)
 		tx->tx_wait_dirty = B_FALSE;
 
 		/*
-		 * Note: setting tx_waited only has effect if the caller
-		 * used TX_WAIT.  Otherwise they are going to destroy
-		 * this tx and try again.  The common case, zfs_write(),
-		 * uses TX_WAIT.
+		 * Note: setting tx_dirty_delayed only has effect if the
+		 * caller used TX_WAIT.  Otherwise they are going to
+		 * destroy this tx and try again.  The common case,
+		 * zfs_write(), uses TX_WAIT.
 		 */
-		tx->tx_waited = B_TRUE;
+		tx->tx_dirty_delayed = B_TRUE;
 	} else if (spa_suspended(spa) || tx->tx_lasttried_txg == 0) {
 		/*
 		 * If the pool is suspended we need to wait until it
@@ -1071,7 +1092,12 @@ dmu_tx_wait(dmu_tx_t *tx)
 		mutex_exit(&dn->dn_mtx);
 		tx->tx_needassign_txh = NULL;
 	} else {
-		txg_wait_open(tx->tx_pool, tx->tx_lasttried_txg + 1);
+		/*
+		 * If we have a lot of dirty data just wait until we sync
+		 * out a TXG at which point we'll hopefully have synced
+		 * a portion of the changes.
+		 */
+		txg_wait_synced(dp, spa_last_synced_txg(spa) + 1);
 	}
 }
 
@@ -1084,10 +1110,10 @@ dmu_tx_destroy(dmu_tx_t *tx)
 		dnode_t *dn = txh->txh_dnode;
 
 		list_remove(&tx->tx_holds, txh);
-		refcount_destroy_many(&txh->txh_space_towrite,
-		    refcount_count(&txh->txh_space_towrite));
-		refcount_destroy_many(&txh->txh_memory_tohold,
-		    refcount_count(&txh->txh_memory_tohold));
+		zfs_refcount_destroy_many(&txh->txh_space_towrite,
+		    zfs_refcount_count(&txh->txh_space_towrite));
+		zfs_refcount_destroy_many(&txh->txh_memory_tohold,
+		    zfs_refcount_count(&txh->txh_memory_tohold));
 		kmem_free(txh, sizeof (dmu_tx_hold_t));
 		if (dn != NULL)
 			dnode_rele(dn, tx);
@@ -1117,7 +1143,7 @@ dmu_tx_commit(dmu_tx_t *tx)
 		mutex_enter(&dn->dn_mtx);
 		ASSERT3U(dn->dn_assigned_txg, ==, tx->tx_txg);
 
-		if (refcount_remove(&dn->dn_tx_holds, tx) == 0) {
+		if (zfs_refcount_remove(&dn->dn_tx_holds, tx) == 0) {
 			dn->dn_assigned_txg = 0;
 			cv_broadcast(&dn->dn_notxholds);
 		}
@@ -1227,11 +1253,13 @@ dmu_tx_sa_registration_hold(sa_os_t *sa, dmu_tx_t *tx)
 void
 dmu_tx_hold_spill(dmu_tx_t *tx, uint64_t object)
 {
-	dmu_tx_hold_t *txh = dmu_tx_hold_object_impl(tx,
-	    tx->tx_objset, object, THT_SPILL, 0, 0);
+	dmu_tx_hold_t *txh;
 
-	(void) refcount_add_many(&txh->txh_space_towrite,
-	    SPA_OLD_MAXBLOCKSIZE, FTAG);
+	txh = dmu_tx_hold_object_impl(tx, tx->tx_objset, object,
+	    THT_SPILL, 0, 0);
+	if (txh != NULL)
+		(void) zfs_refcount_add_many(&txh->txh_space_towrite,
+		    SPA_OLD_MAXBLOCKSIZE, FTAG);
 }
 
 void
@@ -1255,7 +1283,7 @@ dmu_tx_hold_sa_create(dmu_tx_t *tx, int attrsize)
 
 	dmu_tx_sa_registration_hold(sa, tx);
 
-	if (attrsize <= DN_MAX_BONUSLEN && !sa->sa_force_spill)
+	if (attrsize <= DN_OLD_MAX_BONUSLEN && !sa->sa_force_spill)
 		return;
 
 	(void) dmu_tx_hold_object_impl(tx, tx->tx_objset, DMU_NEW_OBJECT,

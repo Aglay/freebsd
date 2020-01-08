@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2003 Constantin S. Svintsoff <kostik@iclub.nsu.ru>
  *
  * Redistribution and use in source and binary forms, with or without
@@ -89,7 +91,7 @@ realpath1(const char *path, char *resolved)
 		 */
 		p = strchr(left, '/');
 
-		next_token_len = p != NULL ? p - left : left_len;
+		next_token_len = p != NULL ? (size_t)(p - left) : left_len;
 		memcpy(next_token, left, next_token_len);
 		next_token[next_token_len] = '\0';
 
@@ -144,7 +146,7 @@ realpath1(const char *path, char *resolved)
 				return (NULL);
 			}
 			slen = readlink(resolved, symlink, sizeof(symlink));
-			if (slen <= 0 || slen >= sizeof(symlink)) {
+			if (slen <= 0 || slen >= (ssize_t)sizeof(symlink)) {
 				if (slen < 0)
 					; /* keep errno from readlink(2) call */
 				else if (slen == 0)
@@ -171,7 +173,7 @@ realpath1(const char *path, char *resolved)
 			 */
 			if (p != NULL) {
 				if (symlink[slen - 1] != '/') {
-					if (slen + 1 >= sizeof(symlink)) {
+					if (slen + 1 >= (ssize_t)sizeof(symlink)) {
 						errno = ENAMETOOLONG;
 						return (NULL);
 					}

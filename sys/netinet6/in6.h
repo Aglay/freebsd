@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
  * All rights reserved.
  *
@@ -521,11 +523,8 @@ struct route_in6 {
 #define IPV6_DEFAULT_MULTICAST_LOOP 1	/* normally hear sends if a member */
 
 /*
- * The im6o_membership vector for each socket is now dynamically allocated at
- * run-time, bounded by USHRT_MAX, and is reallocated when needed, sized
- * according to a power-of-two increment.
+ * Limit for IPv6 multicast memberships
  */
-#define	IPV6_MIN_MEMBERSHIPS	31
 #define	IPV6_MAX_MEMBERSHIPS	4095
 
 /*
@@ -640,7 +639,9 @@ struct ip6_mtuinfo {
 #define	IPV6CTL_INTRQMAXLEN	51	/* max length of IPv6 netisr queue */
 #define	IPV6CTL_INTRDQMAXLEN	52	/* max length of direct IPv6 netisr
 					 * queue */
-#define	IPV6CTL_MAXID		53
+#define	IPV6CTL_MAXFRAGSPERPACKET	53 /* Max fragments per packet */
+#define	IPV6CTL_MAXFRAGBUCKETSIZE	54 /* Max reassembly queues per bucket */
+#define	IPV6CTL_MAXID		55
 #endif /* __BSD_VISIBLE */
 
 /*
@@ -656,6 +657,7 @@ struct ip6_mtuinfo {
 #define	M_LOOP			M_PROTO6
 #define	M_AUTHIPDGM		M_PROTO7
 #define	M_RTALERT_MLD		M_PROTO8
+#define	M_FRAGMENTED		M_PROTO9	/* contained fragment header */
 
 #ifdef _KERNEL
 struct cmsghdr;

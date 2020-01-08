@@ -2,6 +2,8 @@
 /*	$NetBSD: msdosfs_denode.c,v 1.28 1998/02/10 14:10:00 mrg Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1994, 1995, 1997 Wolfgang Solfrank.
  * Copyright (C) 1994, 1995, 1997 TooLs GmbH.
  * All rights reserved.
@@ -77,7 +79,7 @@ de_vncmpf(struct vnode *vp, void *arg)
 
 	a = arg;
 	de = VTODE(vp);
-	return (de->de_inode != *a);
+	return (de->de_inode != *a) || (de->de_refcnt <= 0);
 }
 
 /*
@@ -122,8 +124,9 @@ deget(struct msdosfsmount *pmp, u_long dirclust, u_long diroffset,
 	 * address of "." entry. For root dir (if not FAT32) use cluster
 	 * MSDOSFSROOT, offset MSDOSFSROOT_OFS
 	 *
-	 * NOTE: The check for de_refcnt > 0 below insures the denode being
-	 * examined does not represent an unlinked but still open file.
+	 * NOTE: de_vncmpf will explicitly skip any denodes that do not have
+	 * a de_refcnt > 0.  This insures that that we do not attempt to use
+	 * a denode that represents an unlinked but still open file.
 	 * These files are not to be accessible even when the directory
 	 * entry that represented the file happens to be reused while the
 	 * deleted file is still open.
@@ -227,7 +230,7 @@ deget(struct msdosfsmount *pmp, u_long dirclust, u_long diroffset,
 			 * Arrange for vput() to just forget about it.
 			 */
 			ldep->de_Name[0] = SLOT_DELETED;
-
+			vgone(nvp);
 			vput(nvp);
 			*depp = NULL;
 			return (error);
@@ -295,7 +298,7 @@ deupdat(struct denode *dep, int waitfor)
 		    DE_MODIFIED);
 		return (0);
 	}
-	getnanotime(&ts);
+	vfs_timestamp(&ts);
 	DETIMES(dep, &ts, &ts, &ts);
 	if ((dep->de_flag & DE_MODIFIED) == 0 && waitfor == 0)
 		return (0);
@@ -381,7 +384,7 @@ detrunc(struct denode *dep, u_long length, int flags, struct ucred *cred)
 		dep->de_StartCluster = 0;
 		eofentry = ~0;
 	} else {
-		error = pcbmap(dep, de_clcount(pmp, length) - 1, 0, 
+		error = pcbmap(dep, de_clcount(pmp, length) - 1, 0,
 			       &eofentry, 0);
 		if (error) {
 #ifdef MSDOSFS_DEBUG
@@ -403,19 +406,21 @@ detrunc(struct denode *dep, u_long length, int flags, struct ucred *cred)
 			bn = cntobn(pmp, eofentry);
 			error = bread(pmp->pm_devvp, bn, pmp->pm_bpcluster,
 			    NOCRED, &bp);
-			if (error) {
-				brelse(bp);
-#ifdef MSDOSFS_DEBUG
-				printf("detrunc(): bread fails %d\n", error);
-#endif
-				return (error);
-			}
-			memset(bp->b_data + boff, 0, pmp->pm_bpcluster - boff);
-			if (flags & IO_SYNC)
-				bwrite(bp);
-			else
-				bdwrite(bp);
+		} else {
+			error = bread(DETOV(dep), de_cluster(pmp, length),
+			    pmp->pm_bpcluster, cred, &bp);
 		}
+		if (error) {
+#ifdef MSDOSFS_DEBUG
+			printf("detrunc(): bread fails %d\n", error);
+#endif
+			return (error);
+		}
+		memset(bp->b_data + boff, 0, pmp->pm_bpcluster - boff);
+		if ((flags & IO_SYNC) != 0)
+			bwrite(bp);
+		else
+			bdwrite(bp);
 	}
 
 	/*
@@ -425,7 +430,7 @@ detrunc(struct denode *dep, u_long length, int flags, struct ucred *cred)
 	dep->de_FileSize = length;
 	if (!isadir)
 		dep->de_flag |= DE_UPDATE | DE_MODIFIED;
-	allerror = vtruncbuf(DETOV(dep), cred, length, pmp->pm_bpcluster);
+	allerror = vtruncbuf(DETOV(dep), length, pmp->pm_bpcluster);
 #ifdef MSDOSFS_DEBUG
 	if (allerror)
 		printf("detrunc(): vtruncbuf error %d\n", allerror);
@@ -548,10 +553,6 @@ msdosfs_reclaim(struct vop_reclaim_args *ap)
 #endif
 
 	/*
-	 * Destroy the vm object and flush associated pages.
-	 */
-	vnode_destroy_vobject(vp);
-	/*
 	 * Remove the denode from its hash chain.
 	 */
 	vfs_hash_remove(vp);
@@ -590,8 +591,9 @@ msdosfs_inactive(struct vop_inactive_args *ap)
 	 * as empty.  (This may not be necessary for the dos filesystem.)
 	 */
 #ifdef MSDOSFS_DEBUG
-	printf("msdosfs_inactive(): dep %p, refcnt %ld, mntflag %x, MNT_RDONLY %x\n",
-	       dep, dep->de_refcnt, vp->v_mount->mnt_flag, MNT_RDONLY);
+	printf("msdosfs_inactive(): dep %p, refcnt %ld, mntflag %llx, MNT_RDONLY %llx\n",
+	    dep, dep->de_refcnt, (unsigned long long)vp->v_mount->mnt_flag,
+	    (unsigned long long)MNT_RDONLY);
 #endif
 	if (dep->de_refcnt <= 0 && (vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
 		error = detrunc(dep, (u_long) 0, 0, NOCRED);

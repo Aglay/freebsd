@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2017 Dell EMC
  * Copyright (c) 2009 Stanislav Sedov <stas@FreeBSD.org>
  * Copyright (c) 1988, 1993
@@ -48,10 +50,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/stat.h>
 #include <sys/vnode.h>
 #include <sys/socket.h>
+#define	_WANT_SOCKET
 #include <sys/socketvar.h>
 #include <sys/domain.h>
 #include <sys/protosw.h>
 #include <sys/un.h>
+#define	_WANT_UNPCB
 #include <sys/unpcb.h>
 #include <sys/sysctl.h>
 #include <sys/tty.h>
@@ -441,6 +445,15 @@ getctty(kvm_t *kd, struct kinfo_proc *kp)
 	return (sess.s_ttyvp);
 }
 
+static int
+procstat_vm_map_reader(void *token, vm_map_entry_t addr, vm_map_entry_t dest)
+{
+	kvm_t *kd;
+
+	kd = (kvm_t *)token;
+	return (kvm_read_all(kd, (unsigned long)addr, dest, sizeof(*dest)));
+}
+
 static struct filestat_list *
 procstat_getfiles_kvm(struct procstat *procstat, struct kinfo_proc *kp, int mmapped)
 {
@@ -450,7 +463,6 @@ procstat_getfiles_kvm(struct procstat *procstat, struct kinfo_proc *kp, int mmap
 	struct vm_object object;
 	struct vmspace vmspace;
 	vm_map_entry_t entryp;
-	vm_map_t map;
 	vm_object_t objp;
 	struct vnode *vp;
 	struct file **ofiles;
@@ -580,6 +592,14 @@ procstat_getfiles_kvm(struct procstat *procstat, struct kinfo_proc *kp, int mmap
 			type = PS_FST_TYPE_SHM;
 			data = file.f_data;
 			break;
+		case DTYPE_PROCDESC:
+			type = PS_FST_TYPE_PROCDESC;
+			data = file.f_data;
+			break;
+		case DTYPE_DEV:
+			type = PS_FST_TYPE_DEV;
+			data = file.f_data;
+			break;
 		default:
 			continue;
 		}
@@ -603,17 +623,11 @@ do_mmapped:
 			    (void *)kp->ki_vmspace);
 			goto exit;
 		}
-		map = &vmspace.vm_map;
 
-		for (entryp = map->header.next;
-		    entryp != &kp->ki_vmspace->vm_map.header;
-		    entryp = vmentry.next) {
-			if (!kvm_read_all(kd, (unsigned long)entryp, &vmentry,
-			    sizeof(vmentry))) {
-				warnx("can't read vm_map_entry at %p",
-				    (void *)entryp);
-				continue;
-			}
+		vmentry = vmspace.vm_map.header;
+		for (entryp = vm_map_entry_read_succ(kd, &vmentry, procstat_vm_map_reader);
+		    entryp != NULL && entryp != &kp->ki_vmspace->vm_map.header;
+		     entryp = vm_map_entry_read_succ(kd, &vmentry, procstat_vm_map_reader)) {
 			if (vmentry.eflags & MAP_ENTRY_IS_SUB_MAP)
 				continue;
 			if ((objp = vmentry.object.vm_object) == NULL)
@@ -648,6 +662,8 @@ do_mmapped:
 			if (entry != NULL)
 				STAILQ_INSERT_TAIL(head, entry, next);
 		}
+		if (entryp == NULL)
+			warnx("can't read vm_map_entry");
 	}
 exit:
 	return (head);
@@ -663,7 +679,9 @@ kinfo_type2fst(int kftype)
 		int	kf_type;
 		int	fst_type;
 	} kftypes2fst[] = {
+		{ KF_TYPE_PROCDESC, PS_FST_TYPE_PROCDESC },
 		{ KF_TYPE_CRYPTO, PS_FST_TYPE_CRYPTO },
+		{ KF_TYPE_DEV, PS_FST_TYPE_DEV },
 		{ KF_TYPE_FIFO, PS_FST_TYPE_FIFO },
 		{ KF_TYPE_KQUEUE, PS_FST_TYPE_KQUEUE },
 		{ KF_TYPE_MQUEUE, PS_FST_TYPE_MQUEUE },
@@ -1260,10 +1278,10 @@ procstat_get_vnode_info_kvm(kvm_t *kd, struct filestat *fst,
 	vn->vn_type = vntype2psfsttype(vnode.v_type);
 	if (vnode.v_type == VNON || vnode.v_type == VBAD)
 		return (0);
-	error = kvm_read_all(kd, (unsigned long)vnode.v_tag, tagstr,
-	    sizeof(tagstr));
+	error = kvm_read_all(kd, (unsigned long)vnode.v_lock.lock_object.lo_name,
+	    tagstr, sizeof(tagstr));
 	if (error == 0) {
-		warnx("can't read v_tag at %p", (void *)vp);
+		warnx("can't read lo_name at %p", (void *)vp);
 		goto fail;
 	}
 	tagstr[sizeof(tagstr) - 1] = '\0';
@@ -2183,6 +2201,7 @@ procstat_getrlimit_core(struct procstat_core *core, int which,
 		return (-1);
 	}
 	*rlimit = rlimits[which];
+	free(rlimits);
 	return (0);
 }
 

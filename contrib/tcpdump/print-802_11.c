@@ -1039,10 +1039,6 @@ parse_elements(netdissect_options *ndo,
 			if (ssid.length != 0) {
 				if (ssid.length > sizeof(ssid.ssid) - 1)
 					return 0;
-				if (!ND_TTEST2(*(p + offset), ssid.length))
-					return 0;
-				if (length < ssid.length)
-					return 0;
 				memcpy(&ssid.ssid, p + offset, ssid.length);
 				offset += ssid.length;
 				length -= ssid.length;
@@ -1068,10 +1064,6 @@ parse_elements(netdissect_options *ndo,
 				if (challenge.length >
 				    sizeof(challenge.text) - 1)
 					return 0;
-				if (!ND_TTEST2(*(p + offset), challenge.length))
-					return 0;
-				if (length < challenge.length)
-					return 0;
 				memcpy(&challenge.text, p + offset,
 				    challenge.length);
 				offset += challenge.length;
@@ -1096,10 +1088,6 @@ parse_elements(netdissect_options *ndo,
 			length -= 2;
 			if (rates.length != 0) {
 				if (rates.length > sizeof rates.rate)
-					return 0;
-				if (!ND_TTEST2(*(p + offset), rates.length))
-					return 0;
-				if (length < rates.length)
 					return 0;
 				memcpy(&rates.rate, p + offset, rates.length);
 				offset += rates.length;
@@ -1189,8 +1177,7 @@ parse_elements(netdissect_options *ndo,
 			offset += 3;
 			length -= 3;
 
-			memcpy(tim.bitmap, p + (tim.length - 3),
-			    (tim.length - 3));
+			memcpy(tim.bitmap, p + offset, tim.length - 3);
 			offset += tim.length - 3;
 			length -= tim.length - 3;
 			/*
@@ -2071,6 +2058,10 @@ ieee802_11_print(netdissect_options *ndo,
 		hdrlen = roundup2(hdrlen, 4);
 	if (ndo->ndo_Hflag && FC_TYPE(fc) == T_DATA &&
 	    DATA_FRAME_IS_QOS(FC_SUBTYPE(fc))) {
+		if (caplen < hdrlen + 1) {
+			ND_PRINT((ndo, "%s", tstr));
+			return hdrlen;
+		}
 		meshdrlen = extract_mesh_header_length(p+hdrlen);
 		hdrlen += meshdrlen;
 	} else
@@ -3084,7 +3075,7 @@ print_in_radiotap_namespace(netdissect_options *ndo,
 	return 0;
 }
 
-static u_int
+u_int
 ieee802_11_radio_print(netdissect_options *ndo,
                        const u_char *p, u_int length, u_int caplen)
 {
@@ -3114,6 +3105,15 @@ ieee802_11_radio_print(netdissect_options *ndo,
 	hdr = (const struct ieee80211_radiotap_header *)p;
 
 	len = EXTRACT_LE_16BITS(&hdr->it_len);
+	if (len < sizeof(*hdr)) {
+		/*
+		 * The length is the length of the entire header, so
+		 * it must be as large as the fixed-length part of
+		 * the header.
+		 */
+		ND_PRINT((ndo, "%s", tstr));
+		return caplen;
+	}
 
 	/*
 	 * If we don't have the entire radiotap header, just give up.

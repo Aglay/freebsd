@@ -1,5 +1,7 @@
 %{
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2011 James Gritton
  * All rights reserved.
  *
@@ -46,6 +48,7 @@ static int lineno = 1;
 #define YY_DECL int yylex(void)
 %}
 
+%option noyywrap
 %option noinput
 %option nounput
 

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1994-1996 Søren Schmidt
  * All rights reserved.
  *
@@ -154,7 +156,7 @@ revert(void)
 
 	ioctl(0, VT_ACTIVATE, cur_info.active_vty);
 
-	fprintf(stderr, "\033[=%dA", cur_info.console_info.mv_ovscan);
+	ioctl(0, KDSBORDER, cur_info.console_info.mv_ovscan);
 	fprintf(stderr, "\033[=%dH", cur_info.console_info.mv_rev.fore);
 	fprintf(stderr, "\033[=%dI", cur_info.console_info.mv_rev.back);
 
@@ -169,9 +171,8 @@ revert(void)
 		else
 			ioctl(0, _IO('S', cur_info.video_mode_number), NULL);
 		if (cur_info.video_mode_info.vi_flags & V_INFO_GRAPHICS) {
-			size[0] = cur_info.video_mode_info.vi_width / 8;
-			size[1] = cur_info.video_mode_info.vi_height /
-			    cur_info.console_info.font_size;
+			size[0] = cur_info.console_info.mv_csz;
+			size[1] = cur_info.console_info.mv_rsz;
 			size[2] = cur_info.console_info.font_size;
 			ioctl(0, KDRASTER, size);
 		}
@@ -193,19 +194,21 @@ static void
 usage(void)
 {
 	if (vt4_mode)
-		fprintf(stderr, "%s\n%s\n%s\n%s\n%s\n",
+		fprintf(stderr, "%s\n%s\n%s\n%s\n%s\n%s\n",
 "usage: vidcontrol [-CHPpx] [-b color] [-c appearance] [-f [[size] file]]",
 "                  [-g geometry] [-h size] [-i active | adapter | mode]",
-"                  [-M char] [-m on | off] [-r foreground background]",
-"                  [-S on | off] [-s number] [-T xterm | cons25] [-t N | off]",
-"                  [mode] [foreground [background]] [show]");
+"                  [-M char] [-m on | off]",
+"                  [-r foreground background] [-S on | off] [-s number]",
+"                  [-T xterm | cons25] [-t N | off] [mode]",
+"                  [foreground [background]] [show]");
 	else
-		fprintf(stderr, "%s\n%s\n%s\n%s\n%s\n",
-"usage: vidcontrol [-CdHLPpx] [-b color] [-c appearance] [-f [size] file]",
-"                  [-g geometry] [-h size] [-i adapter | mode] [-l screen_map]",
-"                  [-M char] [-m on | off] [-r foreground background]",
-"                  [-S on | off] [-s number] [-T xterm | cons25] [-t N | off]",
-"                  [mode] [foreground [background]] [show]");
+		fprintf(stderr, "%s\n%s\n%s\n%s\n%s\n%s\n",
+"usage: vidcontrol [-CdHLPpx] [-b color] [-c appearance] [-E emulator]",
+"                  [-f [[size] file]] [-g geometry] [-h size]",
+"                  [-i active | adapter | mode] [-l screen_map] [-M char]",
+"                  [-m on | off] [-r foreground background] [-S on | off]",
+"                  [-s number] [-T xterm | cons25] [-t N | off] [mode]",
+"                  [foreground [background]] [show]");
 	exit(1);
 }
 
@@ -619,30 +622,88 @@ set_screensaver_timeout(char *arg)
 	}
 }
 
+static void
+parse_cursor_params(char *param, struct cshape *shape)
+{
+	char *dupparam, *word;
+	int type;
+
+	param = dupparam = strdup(param);
+	type = shape->shape[0];
+	while ((word = strsep(&param, ",")) != NULL) {
+		if (strcmp(word, "normal") == 0)
+			type = 0;
+		else if (strcmp(word, "destructive") == 0)
+			type = CONS_BLINK_CURSOR | CONS_CHAR_CURSOR;
+		else if (strcmp(word, "blink") == 0)
+			type |= CONS_BLINK_CURSOR;
+		else if (strcmp(word, "noblink") == 0)
+			type &= ~CONS_BLINK_CURSOR;
+		else if (strcmp(word, "block") == 0)
+			type &= ~CONS_CHAR_CURSOR;
+		else if (strcmp(word, "noblock") == 0)
+			type |= CONS_CHAR_CURSOR;
+		else if (strcmp(word, "hidden") == 0)
+			type |= CONS_HIDDEN_CURSOR;
+		else if (strcmp(word, "nohidden") == 0)
+			type &= ~CONS_HIDDEN_CURSOR;
+		else if (strncmp(word, "base=", 5) == 0)
+			shape->shape[1] = strtol(word + 5, NULL, 0);
+		else if (strncmp(word, "height=", 7) == 0)
+			shape->shape[2] = strtol(word + 7, NULL, 0);
+		else if (strcmp(word, "charcolors") == 0)
+			type |= CONS_CHARCURSOR_COLORS;
+		else if (strcmp(word, "mousecolors") == 0)
+			type |= CONS_MOUSECURSOR_COLORS;
+		else if (strcmp(word, "default") == 0)
+			type |= CONS_DEFAULT_CURSOR;
+		else if (strcmp(word, "shapeonly") == 0)
+			type |= CONS_SHAPEONLY_CURSOR;
+		else if (strcmp(word, "local") == 0)
+			type |= CONS_LOCAL_CURSOR;
+		else if (strcmp(word, "reset") == 0)
+			type |= CONS_RESET_CURSOR;
+		else if (strcmp(word, "show") == 0)
+			printf("flags %#x, base %d, height %d\n",
+			    type, shape->shape[1], shape->shape[2]);
+		else {
+			revert();
+			errx(1,
+			    "invalid parameters for -c starting at '%s%s%s'",
+			    word, param != NULL ? "," : "",
+			    param != NULL ? param : "");
+		}
+	}
+	free(dupparam);
+	shape->shape[0] = type;
+}
+
 
 /*
  * Set the cursor's shape/type.
  */
 
 static void
-set_cursor_type(char *appearance)
+set_cursor_type(char *param)
 {
-	int type;
+	struct cshape shape;
 
-	if (!strcmp(appearance, "normal"))
-		type = 0;
-	else if (!strcmp(appearance, "blink"))
-		type = 1;
-	else if (!strcmp(appearance, "destructive"))
-		type = 3;
-	else {
+	/* Dry run to determine color, default and local flags. */
+	shape.shape[0] = 0;
+	shape.shape[1] = -1;
+	shape.shape[2] = -1;
+	parse_cursor_params(param, &shape);
+
+	/* Get the relevant old setting. */
+	if (ioctl(0, CONS_GETCURSORSHAPE, &shape) != 0) {
 		revert();
-		errx(1, "argument to -c must be normal, blink or destructive");
+		err(1, "ioctl(CONS_GETCURSORSHAPE)");
 	}
 
-	if (ioctl(0, CONS_CURSORTYPE, &type) == -1) {
+	parse_cursor_params(param, &shape);
+	if (ioctl(0, CONS_SETCURSORSHAPE, &shape) != 0) {
 		revert();
-		err(1, "setting cursor type");
+		err(1, "ioctl(CONS_SETCURSORSHAPE)");
 	}
 }
 
@@ -910,11 +971,15 @@ set_border_color(char *arg)
 {
 	int color;
 
-	if ((color = get_color_number(arg)) != -1) {
-		fprintf(stderr, "\033[=%dA", color);
+	color = get_color_number(arg);
+	if (color == -1) {
+		revert();
+		errx(1, "invalid color '%s'", arg);
 	}
-	else
-		usage();
+	if (ioctl(0, KDSBORDER, color) != 0) {
+		revert();
+		err(1, "ioctl(KD_SBORDER)");
+	}
 }
 
 static void
@@ -1295,7 +1360,7 @@ set_history(char *opt)
 
 	if ((*opt == '\0') || size < 0) {
 		revert();
-		errx(1, "argument must be a positive number");
+		errx(1, "argument must not be less than zero");
 	}
 
 	if (ioctl(0, CONS_HISTORY, &size) == -1) {
@@ -1316,6 +1381,45 @@ clear_history(void)
 		revert();
 		err(1, "clearing history buffer");
 	}
+}
+
+static int
+get_terminal_emulator(int i, struct term_info *tip)
+{
+	tip->ti_index = i;
+	if (ioctl(0, CONS_GETTERM, tip) == 0)
+		return (1);
+	strlcpy((char *)tip->ti_name, "unknown", sizeof(tip->ti_name));
+	strlcpy((char *)tip->ti_desc, "unknown", sizeof(tip->ti_desc));
+	return (0);
+}
+
+static void
+get_terminal_emulators(void)
+{
+	struct term_info ti;
+	int i;
+
+	for (i = 0; i < 10; i++) {
+		if (get_terminal_emulator(i, &ti) == 0)
+			break;
+		printf("%d: %s (%s)%s\n", i, ti.ti_name, ti.ti_desc,
+		    i == 0 ? " (active)" : "");
+	}
+}
+
+static void
+set_terminal_emulator(const char *name)
+{
+	struct term_info old_ti, ti;
+
+	get_terminal_emulator(0, &old_ti);
+	strlcpy((char *)ti.ti_name, name, sizeof(ti.ti_name));
+	if (ioctl(0, CONS_SETTERM, &ti) != 0)
+		warn("SETTERM '%s'", name);
+	get_terminal_emulator(0, &ti);
+	printf("%s (%s) -> %s (%s)\n", old_ti.ti_name, old_ti.ti_desc,
+	    ti.ti_name, ti.ti_desc);
 }
 
 static void
@@ -1346,7 +1450,7 @@ main(int argc, char **argv)
 	if (vt4_mode)
 		opts = "b:Cc:fg:h:Hi:M:m:pPr:S:s:T:t:x";
 	else
-		opts = "b:Cc:dfg:h:Hi:l:LM:m:pPr:S:s:T:t:x";
+		opts = "b:Cc:deE:fg:h:Hi:l:LM:m:pPr:S:s:T:t:x";
 
 	while ((opt = getopt(argc, argv, opts)) != -1)
 		switch(opt) {
@@ -1363,6 +1467,16 @@ main(int argc, char **argv)
 			if (vt4_mode)
 				break;
 			print_scrnmap();
+			break;
+		case 'E':
+			if (vt4_mode)
+				break;
+			set_terminal_emulator(optarg);
+			break;
+		case 'e':
+			if (vt4_mode)
+				break;
+			get_terminal_emulators();
 			break;
 		case 'f':
 			optarg = nextarg(argc, argv, &optind, 'f', 0);

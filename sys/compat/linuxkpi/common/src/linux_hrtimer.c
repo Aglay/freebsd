@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2017 Mark Johnston <markj@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -37,9 +36,6 @@ __FBSDID("$FreeBSD$");
 
 #include <linux/hrtimer.h>
 
-/* hrtimer flags */
-#define	HRTIMER_ACTIVE		0x01
-
 static void
 hrtimer_call_handler(void *arg)
 {
@@ -48,8 +44,13 @@ hrtimer_call_handler(void *arg)
 
 	hrtimer = arg;
 	ret = hrtimer->function(hrtimer);
-	MPASS(ret == HRTIMER_NORESTART);
-	hrtimer->flags &= ~HRTIMER_ACTIVE;
+
+	if (ret == HRTIMER_RESTART) {
+		callout_schedule_sbt(&hrtimer->callout,
+		    nstosbt(hrtimer->expires), nstosbt(hrtimer->precision), 0);
+	} else {
+		callout_deactivate(&hrtimer->callout);
+	}
 }
 
 bool
@@ -58,35 +59,37 @@ linux_hrtimer_active(struct hrtimer *hrtimer)
 	bool ret;
 
 	mtx_lock(&hrtimer->mtx);
-	ret = (hrtimer->flags & HRTIMER_ACTIVE) != 0;
+	ret = callout_active(&hrtimer->callout);
 	mtx_unlock(&hrtimer->mtx);
+
 	return (ret);
 }
 
+/*
+ * Cancel active hrtimer.
+ * Return 1 if timer was active and cancellation succeeded, or 0 otherwise.
+ */
 int
 linux_hrtimer_cancel(struct hrtimer *hrtimer)
 {
 
-	if (!hrtimer_active(hrtimer))
-		return (0);
-	(void)callout_drain(&hrtimer->callout);
-	return (1);
+	return (callout_drain(&hrtimer->callout) > 0);
 }
 
 void
 linux_hrtimer_init(struct hrtimer *hrtimer)
 {
 
-	hrtimer->function = NULL;
-	hrtimer->flags = 0;
-	mtx_init(&hrtimer->mtx, "hrtimer", NULL, MTX_DEF | MTX_RECURSE);
+	memset(hrtimer, 0, sizeof(*hrtimer));
+	mtx_init(&hrtimer->mtx, "hrtimer", NULL,
+	    MTX_DEF | MTX_RECURSE | MTX_NOWITNESS);
 	callout_init_mtx(&hrtimer->callout, &hrtimer->mtx, 0);
 }
 
 void
-linux_hrtimer_set_expires(struct hrtimer *hrtimer __unused,
-    ktime_t time __unused)
+linux_hrtimer_set_expires(struct hrtimer *hrtimer, ktime_t time)
 {
+	hrtimer->expires = ktime_to_ns(time);
 }
 
 void
@@ -97,12 +100,24 @@ linux_hrtimer_start(struct hrtimer *hrtimer, ktime_t time)
 }
 
 void
-linux_hrtimer_start_range_ns(struct hrtimer *hrtimer, ktime_t time, int64_t nsec)
+linux_hrtimer_start_range_ns(struct hrtimer *hrtimer, ktime_t time,
+    int64_t nsec)
 {
 
 	mtx_lock(&hrtimer->mtx);
-	callout_reset_sbt(&hrtimer->callout, time.tv64 * SBT_1NS,
-	    nsec * SBT_1NS, hrtimer_call_handler, hrtimer, 0);
-	hrtimer->flags |= HRTIMER_ACTIVE;
+	hrtimer->precision = nsec;
+	callout_reset_sbt(&hrtimer->callout, nstosbt(ktime_to_ns(time)),
+	    nstosbt(nsec), hrtimer_call_handler, hrtimer, 0);
 	mtx_unlock(&hrtimer->mtx);
 }
+
+void
+linux_hrtimer_forward_now(struct hrtimer *hrtimer, ktime_t interval)
+{
+
+	mtx_lock(&hrtimer->mtx);
+	callout_reset_sbt(&hrtimer->callout, nstosbt(ktime_to_ns(interval)),
+	    nstosbt(hrtimer->precision), hrtimer_call_handler, hrtimer, 0);
+	mtx_unlock(&hrtimer->mtx);
+}
+

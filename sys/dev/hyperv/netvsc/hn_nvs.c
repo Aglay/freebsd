@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2009-2012,2016 Microsoft Corp.
+ * Copyright (c) 2009-2012,2016-2017 Microsoft Corp.
  * Copyright (c) 2010-2012 Citrix Inc.
  * Copyright (c) 2012 NetApp Inc.
  * All rights reserved.
@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
 
+#include <net/ethernet.h>
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_media.h>
@@ -364,7 +365,7 @@ hn_nvs_disconn_rxbuf(struct hn_softc *sc)
 		pause("lingtx", (200 * hz) / 1000);
 	}
 
-	if (sc->hn_rxbuf_gpadl != 0) {
+	if (vmbus_current_version < VMBUS_VERSION_WIN10 && sc->hn_rxbuf_gpadl != 0) {
 		/*
 		 * Disconnect RXBUF from primary channel.
 		 */
@@ -425,7 +426,7 @@ hn_nvs_disconn_chim(struct hn_softc *sc)
 		pause("lingtx", (200 * hz) / 1000);
 	}
 
-	if (sc->hn_chim_gpadl != 0) {
+	if (vmbus_current_version < VMBUS_VERSION_WIN10 && sc->hn_chim_gpadl != 0) {
 		/*
 		 * Disconnect chimney sending buffer from primary channel.
 		 */
@@ -503,7 +504,7 @@ hn_nvs_conf_ndis(struct hn_softc *sc, int mtu)
 
 	memset(&conf, 0, sizeof(conf));
 	conf.nvs_type = HN_NVS_TYPE_NDIS_CONF;
-	conf.nvs_mtu = mtu;
+	conf.nvs_mtu = mtu + ETHER_HDR_LEN;
 	conf.nvs_caps = HN_NVS_NDIS_CONF_VLAN;
 	if (sc->hn_nvs_ver >= HN_NVS_VERSION_5)
 		conf.nvs_caps |= HN_NVS_NDIS_CONF_SRIOV;
@@ -599,6 +600,11 @@ int
 hn_nvs_attach(struct hn_softc *sc, int mtu)
 {
 	int error;
+
+	if (hyperv_ver_major >= 10) {
+		/* UDP 4-tuple hash is enforced. */
+		sc->hn_caps |= HN_CAP_UDPHASH;
+	}
 
 	/*
 	 * Initialize NVS.

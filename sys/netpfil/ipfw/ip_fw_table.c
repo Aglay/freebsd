@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004 Ruslan Ermilov and Vsevolod Lobko.
  * Copyright (c) 2014 Yandex LLC
  * Copyright (c) 2014 Alexander V. Chernikov
@@ -53,7 +55,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/socketvar.h>
 #include <sys/queue.h>
 #include <net/if.h>	/* ip_fw.h requires IFNAMSIZ */
-#include <net/pfil.h>
 
 #include <netinet/in.h>
 #include <netinet/ip_var.h>	/* struct ipfw_rule_ref */
@@ -622,7 +623,7 @@ restart:
 	 *
 	 * May release/reacquire UH_WLOCK.
 	 */
-	error = ipfw_link_table_values(ch, &ts);
+	error = ipfw_link_table_values(ch, &ts, flags);
 	if (error != 0)
 		goto cleanup;
 	if (ts.modified != 0)
@@ -653,6 +654,14 @@ restart:
 		num = 0;
 		/* check limit before adding */
 		if ((error = check_table_limit(tc, ptei)) == 0) {
+			/*
+			 * It should be safe to insert a record w/o
+			 * a properly-linked value if atomicity is
+			 * not required.
+			 *
+			 * If the added item does not have a valid value
+			 * index, it would get rejected by ta->add().
+			 * */
 			error = ta->add(tc->astate, KIDX_TO_TI(ch, kidx),
 			    ptei, v, &num);
 			/* Set status flag to inform userland */
@@ -1658,7 +1667,7 @@ ipfw_unref_table(struct ip_fw_chain *ch, uint16_t kidx)
 }
 
 /*
- * Lookup an arbtrary key @paddr of legth @plen in table @tbl.
+ * Lookup an arbitrary key @paddr of length @plen in table @tbl.
  * Stores found value in @val.
  *
  * Returns 1 if key was found.
@@ -1925,9 +1934,7 @@ create_table_internal(struct ip_fw_chain *ch, struct tid_info *ti,
 		tc->no.kidx = kidx;
 		tc->no.etlv = IPFW_TLV_TBL_NAME;
 
-		IPFW_WLOCK(ch);
 		link_table(ch, tc);
-		IPFW_WUNLOCK(ch);
 	}
 
 	if (compat != 0)
@@ -3171,7 +3178,7 @@ alloc_table_config(struct ip_fw_chain *ch, struct tid_info *ti,
 		if (ntlv == NULL)
 			return (NULL);
 		name = ntlv->name;
-		set = ntlv->set;
+		set = (V_fw_tables_sets == 0) ? 0 : ntlv->set;
 	} else {
 		/* Compat part: convert number to string representation */
 		snprintf(bname, sizeof(bname), "%d", ti->uidx);
@@ -3229,7 +3236,6 @@ link_table(struct ip_fw_chain *ch, struct table_config *tc)
 	uint16_t kidx;
 
 	IPFW_UH_WLOCK_ASSERT(ch);
-	IPFW_WLOCK_ASSERT(ch);
 
 	ni = CHAIN_TO_NI(ch);
 	kidx = tc->no.kidx;

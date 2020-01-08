@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010, 2012 Konstantin Belousov <kib@FreeBSD.org>
  * Copyright (c) 2015 The FreeBSD Foundation
  * All rights reserved.
@@ -31,7 +33,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-#include "opt_compat.h"
 #include "opt_vm.h"
 
 #include <sys/param.h>
@@ -113,9 +114,10 @@ shared_page_init(void *dummy __unused)
 	shared_page_obj = vm_pager_allocate(OBJT_PHYS, 0, PAGE_SIZE,
 	    VM_PROT_DEFAULT, 0, NULL);
 	VM_OBJECT_WLOCK(shared_page_obj);
-	m = vm_page_grab(shared_page_obj, 0, VM_ALLOC_NOBUSY | VM_ALLOC_ZERO);
-	m->valid = VM_PAGE_BITS_ALL;
+	m = vm_page_grab(shared_page_obj, 0, VM_ALLOC_ZERO);
 	VM_OBJECT_WUNLOCK(shared_page_obj);
+	vm_page_valid(m);
+	vm_page_xunbusy(m);
 	addr = kva_alloc(PAGE_SIZE);
 	pmap_qenter(addr, &m, 1);
 	shared_page_mapping = (char *)addr;

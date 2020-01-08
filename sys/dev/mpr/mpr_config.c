@@ -1,6 +1,7 @@
 /*-
  * Copyright (c) 2011-2015 LSI Corp.
  * Copyright (c) 2013-2016 Avago Technologies
+ * Copyright 2000-2020 Broadcom Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,7 +25,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * Avago Technologies (LSI) MPT-Fusion Host Adapter FreeBSD
+ * Broadcom Inc. (LSI) MPT-Fusion Host Adapter FreeBSD
  */
 
 #include <sys/cdefs.h>
@@ -95,8 +96,9 @@ mpr_config_get_ioc_pg8(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	request->Header.PageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -153,8 +155,9 @@ mpr_config_get_ioc_pg8(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -225,8 +228,9 @@ mpr_config_get_iounit_pg8(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	request->Header.PageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -283,8 +287,9 @@ mpr_config_get_iounit_pg8(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -320,6 +325,137 @@ out:
 }
 
 /**
+ * mpr_config_get_man_pg11 - obtain manufacturing page 11
+ * @sc: per adapter object
+ * @mpi_reply: reply mf payload returned from firmware
+ * @config_page: contents of the config page
+ * Context: sleep.
+ *
+ * Returns 0 for success, non-zero for failure.
+ */
+int
+mpr_config_get_man_pg11(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
+    Mpi2ManufacturingPage11_t *config_page)
+{
+	MPI2_CONFIG_REQUEST *request;
+	MPI2_CONFIG_REPLY *reply;
+	struct mpr_command *cm;
+	MPI2_CONFIG_PAGE_MAN_11 *page = NULL;
+	int error = 0;
+	u16 ioc_status;
+
+	mpr_dprint(sc, MPR_TRACE, "%s\n", __func__);
+
+	if ((cm = mpr_alloc_command(sc)) == NULL) {
+		printf("%s: command alloc failed @ line %d\n", __func__,
+		    __LINE__);
+		error = EBUSY;
+		goto out;
+	}
+	request = (MPI2_CONFIG_REQUEST *)cm->cm_req;
+	bzero(request, sizeof(MPI2_CONFIG_REQUEST));
+	request->Function = MPI2_FUNCTION_CONFIG;
+	request->Action = MPI2_CONFIG_ACTION_PAGE_HEADER;
+	request->Header.PageType = MPI2_CONFIG_PAGETYPE_MANUFACTURING;
+	request->Header.PageNumber = 11;
+	request->Header.PageLength = request->Header.PageVersion = 0;
+	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
+	cm->cm_data = NULL;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	if (error || (reply == NULL)) {
+		/* FIXME */
+		/*
+		 * If the request returns an error then we need to do a diag
+		 * reset
+		 */ 
+		printf("%s: request for header completed with error %d",
+		    __func__, error);
+		error = ENXIO;
+		goto out;
+	}
+	ioc_status = le16toh(reply->IOCStatus) & MPI2_IOCSTATUS_MASK;
+	bcopy(reply, mpi_reply, sizeof(MPI2_CONFIG_REPLY));
+	if (ioc_status != MPI2_IOCSTATUS_SUCCESS) {
+		/* FIXME */
+		/*
+		 * If the request returns an error then we need to do a diag
+		 * reset
+		 */ 
+		printf("%s: header read with error; iocstatus = 0x%x\n",
+		    __func__, ioc_status);
+		error = ENXIO;
+		goto out;
+	}
+	/* We have to do free and alloc for the reply-free and reply-post
+	 * counters to match - Need to review the reply FIFO handling.
+	 */
+	mpr_free_command(sc, cm);
+	
+	if ((cm = mpr_alloc_command(sc)) == NULL) {
+		printf("%s: command alloc failed @ line %d\n", __func__,
+		    __LINE__);
+		error = EBUSY;
+		goto out;
+	}
+	request = (MPI2_CONFIG_REQUEST *)cm->cm_req;
+	bzero(request, sizeof(MPI2_CONFIG_REQUEST));
+	request->Function = MPI2_FUNCTION_CONFIG;
+	request->Action = MPI2_CONFIG_ACTION_PAGE_READ_CURRENT;
+	request->Header.PageType = MPI2_CONFIG_PAGETYPE_MANUFACTURING;
+	request->Header.PageNumber = 11;
+	request->Header.PageVersion = mpi_reply->Header.PageVersion;
+	request->Header.PageLength = mpi_reply->Header.PageLength;
+	cm->cm_length =  le16toh(mpi_reply->Header.PageLength) * 4;
+	cm->cm_sge = &request->PageBufferSGE;
+	cm->cm_sglsize = sizeof(MPI2_SGE_IO_UNION);
+	cm->cm_flags = MPR_CM_FLAGS_SGE_SIMPLE | MPR_CM_FLAGS_DATAIN;
+	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
+	page = malloc((cm->cm_length), M_MPR, M_ZERO | M_NOWAIT);
+	if (!page) {
+		printf("%s: page alloc failed\n", __func__);
+		error = ENOMEM;
+		goto out;
+	}
+	cm->cm_data = page;
+
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	if (error || (reply == NULL)) {
+		/* FIXME */
+		/*
+		 * If the request returns an error then we need to do a diag
+		 * reset
+		 */ 
+		printf("%s: request for page completed with error %d",
+		    __func__, error);
+		error = ENXIO;
+		goto out;
+	}
+	ioc_status = le16toh(reply->IOCStatus) & MPI2_IOCSTATUS_MASK;
+	bcopy(reply, mpi_reply, sizeof(MPI2_CONFIG_REPLY));
+	if (ioc_status != MPI2_IOCSTATUS_SUCCESS) {
+		/* FIXME */
+		/*
+		 * If the request returns an error then we need to do a diag
+		 * reset
+		 */ 
+		printf("%s: page read with error; iocstatus = 0x%x\n",
+		    __func__, ioc_status);
+		error = ENXIO;
+		goto out;
+	}
+	bcopy(page, config_page, MIN(cm->cm_length,
+	    (sizeof(Mpi2ManufacturingPage11_t))));
+
+out:
+	free(page, M_MPR);
+	if (cm)
+		mpr_free_command(sc, cm);
+	return (error);
+}
+
+/**
  * mpr_base_static_config_pages - static start of day config pages.
  * @sc: per adapter object
  *
@@ -328,8 +464,9 @@ out:
 void
 mpr_base_static_config_pages(struct mpr_softc *sc)
 {
-	Mpi2ConfigReply_t	mpi_reply;
-	int			retry;
+	Mpi2ConfigReply_t		mpi_reply;
+	Mpi2ManufacturingPage11_t	man_pg11;
+	int				retry, rc;
 
 	retry = 0;
 	while (mpr_config_get_ioc_pg8(sc, &mpi_reply, &sc->ioc_pg8)) {
@@ -348,6 +485,29 @@ mpr_base_static_config_pages(struct mpr_softc *sc)
 			/*FIXME*/
 			break;
 		}
+	}
+	retry = 0;
+	while ((rc = mpr_config_get_man_pg11(sc, &mpi_reply, &man_pg11))) {
+		retry++;
+		if (retry > 5) {
+			/* We need to Handle this situation */
+			/*FIXME*/
+			break;
+		}
+	}
+	
+	if (!rc) {
+		sc->custom_nvme_tm_handling = (le16toh(man_pg11.AddlFlags2) &
+		    MPI2_MAN_PG11_ADDLFLAGS2_CUSTOM_TM_HANDLING_MASK);
+		sc->nvme_abort_timeout = man_pg11.NVMeAbortTO;
+
+		/* Minimum NVMe Abort timeout value should be 6 seconds &
+		 * maximum value should be 60 seconds.
+		 */
+		if (sc->nvme_abort_timeout < 6)
+			sc->nvme_abort_timeout = 6;
+		if (sc->nvme_abort_timeout > 60)
+			sc->nvme_abort_timeout = 60;
 	}
 }
 
@@ -393,8 +553,9 @@ mpr_config_get_dpm_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	    MPI2_DPM_PGAD_ENTRY_COUNT_SHIFT;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -453,8 +614,9 @@ mpr_config_get_dpm_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 		goto out;
 	}
 	cm->cm_data = page;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -529,8 +691,9 @@ int mpr_config_set_dpm_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	request->PageAddress |= htole16(entry_idx);
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -591,8 +754,9 @@ int mpr_config_set_dpm_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	bcopy(config_page, page, MIN(cm->cm_length, 
 	    (sizeof(Mpi2DriverMappingPage0_t))));
 	cm->cm_data = page;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -664,8 +828,9 @@ mpr_config_get_sas_device_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
 	request->ExtPageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -724,8 +889,9 @@ mpr_config_get_sas_device_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -799,8 +965,9 @@ mpr_config_get_pcie_device_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
 	request->ExtPageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -859,8 +1026,9 @@ mpr_config_get_pcie_device_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -934,8 +1102,9 @@ mpr_config_get_pcie_device_pg2(struct mpr_softc *sc, Mpi2ConfigReply_t
 	request->ExtPageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -994,8 +1163,9 @@ mpr_config_get_pcie_device_pg2(struct mpr_softc *sc, Mpi2ConfigReply_t
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -1066,8 +1236,9 @@ mpr_config_get_bios_pg3(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	request->Header.PageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -1124,8 +1295,9 @@ mpr_config_get_bios_pg3(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -1173,7 +1345,7 @@ mpr_config_get_raid_volume_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
     *mpi_reply, Mpi2RaidVolPage0_t *config_page, u32 page_address)
 {
 	MPI2_CONFIG_REQUEST *request;
-	MPI2_CONFIG_REPLY *reply;
+	MPI2_CONFIG_REPLY *reply = NULL;
 	struct mpr_command *cm;
 	Mpi2RaidVolPage0_t *page = NULL;
 	int error = 0;
@@ -1201,8 +1373,9 @@ mpr_config_get_raid_volume_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
 	 * This page must be polled because the IOC isn't ready yet when this
 	 * page is needed.
 	 */
-	error = mpr_request_polled(sc, cm);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_request_polled(sc, &cm);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/* If the poll returns error then we need to do diag reset */ 
@@ -1258,8 +1431,9 @@ mpr_config_get_raid_volume_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t
 	 * This page must be polled because the IOC isn't ready yet when this
 	 * page is needed.
 	 */
-	error = mpr_request_polled(sc, cm);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_request_polled(sc, &cm);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/* If the poll returns error then we need to do diag reset */ 
@@ -1325,8 +1499,9 @@ mpr_config_get_raid_volume_pg1(struct mpr_softc *sc, Mpi2ConfigReply_t
 	request->Header.PageLength = request->Header.PageVersion = 0;
 	cm->cm_desc.Default.RequestFlags = MPI2_REQ_DESCRIPT_FLAGS_DEFAULT_TYPE;
 	cm->cm_data = NULL;
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -1384,8 +1559,9 @@ mpr_config_get_raid_volume_pg1(struct mpr_softc *sc, Mpi2ConfigReply_t
 	}
 	cm->cm_data = page;
 
-	error = mpr_wait_command(sc, cm, 60, CAN_SLEEP);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_wait_command(sc, &cm, 60, CAN_SLEEP);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/*
@@ -1459,7 +1635,7 @@ mpr_config_get_raid_pd_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
     Mpi2RaidPhysDiskPage0_t *config_page, u32 page_address)
 {
 	MPI2_CONFIG_REQUEST *request;
-	MPI2_CONFIG_REPLY *reply;
+	MPI2_CONFIG_REPLY *reply = NULL;
 	struct mpr_command *cm;
 	Mpi2RaidPhysDiskPage0_t *page = NULL;
 	int error = 0;
@@ -1487,8 +1663,9 @@ mpr_config_get_raid_pd_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	 * This page must be polled because the IOC isn't ready yet when this
 	 * page is needed.
 	 */
-	error = mpr_request_polled(sc, cm);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_request_polled(sc, &cm);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/* If the poll returns error then we need to do diag reset */ 
@@ -1544,8 +1721,9 @@ mpr_config_get_raid_pd_pg0(struct mpr_softc *sc, Mpi2ConfigReply_t *mpi_reply,
 	 * This page must be polled because the IOC isn't ready yet when this
 	 * page is needed.
 	 */
-	error = mpr_request_polled(sc, cm);
-	reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
+	error = mpr_request_polled(sc, &cm);
+	if (cm != NULL)
+		reply = (MPI2_CONFIG_REPLY *)cm->cm_reply;
 	if (error || (reply == NULL)) {
 		/* FIXME */
 		/* If the poll returns error then we need to do diag reset */ 

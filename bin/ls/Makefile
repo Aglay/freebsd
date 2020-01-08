@@ -6,16 +6,14 @@
 PACKAGE=runtime
 PROG=	ls
 SRCS=	cmp.c ls.c print.c util.c
-LIBADD=	xo util
+LIBADD=	util
 
-.if !defined(RELEASE_CRUNCH) && \
-	${MK_LS_COLORS} != no
+.if ${MK_LS_COLORS} != no
 CFLAGS+= -DCOLORLS
 LIBADD+=	termcapw
 .endif
 
-.if ${MK_TESTS} != "no"
-SUBDIR+=	tests
-.endif
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 
 .include <bsd.prog.mk>

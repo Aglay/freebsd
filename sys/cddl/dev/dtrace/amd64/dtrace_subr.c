@@ -44,11 +44,16 @@
 #include <machine/cpufunc.h>
 #include <machine/frame.h>
 #include <machine/psl.h>
+#include <machine/trap.h>
 #include <vm/pmap.h>
 
 extern void dtrace_getnanotime(struct timespec *tsp);
+extern int (*dtrace_invop_jump_addr)(struct trapframe *);
 
-int dtrace_invop(uintptr_t, struct trapframe *, uintptr_t);
+int	dtrace_invop(uintptr_t, struct trapframe *, uintptr_t);
+int	dtrace_invop_start(struct trapframe *frame);
+void	dtrace_invop_init(void);
+void	dtrace_invop_uninit(void);
 
 typedef struct dtrace_invop_hdlr {
 	int (*dtih_func)(uintptr_t, struct trapframe *, uintptr_t);
@@ -106,6 +111,20 @@ dtrace_invop_remove(int (*func)(uintptr_t, struct trapframe *, uintptr_t))
 	}
 
 	kmem_free(hdlr, 0);
+}
+
+void
+dtrace_invop_init(void)
+{
+
+	dtrace_invop_jump_addr = dtrace_invop_start;
+}
+
+void
+dtrace_invop_uninit(void)
+{
+
+	dtrace_invop_jump_addr = NULL;
 }
 
 /*ARGSUSED*/
@@ -318,6 +337,9 @@ dtrace_gethrtime_init(void *arg)
 	int i;
 #endif
 
+	if (vm_guest != VM_GUEST_NO)
+		return;
+
 	/* The current CPU is the reference one. */
 	sched_pin();
 	tsc_skew[curcpu] = 0;
@@ -353,11 +375,11 @@ SYSINIT(dtrace_gethrtime_init, SI_SUB_SMP, SI_ORDER_ANY, dtrace_gethrtime_init,
  * Returns nanoseconds since boot.
  */
 uint64_t
-dtrace_gethrtime()
+dtrace_gethrtime(void)
 {
 	uint64_t tsc;
-	uint32_t lo;
-	uint32_t hi;
+	uint32_t lo, hi;
+	register_t rflags;
 
 	/*
 	 * We split TSC value into lower and higher 32-bit halves and separately
@@ -365,7 +387,10 @@ dtrace_gethrtime()
 	 * (see nsec_scale calculations) taking into account 32-bit shift of
 	 * the higher half and finally add.
 	 */
+	rflags = intr_disable();
 	tsc = rdtsc() - tsc_skew[curcpu];
+	intr_restore(rflags);
+
 	lo = tsc;
 	hi = tsc >> 32;
 	return (((lo * nsec_scale) >> SCALE_SHIFT) +

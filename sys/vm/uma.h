@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2002, 2003, 2004, 2005 Jeffrey Roberson <jeff@FreeBSD.org>
  * Copyright (c) 2004, 2005 Bosko Milekic <bmilekic@FreeBSD.org>
  * All rights reserved.
@@ -47,8 +49,6 @@
 struct uma_zone;
 /* Opaque type used as a handle to the zone */
 typedef struct uma_zone * uma_zone_t;
-
-void zone_drain(uma_zone_t);
 
 /*
  * Item constructor
@@ -126,7 +126,8 @@ typedef void (*uma_fini)(void *mem, int size);
 /*
  * Import new memory into a cache zone.
  */
-typedef int (*uma_import)(void *arg, void **store, int count, int flags);
+typedef int (*uma_import)(void *arg, void **store, int count, int domain,
+    int flags);
 
 /*
  * Free memory from a cache zone.
@@ -215,17 +216,6 @@ uma_zone_t uma_zsecond_create(char *name, uma_ctor ctor, uma_dtor dtor,
 		    uma_init zinit, uma_fini zfini, uma_zone_t master);
 
 /*
- * Add a second master to a secondary zone.  This provides multiple data
- * backends for objects with the same size.  Both masters must have
- * compatible allocation flags.  Presently, UMA_ZONE_MALLOC type zones are
- * the only supported.
- *
- * Returns:
- *	Error on failure, 0 on success.
- */
-int uma_zsecond_add(uma_zone_t zone, uma_zone_t master);
-
-/*
  * Create cache-only zones.
  *
  * This allows uma's per-cpu cache facilities to handle arbitrary
@@ -262,8 +252,8 @@ uma_zone_t uma_zcache_create(char *name, int size, uma_ctor ctor, uma_dtor dtor,
 					 * information in the vm_page.
 					 */
 #define	UMA_ZONE_SECONDARY	0x0200	/* Zone is a Secondary Zone */
-/*				0x0400	   Unused */
-#define	UMA_ZONE_MAXBUCKET	0x0800	/* Use largest buckets */
+#define	UMA_ZONE_NOBUCKET	0x0400	/* Do not use buckets. */
+#define	UMA_ZONE_MAXBUCKET	0x0800	/* Use largest buckets. */
 #define	UMA_ZONE_CACHESPREAD	0x1000	/*
 					 * Spread memory start locations across
 					 * all possible cache lines.  May
@@ -276,9 +266,11 @@ uma_zone_t uma_zcache_create(char *name, int size, uma_ctor ctor, uma_dtor dtor,
 					 * mini-dumps.
 					 */
 #define	UMA_ZONE_PCPU		0x8000	/*
-					 * Allocates mp_maxid + 1 slabs sized to
-					 * sizeof(struct pcpu).
+					 * Allocates mp_maxid + 1 slabs of PAGE_SIZE
 					 */
+#define	UMA_ZONE_MINBUCKET	0x10000	/* Use smallest buckets. */
+#define	UMA_ZONE_FIRSTTOUCH	0x20000	/* First touch NUMA policy */
+#define	UMA_ZONE_ROUNDROBIN	0x40000	/* Round-robin NUMA policy. */
 
 /*
  * These flags are shared between the keg and zone.  In zones wishing to add
@@ -287,7 +279,8 @@ uma_zone_t uma_zcache_create(char *name, int size, uma_ctor ctor, uma_dtor dtor,
  */
 #define	UMA_ZONE_INHERIT						\
     (UMA_ZONE_OFFPAGE | UMA_ZONE_MALLOC | UMA_ZONE_NOFREE |		\
-    UMA_ZONE_HASH | UMA_ZONE_VTOSLAB | UMA_ZONE_PCPU)
+    UMA_ZONE_HASH | UMA_ZONE_VTOSLAB | UMA_ZONE_PCPU |			\
+    UMA_ZONE_FIRSTTOUCH | UMA_ZONE_ROUNDROBIN)
 
 /* Definitions for align */
 #define UMA_ALIGN_PTR	(sizeof(void *) - 1)	/* Alignment fit for ptr */
@@ -296,6 +289,9 @@ uma_zone_t uma_zcache_create(char *name, int size, uma_ctor ctor, uma_dtor dtor,
 #define UMA_ALIGN_SHORT	(sizeof(short) - 1)	/* "" short */
 #define UMA_ALIGN_CHAR	(sizeof(char) - 1)	/* "" char */
 #define UMA_ALIGN_CACHE	(0 - 1)			/* Cache line size align */
+#define	UMA_ALIGNOF(type) (_Alignof(type) - 1)	/* Alignment fit for 'type' */
+
+#define	UMA_ANYDOMAIN	-1	/* Special value for domain search. */
 
 /*
  * Destroys an empty uma zone.  If the zone is not empty uma complains loudly.
@@ -321,6 +317,20 @@ void uma_zdestroy(uma_zone_t zone);
  */
 
 void *uma_zalloc_arg(uma_zone_t zone, void *arg, int flags);
+void *uma_zalloc_pcpu_arg(uma_zone_t zone, void *arg, int flags);
+
+/*
+ * Allocate an item from a specific NUMA domain.  This uses a slow path in
+ * the allocator but is guaranteed to allocate memory from the requested
+ * domain if M_WAITOK is set.
+ *
+ * Arguments:
+ *	zone  The zone we are allocating from
+ *	arg   This data is passed to the ctor function
+ *	domain The domain to allocate from.
+ *	flags See sys/malloc.h for available flags.
+ */
+void *uma_zalloc_domain(uma_zone_t zone, void *arg, int domain, int flags);
 
 /*
  * Allocates an item out of a zone without supplying an argument
@@ -329,11 +339,18 @@ void *uma_zalloc_arg(uma_zone_t zone, void *arg, int flags);
  *
  */
 static __inline void *uma_zalloc(uma_zone_t zone, int flags);
+static __inline void *uma_zalloc_pcpu(uma_zone_t zone, int flags);
 
 static __inline void *
 uma_zalloc(uma_zone_t zone, int flags)
 {
 	return uma_zalloc_arg(zone, NULL, flags);
+}
+
+static __inline void *
+uma_zalloc_pcpu(uma_zone_t zone, int flags)
+{
+	return uma_zalloc_pcpu_arg(zone, NULL, flags);
 }
 
 /*
@@ -349,6 +366,17 @@ uma_zalloc(uma_zone_t zone, int flags)
  */
 
 void uma_zfree_arg(uma_zone_t zone, void *item, void *arg);
+void uma_zfree_pcpu_arg(uma_zone_t zone, void *item, void *arg);
+
+/*
+ * Frees an item back to the specified zone's domain specific pool.
+ *
+ * Arguments:
+ *	zone  The zone the item was originally allocated out of.
+ *	item  The memory to be freed.
+ *	arg   Argument passed to the destructor
+ */
+void uma_zfree_domain(uma_zone_t zone, void *item, void *arg);
 
 /*
  * Frees an item back to a zone without supplying an argument
@@ -357,6 +385,7 @@ void uma_zfree_arg(uma_zone_t zone, void *item, void *arg);
  *
  */
 static __inline void uma_zfree(uma_zone_t zone, void *item);
+static __inline void uma_zfree_pcpu(uma_zone_t zone, void *item);
 
 static __inline void
 uma_zfree(uma_zone_t zone, void *item)
@@ -364,10 +393,16 @@ uma_zfree(uma_zone_t zone, void *item)
 	uma_zfree_arg(zone, item, NULL);
 }
 
+static __inline void
+uma_zfree_pcpu(uma_zone_t zone, void *item)
+{
+	uma_zfree_pcpu_arg(zone, item, NULL);
+}
+
 /*
- * XXX The rest of the prototypes in this header are h0h0 magic for the VM.
- * If you think you need to use it for a normal zone you're probably incorrect.
+ * Wait until the specified zone can allocate an item.
  */
+void uma_zwait(uma_zone_t zone);
 
 /*
  * Backend page supplier routines
@@ -376,14 +411,15 @@ uma_zfree(uma_zone_t zone, void *item)
  *	zone  The zone that is requesting pages.
  *	size  The number of bytes being requested.
  *	pflag Flags for these memory pages, see below.
+ *	domain The NUMA domain that we prefer for this allocation.
  *	wait  Indicates our willingness to block.
  *
  * Returns:
  *	A pointer to the allocated memory or NULL on failure.
  */
 
-typedef void *(*uma_alloc)(uma_zone_t zone, vm_size_t size, uint8_t *pflag,
-    int wait);
+typedef void *(*uma_alloc)(uma_zone_t zone, vm_size_t size, int domain,
+    uint8_t *pflag, int wait);
 
 /*
  * Backend page free routines
@@ -398,54 +434,19 @@ typedef void *(*uma_alloc)(uma_zone_t zone, vm_size_t size, uint8_t *pflag,
  */
 typedef void (*uma_free)(void *item, vm_size_t size, uint8_t pflag);
 
-
-
 /*
- * Sets up the uma allocator. (Called by vm_mem_init)
+ * Reclaims unused memory
  *
  * Arguments:
- *	bootmem  A pointer to memory used to bootstrap the system.
- *
- * Returns:
- *	Nothing
- *
- * Discussion:
- *	This memory is used for zones which allocate things before the
- *	backend page supplier can give us pages.  It should be
- *	UMA_SLAB_SIZE * boot_pages bytes. (see uma_int.h)
- *
- */
-
-void uma_startup(void *bootmem, int boot_pages);
-
-/*
- * Finishes starting up the allocator.  This should
- * be called when kva is ready for normal allocs.
- *
- * Arguments:
- *	None
- *
- * Returns:
- *	Nothing
- *
- * Discussion:
- *	uma_startup2 is called by kmeminit() to enable us of uma for malloc.
- */
-
-void uma_startup2(void);
-
-/*
- * Reclaims unused memory for all zones
- *
- * Arguments:
- *	None
+ *	req  Reclamation request type.
  * Returns:
  *	None
- *
- * This should only be called by the page out daemon.
  */
-
-void uma_reclaim(void);
+#define	UMA_RECLAIM_DRAIN	1	/* release bucket cache */
+#define	UMA_RECLAIM_DRAIN_CPU	2	/* release bucket and per-CPU caches */
+#define	UMA_RECLAIM_TRIM	3	/* trim bucket cache to WSS */
+void uma_reclaim(int req);
+void uma_zone_reclaim(uma_zone_t, int req);
 
 /*
  * Sets the alignment mask to be used for all zones requesting cache
@@ -492,9 +493,18 @@ int uma_zone_reserve_kva(uma_zone_t zone, int nitems);
  *	nitems  The requested upper limit on the number of items allowed
  *
  * Returns:
- *	int  The effective value of nitems after rounding up based on page size
+ *	int  The effective value of nitems
  */
 int uma_zone_set_max(uma_zone_t zone, int nitems);
+
+/*
+ * Sets a high limit on the number of items allowed in zone's bucket cache
+ *
+ * Arguments:
+ *      zone  The zone to limit
+ *      nitems  The requested upper limit on the number of items allowed
+ */
+void uma_zone_set_maxcache(uma_zone_t zone, int nitems);
 
 /*
  * Obtains the effective limit on the number of items in a zone
@@ -601,12 +611,10 @@ void uma_zone_set_freef(uma_zone_t zone, uma_free freef);
  * These flags are setable in the allocf and visible in the freef.
  */
 #define UMA_SLAB_BOOT	0x01		/* Slab alloced from boot pages */
-#define UMA_SLAB_KMEM	0x02		/* Slab alloced from kmem_map */
-#define UMA_SLAB_KERNEL	0x04		/* Slab alloced from kernel_map */
+#define UMA_SLAB_KERNEL	0x04		/* Slab alloced from kmem */
 #define UMA_SLAB_PRIV	0x08		/* Slab alloced from priv allocator */
 #define UMA_SLAB_OFFP	0x10		/* Slab is managed separately  */
-#define UMA_SLAB_MALLOC	0x20		/* Slab is a large malloc slab */
-/* 0x40 and 0x80 are available */
+/* 0x02, 0x40, and 0x80 are available */
 
 /*
  * Used to pre-fill a zone with some number of items
@@ -632,13 +640,12 @@ void uma_prealloc(uma_zone_t zone, int itemcnt);
  *	Non-zero if zone is exhausted.
  */
 int uma_zone_exhausted(uma_zone_t zone);
-int uma_zone_exhausted_nolock(uma_zone_t zone);
 
 /*
  * Common UMA_ZONE_PCPU zones.
  */
+extern uma_zone_t pcpu_zone_int;
 extern uma_zone_t pcpu_zone_64;
-extern uma_zone_t pcpu_zone_ptr;
 
 /*
  * Exported statistics structures to be used by user space monitoring tools.
@@ -678,7 +685,8 @@ struct uma_type_header {
 	uint64_t	uth_frees;	/* Zone: number of frees. */
 	uint64_t	uth_fails;	/* Zone: number of alloc failures. */
 	uint64_t	uth_sleeps;	/* Zone: number of alloc sleeps. */
-	uint64_t	_uth_reserved1[2];	/* Reserved. */
+	uint64_t	uth_xdomain;	/* Zone: Number of cross domain frees. */
+	uint64_t	_uth_reserved1[1];	/* Reserved. */
 };
 
 struct uma_percpu_stat {
@@ -690,5 +698,13 @@ struct uma_percpu_stat {
 
 void uma_reclaim_wakeup(void);
 void uma_reclaim_worker(void *);
+
+unsigned long uma_limit(void);
+
+/* Return the amount of memory managed by UMA. */
+unsigned long uma_size(void);
+
+/* Return the amount of memory remaining.  May be negative. */
+long uma_avail(void);
 
 #endif	/* _VM_UMA_H_ */

@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2006 Bernd Walter.  All rights reserved.
- * Copyright (c) 2006 M. Warner Losh.  All rights reserved.
+ * Copyright (c) 2006 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -60,9 +60,14 @@ struct mmc_softc {
 	struct mtx sc_mtx;
 	struct intr_config_hook config_intrhook;
 	device_t owner;
-	uint32_t last_rca;
-	int	 squelched; /* suppress reporting of (expected) errors */
-	int	 log_count;
+	device_t *child_list;
+	int child_count;
+	uint16_t last_rca;
+	uint16_t retune_paused;
+	uint8_t retune_needed;
+	uint8_t retune_ongoing;
+	uint16_t squelched;	/* suppress reporting of (expected) errors */
+	int log_count;
 	struct timeval log_time;
 };
 

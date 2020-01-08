@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2000-2004 Poul-Henning Kamp <phk@FreeBSD.org>
  * Copyright (c) 2012 The FreeBSD Foundation
  * All rights reserved.
@@ -79,14 +81,15 @@ usage(void)
 
 	fprintf(stderr,
 "usage: mdconfig -a -t type [-n] [-o [no]option] ... [-f file]\n"
-"                [-s size] [-S sectorsize] [-u unit]\n"
+"                [-s size] [-S sectorsize] [-u unit] [-L label]\n"
 "                [-x sectors/track] [-y heads/cylinder]\n"
 "       mdconfig -d -u unit [-o [no]force]\n"
 "       mdconfig -r -u unit -s size [-o [no]force]\n"
 "       mdconfig -l [-v] [-n] [-f file] [-u unit]\n"
 "       mdconfig file\n");
 	fprintf(stderr, "\t\ttype = {malloc, vnode, swap}\n");
-	fprintf(stderr, "\t\toption = {cluster, compress, reserve}\n");
+	fprintf(stderr, "\t\toption = {cache, cluster, compress, force,\n");
+	fprintf(stderr, "\t\t          readonly, reserve, ro, verify}\n");
 	fprintf(stderr, "\t\tsize = %%d (512 byte blocks), %%db (B),\n");
 	fprintf(stderr, "\t\t       %%dk (kB), %%dm (MB), %%dg (GB), \n");
 	fprintf(stderr, "\t\t       %%dt (TB), or %%dp (PB)\n");
@@ -102,15 +105,17 @@ main(int argc, char **argv)
 
 	bzero(&mdio, sizeof(mdio));
 	mdio.md_file = malloc(PATH_MAX);
-	if (mdio.md_file == NULL)
+	mdio.md_label = malloc(PATH_MAX);
+	if (mdio.md_file == NULL || mdio.md_label == NULL)
 		err(1, "could not allocate memory");
 	vflag = 0;
 	bzero(mdio.md_file, PATH_MAX);
+	bzero(mdio.md_label, PATH_MAX);
 
 	if (argc == 1)
 		usage();
 
-	while ((ch = getopt(argc, argv, "ab:df:lno:rs:S:t:u:vx:y:")) != -1) {
+	while ((ch = getopt(argc, argv, "ab:df:lno:rs:S:t:u:vx:y:L:")) != -1) {
 		switch (ch) {
 		case 'a':
 			if (action != UNSET && action != ATTACH)
@@ -173,6 +178,10 @@ main(int argc, char **argv)
 				mdio.md_options |= MD_ASYNC;
 			else if (!strcmp(optarg, "noasync"))
 				mdio.md_options &= ~MD_ASYNC;
+			else if (!strcmp(optarg, "cache"))
+				mdio.md_options |= MD_CACHE;
+			else if (!strcmp(optarg, "nocache"))
+				mdio.md_options &= ~MD_CACHE;
 			else if (!strcmp(optarg, "cluster"))
 				mdio.md_options |= MD_CLUSTER;
 			else if (!strcmp(optarg, "nocluster"))
@@ -188,6 +197,10 @@ main(int argc, char **argv)
 			else if (!strcmp(optarg, "readonly"))
 				mdio.md_options |= MD_READONLY;
 			else if (!strcmp(optarg, "noreadonly"))
+				mdio.md_options &= ~MD_READONLY;
+			else if (!strcmp(optarg, "ro"))
+				mdio.md_options |= MD_READONLY;
+			else if (!strcmp(optarg, "noro"))
 				mdio.md_options &= ~MD_READONLY;
 			else if (!strcmp(optarg, "reserve"))
 				mdio.md_options |= MD_RESERVE;
@@ -242,6 +255,9 @@ main(int argc, char **argv)
 			break;
 		case 'y':
 			mdio.md_fwheads = strtoul(optarg, &p, 0);
+			break;
+		case 'L':
+			strlcpy(mdio.md_label, optarg, PATH_MAX);
 			break;
 		default:
 			usage();
@@ -422,7 +438,8 @@ md_list(const char *units, int opt, const char *fflag)
 	struct gclass *gcl;
 	void *sq;
 	int retcode, ffound, ufound;
-	char *type, *file, *length;
+	char *length;
+	const char *type, *file, *label;
 
 	type = file = length = NULL;
 
@@ -477,10 +494,14 @@ md_list(const char *units, int opt, const char *fflag)
 				printf("\t%s\t", type);
 				if (length != NULL)
 					md_prthumanval(length);
-				if (file != NULL) {
-					printf("\t%s", file);
-					file = NULL;
-				}
+				if (file == NULL)
+					file = "-";
+				printf("\t%s", file);
+				file = NULL;
+				label = geom_config_get(gc, "label");
+				if (label == NULL)
+					label = "";
+				printf("\t%s", label);
 			}
 			opt |= OPT_DONE;
 			if ((opt & OPT_LIST) && !(opt & OPT_VERBOSE))

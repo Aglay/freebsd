@@ -28,17 +28,38 @@
  *
  * $FreeBSD$
  */
-#ifndef	_LINUX_RANDOM_H_
+
+#ifndef _LINUX_RANDOM_H_
 #define	_LINUX_RANDOM_H_
 
 #include <sys/random.h>
 #include <sys/libkern.h>
 
+#define	get_random_u32() get_random_int()
+
 static inline void
 get_random_bytes(void *buf, int nbytes)
 {
-	if (read_random(buf, nbytes) == 0)
-		arc4rand(buf, nbytes, 0);
+
+	arc4random_buf(buf, nbytes);
 }
 
-#endif	/* _LINUX_RANDOM_H_ */
+static inline u_int
+get_random_int(void)
+{
+	u_int val;
+
+	get_random_bytes(&val, sizeof(val));
+	return (val);
+}
+
+static inline u_long
+get_random_long(void)
+{
+	u_long val;
+
+	get_random_bytes(&val, sizeof(val));
+	return (val);
+}
+
+#endif /* _LINUX_RANDOM_H_ */

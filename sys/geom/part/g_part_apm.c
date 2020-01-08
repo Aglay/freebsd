@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2006-2008 Marcel Moolenaar
  * All rights reserved.
  *
@@ -105,6 +107,7 @@ static struct g_part_scheme g_part_apm_scheme = {
 	.gps_maxent = 4096,
 };
 G_PART_SCHEME_DECLARE(g_part_apm);
+MODULE_VERSION(geom_part_apm, 0);
 
 static void
 swab(char *buf, size_t bufsz)
@@ -207,7 +210,7 @@ apm_read_ent(struct g_consumer *cp, uint32_t blk, struct apm_ent *ent,
 }
 
 static int
-g_part_apm_add(struct g_part_table *basetable, struct g_part_entry *baseentry, 
+g_part_apm_add(struct g_part_table *basetable, struct g_part_entry *baseentry,
     struct g_part_parms *gpp)
 {
 	struct g_part_apm_entry *entry;
@@ -307,13 +310,13 @@ g_part_apm_dumpconf(struct g_part_table *table, struct g_part_entry *baseentry,
 		strncpy(u.name, entry->ent.ent_name, APM_ENT_NAMELEN);
 		u.name[APM_ENT_NAMELEN] = '\0';
 		sbuf_printf(sb, "%s<label>", indent);
-		g_conf_printf_escaped(sb, "%s", u.name);
-		sbuf_printf(sb, "</label>\n");
+		g_conf_cat_escaped(sb, u.name);
+		sbuf_cat(sb, "</label>\n");
 		strncpy(u.type, entry->ent.ent_type, APM_ENT_TYPELEN);
 		u.type[APM_ENT_TYPELEN] = '\0';
 		sbuf_printf(sb, "%s<rawtype>", indent);
-		g_conf_printf_escaped(sb, "%s", u.type);
-		sbuf_printf(sb, "</rawtype>\n");
+		g_conf_cat_escaped(sb, u.type);
+		sbuf_cat(sb, "</rawtype>\n");
 	} else {
 		/* confxml: scheme information */
 	}

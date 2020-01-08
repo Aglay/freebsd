@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2001, 2002 Scott Long <scottl@freebsd.org>
  * All rights reserved.
  *
@@ -328,7 +330,7 @@ udf_mountfs(struct vnode *devvp, struct mount *mp)
 	g_topology_lock();
 	error = g_vfs_open(devvp, &cp, "udf", 0);
 	g_topology_unlock();
-	VOP_UNLOCK(devvp, 0);
+	VOP_UNLOCK(devvp);
 	if (error)
 		goto bail;
 

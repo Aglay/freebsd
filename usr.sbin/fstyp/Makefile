@@ -3,7 +3,8 @@
 .include <src.opts.mk>
 
 PROG=	fstyp
-SRCS=	cd9660.c exfat.c ext2fs.c fstyp.c geli.c msdosfs.c ntfs.c ufs.c
+SRCS=	apfs.c cd9660.c exfat.c ext2fs.c fstyp.c geli.c hammer.c	\
+	hammer2.c hfsplus.c msdosfs.c ntfs.c ufs.c
 
 .if ${MK_ZFS} != "no"
 SRCS +=	zfs.c
@@ -13,10 +14,15 @@ MAN=	fstyp.8
 
 WARNS?=	2
 
+.if ${MK_ICONV} == "yes"
+CFLAGS+=	-DWITH_ICONV
+.endif
+
 .include <bsd.endian.mk>
 
-.if ${MK_TESTS} != "no" && ${TARGET_ENDIANNESS} == 1234
-SUBDIR+=	tests
+.if ${TARGET_ENDIANNESS} == 1234
+HAS_TESTS=
+SUBDIR.${MK_TESTS}+= tests
 .endif
 
 .if ${MK_ZFS} != "no"
@@ -30,13 +36,12 @@ CFLAGS+= -I${SRCTOP}/cddl/contrib/opensolaris/lib/libnvpair
 CFLAGS+= -I${SRCTOP}/cddl/contrib/opensolaris/lib/libzpool/common
 CFLAGS+= -I${SRCTOP}/sys/cddl/contrib/opensolaris/uts/common/fs/zfs
 CFLAGS+= -I${SRCTOP}/sys/cddl/contrib/opensolaris/uts/common
-CFLAGS+= -I${SRCTOP}/sys/cddl/contrib/opensolaris/uts/common/sys
 CFLAGS+= -I${SRCTOP}/cddl/contrib/opensolaris/head
 .endif
 
 CFLAGS+=-I${SRCTOP}/sys
 
-LIBADD=	geom md
+LIBADD=	geom md ufs
 
 .if ${MK_ZFS} != "no"
 LIBADD+=nvpair zfs

@@ -3,12 +3,11 @@
 #
 # $FreeBSD$
 #
-# TODO: This fails to build under universe, irnore it until it's fixed
 #NO_UNIVERSE
 
 ident		RT1310
 include 	"std.arm"
-hints		"RT1310.hints"
+include 	"../ralink/std.ralink"
 
 # Flattened Device Tree
 options 	FDT
@@ -18,7 +17,6 @@ makeoptions	FDT_DTS_FILE=wzr2-g300n.dts
 makeoptions	MODULES_OVERRIDE=""
 
 #makeoptions	DEBUG=-g		# Build kernel with gdb(1) debug symbols
-makeoptions	WERROR="-Werror"
 
 options 	SCHED_4BSD		# 4BSD scheduler
 options 	INET			# InterNETworking
@@ -53,7 +51,6 @@ options 	WITNESS_SKIPSPIN	# Don't run witness on spinlocks for speed
 device		loop
 device		md
 device		pty
-device		random
 
 # Serial ports
 device		uart

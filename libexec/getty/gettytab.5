@@ -28,7 +28,7 @@
 .\"     from: @(#)gettytab.5	8.4 (Berkeley) 4/19/94
 .\" $FreeBSD$
 .\" "
-.Dd February 2, 2017
+.Dd February 26, 2018
 .Dt GETTYTAB 5
 .Os
 .Sh NAME
@@ -109,9 +109,6 @@ scripts
 character
 .It "ev	str" Ta Dv NULL
 .Ta No "initial environment"
-.It "f0	num	unused	tty mode flags to write messages"
-.It "f1	num	unused	tty mode flags to read login name"
-.It "f2	num	unused	tty mode flags to leave terminal as"
 .It "fl	str" Ta So Li ^O
 .Sc Ta No "output flush character"
 .It "hc	bool	false	do"
@@ -130,6 +127,8 @@ hangup line on last close
 .It "ig	bool	false	ignore garbage characters in login name"
 .It "im	str" Ta Dv NULL
 .Ta No "initial (banner) message"
+.It "iM	str" Ta Dv NULL
+.Ta No "execute named file to generate initial (banner) message"
 .It "in	str" Ta So Li ^C
 .Sc Ta No "interrupt character"
 .It "is	num	unused	input speed"
@@ -146,7 +145,7 @@ hangup line on last close
 .It "mb	bool	false	do flow control based on carrier"
 .It "nc	bool	false	terminal does not supply carrier (set clocal)"
 .It "nl	bool	false	terminal has (or might have) a newline character"
-.It "np	bool	false	terminal uses no parity (i.e. 8-bit characters)"
+.It "np	bool	false	terminal uses no parity (i.e., 8-bit characters)"
 .It "nx	str	default	next table (for auto speed selection)"
 .It "o0	num	unused	tty output flags to write messages"
 .It "o1	num	unused	tty output flags to read login name"
@@ -201,6 +200,9 @@ The following capabilities are no longer supported by
 .It "bd	num	0	backspace delay"
 .It "cb	bool	false	use crt backspace mode"
 .It "cd	num	0	carriage-return delay"
+.It "f0	num	unused	tty mode flags to write messages"
+.It "f1	num	unused	tty mode flags to read login name"
+.It "f2	num	unused	tty mode flags to leave terminal as"
 .It "fd	num	0	form-feed (vertical motion) delay"
 .It "lc	bool	false	terminal has lower case"
 .It "nd	num	0	newline (line-feed) delay"
@@ -243,17 +245,6 @@ and
 .Va c_oflag
 fields, respectively.
 Each these sets must be completely specified to be effective.
-The
-.Va \&f0 ,
-.Va \&f1 ,
-and
-.Va \&f2
-are excepted for backwards compatibility with a previous incarnation of
-the TTY sub-system.
-In these flags the bottom 16 bits of the (32 bits)
-value contain the sgttyb
-.Va sg_flags
-field, while the top 16 bits represent the local mode word.
 .Pp
 Should
 .Xr getty 8

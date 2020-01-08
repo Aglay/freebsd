@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1988 University of Utah.
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -49,7 +51,7 @@ enum md_types {MD_MALLOC, MD_PRELOAD, MD_VNODE, MD_SWAP, MD_NULL};
  * Ioctl definitions for memory disk pseudo-device.
  */
 
-#define MDNPAD		97
+#define MDNPAD		96
 struct md_ioctl {
 	unsigned	md_version;	/* Structure layout version */
 	unsigned	md_unit;	/* unit number */
@@ -61,7 +63,8 @@ struct md_ioctl {
 	u_int64_t	md_base;	/* base address */
 	int		md_fwheads;	/* firmware heads */
 	int		md_fwsectors;	/* firmware sectors */
-	int		md_pad[MDNPAD];	/* padding for future ideas */
+	char		*md_label;	/* label of the device */
+	int		md_pad[MDNPAD];	/* padding */
 };
 
 #define MD_NAME		"md"
@@ -78,7 +81,6 @@ struct md_ioctl {
 #define MDIOCATTACH	_IOWR('m', 0, struct md_ioctl)	/* attach disk */
 #define MDIOCDETACH	_IOWR('m', 1, struct md_ioctl)	/* detach disk */
 #define MDIOCQUERY	_IOWR('m', 2, struct md_ioctl)	/* query status */
-#define MDIOCLIST	_IOWR('m', 3, struct md_ioctl)	/* query status */
 #define MDIOCRESIZE	_IOWR('m', 4, struct md_ioctl)	/* resize disk */
 
 #define MD_CLUSTER	0x01	/* Don't cluster */
@@ -89,5 +91,6 @@ struct md_ioctl {
 #define MD_FORCE	0x20	/* Don't try to prevent foot-shooting */
 #define MD_ASYNC	0x40	/* Asynchronous mode */
 #define MD_VERIFY	0x80	/* Open file with O_VERIFY (vnode only) */
+#define	MD_CACHE	0x100	/* Cache vnode data */
 
 #endif	/* _SYS_MDIOCTL_H_*/

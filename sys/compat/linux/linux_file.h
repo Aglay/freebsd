@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2007 Roman Divacky
  * All rights reserved.
  *
@@ -40,10 +42,10 @@
  */
 #define	LINUX_POSIX_FADV_NORMAL		0
 #define	LINUX_POSIX_FADV_RANDOM		1
-#define	LINUX_POSIX_FADV_SEQUENTIAL    	2
-#define	LINUX_POSIX_FADV_WILLNEED      	3
-#define	LINUX_POSIX_FADV_DONTNEED      	4
-#define	LINUX_POSIX_FADV_NOREUSE       	5
+#define	LINUX_POSIX_FADV_SEQUENTIAL	2
+#define	LINUX_POSIX_FADV_WILLNEED	3
+#define	LINUX_POSIX_FADV_DONTNEED	4
+#define	LINUX_POSIX_FADV_NOREUSE	5
 
 /*
  * mount flags
@@ -124,5 +126,19 @@
 #define	LINUX_F_WRLCK		1
 #define	LINUX_F_UNLCK		2
 #endif
+
+/*
+ * renameat2 flags
+ */
+#define	LINUX_RENAME_NOREPLACE	0x00000001
+#define	LINUX_RENAME_EXCHANGE	0x00000002
+#define	LINUX_RENAME_WHITEOUT	0x00000004
+
+/*
+ * sync_file_range flags
+ */
+#define	LINUX_SYNC_FILE_RANGE_WAIT_BEFORE	1
+#define	LINUX_SYNC_FILE_RANGE_WRITE		2
+#define	LINUX_SYNC_FILE_RANGE_WAIT_AFTER	4
 
 #endif	/* !_LINUX_FILE_H_ */

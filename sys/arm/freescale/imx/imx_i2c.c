@@ -53,6 +53,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/limits.h>
 #include <sys/module.h>
 #include <sys/resource.h>
+#include <sys/sysctl.h>
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -138,11 +139,22 @@ struct i2c_softc {
 	int			rb_pinctl_idx;
 	gpio_pin_t		rb_sclpin;
 	gpio_pin_t 		rb_sdapin;
+	u_int			debug;
+	u_int			slave;
 };
+
+#define DEVICE_DEBUGF(sc, lvl, fmt, args...) \
+    if ((lvl) <= (sc)->debug) \
+        device_printf((sc)->dev, fmt, ##args)
+
+#define DEBUGF(sc, lvl, fmt, args...) \
+    if ((lvl) <= (sc)->debug) \
+        printf(fmt, ##args)
 
 static phandle_t i2c_get_node(device_t, device_t);
 static int i2c_probe(device_t);
 static int i2c_attach(device_t);
+static int i2c_detach(device_t);
 
 static int i2c_repeated_start(device_t, u_char, int);
 static int i2c_start(device_t, u_char, int);
@@ -154,6 +166,7 @@ static int i2c_write(device_t, const char *, int, int *, int);
 static device_method_t i2c_methods[] = {
 	DEVMETHOD(device_probe,			i2c_probe),
 	DEVMETHOD(device_attach,		i2c_attach),
+	DEVMETHOD(device_detach,		i2c_detach),
 
 	/* OFW methods */
 	DEVMETHOD(ofw_bus_get_node,		i2c_get_node),
@@ -171,14 +184,16 @@ static device_method_t i2c_methods[] = {
 };
 
 static driver_t i2c_driver = {
-	"iichb",
+	"imx_i2c",
 	i2c_methods,
 	sizeof(struct i2c_softc),
 };
 static devclass_t  i2c_devclass;
 
-DRIVER_MODULE(i2c, simplebus, i2c_driver, i2c_devclass, 0, 0);
-DRIVER_MODULE(iicbus, i2c, iicbus_driver, iicbus_devclass, 0, 0);
+DRIVER_MODULE(imx_i2c, simplebus, i2c_driver, i2c_devclass, 0, 0);
+DRIVER_MODULE(ofw_iicbus, imx_i2c, ofw_iicbus_driver, ofw_iicbus_devclass, 0, 0);
+MODULE_DEPEND(imx_i2c, iicbus, 1, 1, 1);
+SIMPLEBUS_PNP_INFO(compat_data);
 
 static phandle_t
 i2c_get_node(device_t bus, device_t dev)
@@ -383,6 +398,12 @@ i2c_attach(device_t dev)
 		return (ENXIO);
 	}
 
+	/* Set up debug-enable sysctl. */
+	SYSCTL_ADD_INT(device_get_sysctl_ctx(sc->dev), 
+	    SYSCTL_CHILDREN(device_get_sysctl_tree(sc->dev)),
+	    OID_AUTO, "debug", CTLFLAG_RWTUN, &sc->debug, 0,
+	    "Enable debug; 1=reads/writes, 2=add starts/stops");
+
 	/*
 	 * Set up for bus recovery using gpio pins, if the pinctrl and gpio
 	 * properties are present.  This is optional.  If all the config data is
@@ -426,7 +447,33 @@ no_recovery:
 
 	/* We don't do a hardware reset here because iicbus_attach() does it. */
 
-	bus_generic_attach(dev);
+	/* Probe and attach the iicbus when interrupts are available. */
+	return (bus_delayed_attach_children(dev));
+}
+
+static int
+i2c_detach(device_t dev)
+{
+	struct i2c_softc *sc;
+	int error;
+
+	sc = device_get_softc(dev);
+
+	if ((error = bus_generic_detach(sc->dev)) != 0) {
+		device_printf(sc->dev, "cannot detach child devices\n");
+		return (error);
+	}
+
+	if (sc->iicbus != NULL)
+		device_delete_child(dev, sc->iicbus);
+
+	/* Release bus-recover pins; gpio_pin_release() handles NULL args. */
+	gpio_pin_release(sc->rb_sclpin);
+	gpio_pin_release(sc->rb_sdapin);
+
+	if (sc->res != NULL)
+		bus_release_resource(dev, SYS_RES_MEMORY, 0, sc->res);
+
 	return (0);
 }
 
@@ -450,6 +497,8 @@ i2c_repeated_start(device_t dev, u_char slave, int timeout)
 	DELAY(1);
 	i2c_write_reg(sc, I2C_STATUS_REG, 0x0);
 	i2c_write_reg(sc, I2C_DATA_REG, slave);
+	sc->slave = slave;
+	DEVICE_DEBUGF(sc, 2, "rstart 0x%02x\n", sc->slave);
 	error = wait_for_xfer(sc, true);
 	return (i2c_error_handler(sc, error));
 }
@@ -472,6 +521,8 @@ i2c_start_ll(device_t dev, u_char slave, int timeout)
 		return (i2c_error_handler(sc, error));
 	i2c_write_reg(sc, I2C_STATUS_REG, 0);
 	i2c_write_reg(sc, I2C_DATA_REG, slave);
+	sc->slave = slave;
+	DEVICE_DEBUGF(sc, 2, "start  0x%02x\n", sc->slave);
 	error = wait_for_xfer(sc, true);
 	return (i2c_error_handler(sc, error));
 }
@@ -511,6 +562,7 @@ i2c_stop(device_t dev)
 	i2c_write_reg(sc, I2C_CONTROL_REG, I2CCR_MEN);
 	wait_for_busbusy(sc, false);
 	i2c_write_reg(sc, I2C_CONTROL_REG, 0);
+	DEVICE_DEBUGF(sc, 2, "stop   0x%02x\n", sc->slave);
 	return (IIC_NOERR);
 }
 
@@ -521,6 +573,8 @@ i2c_reset(device_t dev, u_char speed, u_char addr, u_char *oldadr)
 	u_int busfreq, div, i, ipgfreq;
 
 	sc = device_get_softc(dev);
+
+	DEVICE_DEBUGF(sc, 1, "reset\n");
 
 	/*
 	 * Look up the divisor that gives the nearest speed that doesn't exceed
@@ -567,6 +621,7 @@ i2c_read(device_t dev, char *buf, int len, int *read, int last, int delay)
 	sc = device_get_softc(dev);
 	*read = 0;
 
+	DEVICE_DEBUGF(sc, 1, "read   0x%02x len %d: ", sc->slave, len);
 	if (len) {
 		if (len == 1)
 			i2c_write_reg(sc, I2C_CONTROL_REG, I2CCR_MEN |
@@ -598,9 +653,11 @@ i2c_read(device_t dev, char *buf, int len, int *read, int last, int delay)
 			}
 		}
 		reg = i2c_read_reg(sc, I2C_DATA_REG);
+		DEBUGF(sc, 1, "0x%02x ", reg);
 		*buf++ = reg;
 		(*read)++;
 	}
+	DEBUGF(sc, 1, "\n");
 
 	return (i2c_error_handler(sc, error));
 }
@@ -615,13 +672,15 @@ i2c_write(device_t dev, const char *buf, int len, int *sent, int timeout)
 
 	error = 0;
 	*sent = 0;
+	DEVICE_DEBUGF(sc, 1, "write  0x%02x len %d: ", sc->slave, len);
 	while (*sent < len) {
+		DEBUGF(sc, 1, "0x%02x ", *buf);
 		i2c_write_reg(sc, I2C_STATUS_REG, 0x0);
 		i2c_write_reg(sc, I2C_DATA_REG, *buf++);
 		if ((error = wait_for_xfer(sc, true)) != IIC_NOERR)
 			break;
 		(*sent)++;
 	}
-
+	DEBUGF(sc, 1, "\n");
 	return (i2c_error_handler(sc, error));
 }

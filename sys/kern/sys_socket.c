@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1986, 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -353,6 +355,7 @@ soo_fill_kinfo(struct file *fp, struct kinfo_file *kif, struct filedesc *fdp)
 
 	kif->kf_type = KF_TYPE_SOCKET;
 	so = fp->f_data;
+	CURVNET_SET(so->so_vnet);
 	kif->kf_un.kf_sock.kf_sock_domain0 =
 	    so->so_proto->pr_domain->dom_family;
 	kif->kf_un.kf_sock.kf_sock_type0 = so->so_type;
@@ -405,6 +408,7 @@ soo_fill_kinfo(struct file *fp, struct kinfo_file *kif, struct filedesc *fdp)
 	}
 	strncpy(kif->kf_path, so->so_proto->pr_domain->dom_name,
 	    sizeof(kif->kf_path));
+	CURVNET_RESTORE();
 	return (0);	
 }
 
@@ -693,6 +697,7 @@ soaio_process_sb(struct socket *so, struct sockbuf *sb)
 {
 	struct kaiocb *job;
 
+	CURVNET_SET(so->so_vnet);
 	SOCKBUF_LOCK(sb);
 	while (!TAILQ_EMPTY(&sb->sb_aiojobq) && soaio_ready(so, sb)) {
 		job = TAILQ_FIRST(&sb->sb_aiojobq);
@@ -715,6 +720,7 @@ soaio_process_sb(struct socket *so, struct sockbuf *sb)
 
 	SOCK_LOCK(so);
 	sorele(so);
+	CURVNET_RESTORE();
 }
 
 void
@@ -744,11 +750,7 @@ sowakeup_aio(struct socket *so, struct sockbuf *sb)
 	if (sb->sb_flags & SB_AIO_RUNNING)
 		return;
 	sb->sb_flags |= SB_AIO_RUNNING;
-	if (sb == &so->so_snd)
-		SOCK_LOCK(so);
 	soref(so);
-	if (sb == &so->so_snd)
-		SOCK_UNLOCK(so);
 	soaio_enqueue(&sb->sb_aiotask);
 }
 

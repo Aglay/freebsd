@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -342,7 +342,7 @@ AcpiDmBitList (
  *
  * FUNCTION:    AcpiDmResourceTemplate
  *
- * PARAMETERS:  Info            - Curent parse tree walk info
+ * PARAMETERS:  Info            - Current parse tree walk info
  *              ByteData        - Pointer to the byte list data
  *              ByteCount       - Length of the byte list
  *
@@ -441,7 +441,6 @@ AcpiDmResourceTemplate (
                  * missing EndDependentDescriptor.
                  */
                 Level--;
-                DependentFns = FALSE;
 
                 /* Go ahead and insert EndDependentFn() */
 
@@ -540,8 +539,22 @@ AcpiDmIsResourceTemplate (
     BufferLength = NextOp->Common.Value.Size;
 
     /*
+     * Any buffer smaller than one byte cannot possibly be a resource
+     * template. Two bytes could possibly be a "NULL" resource template
+     * with a lone end tag descriptor (as generated via
+     * "ResourceTemplate(){}"), but this would be an extremely unusual
+     * case, as the template would be essentially useless. The disassembler
+     * therefore does not recognize any two-byte buffer as a resource
+     * template.
+     */
+    if (BufferLength <= 2)
+    {
+        return (AE_TYPE);
+    }
+
+    /*
      * Not a template if declared buffer length != actual length of the
-     * intialization byte list. Because the resource macros will create
+     * initialization byte list. Because the resource macros will create
      * a buffer of the exact required length (buffer length will be equal
      * to the actual length).
      *

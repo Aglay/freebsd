@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009 Oleksandr Tymoshenko
  * All rights reserved.
  *
@@ -37,10 +39,15 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/cons.h>
 #include <sys/kdb.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
+#include <sys/boot.h>
 #include <sys/reboot.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 
 #include <net/ethernet.h>
 
@@ -50,7 +57,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/hwfunc.h>
 #include <machine/md_var.h>
 #include <machine/trap.h>
-#include <machine/vmparam.h>
 
 #include <mips/atheros/ar71xxreg.h>
 
@@ -63,39 +69,6 @@ extern char edata[], end[];
 /* 4KB static data aread to keep a copy of the bootload env until
    the dynamic kenv is setup */
 char boot1_env[4096];
-
-/*
- * We get a string in from Redboot with the all the arguments together,
- * "foo=bar bar=baz". Split them up and save in kenv.
- */
-static void
-parse_argv(char *str)
-{
-	char *n, *v;
-
-	while ((v = strsep(&str, " ")) != NULL) {
-		if (*v == '\0')
-			continue;
-		if (*v == '-') {
-			while (*v != '\0') {
-				v++;
-				switch (*v) {
-				case 'a': boothowto |= RB_ASKNAME; break;
-				case 'd': boothowto |= RB_KDB; break;
-				case 'g': boothowto |= RB_GDB; break;
-				case 's': boothowto |= RB_SINGLE; break;
-				case 'v': boothowto |= RB_VERBOSE; break;
-				}
-			}
-		} else {
-			n = strsep(&v, "=");
-			if (v == NULL)
-				kern_setenv(n, "1");
-			else
-				kern_setenv(n, v);
-		}
-	}
-}
 
 void
 platform_cpu_init()
@@ -426,7 +399,7 @@ platform_start(__register_t a0 __unused, __register_t a1 __unused,
 	if (MIPS_IS_VALID_PTR(argv)) {
 		for (i = 0; i < argc; i++) {
 			printf(" %s", argv[i]);
-			parse_argv(argv[i]);
+			boothowto |= boot_parse_arg(argv[i]);
 		}
 	}
 	else

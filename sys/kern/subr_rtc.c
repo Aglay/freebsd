@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1988 University of Utah.
  * Copyright (c) 1982, 1990, 1993
  *	The Regents of the University of California.
@@ -74,6 +76,15 @@ __FBSDID("$FreeBSD$");
 
 #include "clock_if.h"
 
+static int show_io;
+SYSCTL_INT(_debug, OID_AUTO, clock_show_io, CTLFLAG_RWTUN, &show_io, 0,
+    "Enable debug printing of RTC clock I/O; 1=reads, 2=writes, 3=both.");
+
+static int sysctl_clock_do_io(SYSCTL_HANDLER_ARGS);
+SYSCTL_PROC(_debug, OID_AUTO, clock_do_io, CTLTYPE_INT | CTLFLAG_RW,
+    0, 0, sysctl_clock_do_io, "I",
+    "Trigger one-time IO on RTC clocks; 1=read (and discard), 2=write");
+
 /* XXX: should be kern. now, it's no longer machdep.  */
 static int disable_rtc_set;
 SYSCTL_INT(_machdep, OID_AUTO, disable_rtc_set, CTLFLAG_RW, &disable_rtc_set,
@@ -95,7 +106,10 @@ struct rtc_instance {
 	device_t	clockdev;
 	int		resolution;
 	int		flags;
+	u_int		schedns;
 	struct timespec resadj;
+	struct timeout_task
+			stask;
 	LIST_ENTRY(rtc_instance)
 			rtc_entries;
 };
@@ -104,7 +118,6 @@ struct rtc_instance {
  * Clocks are updated using a task running on taskqueue_thread.
  */
 static void settime_task_func(void *arg, int pending);
-static struct task settime_task = TASK_INITIALIZER(0, settime_task_func, NULL);
 
 /*
  * Registered clocks are kept in a list which is sorted by resolution; the more
@@ -116,31 +129,85 @@ static struct sx rtc_list_lock;
 SX_SYSINIT(rtc_list_lock_init, &rtc_list_lock, "rtc list");
 
 /*
- * On the task thread, invoke the clock_settime() method of each registered
- * clock.  Do so holding only an sxlock, so that clock drivers are free to do
- * whatever kind of locking or sleeping they need to.
+ * On the task thread, invoke the clock_settime() method of the clock.  Do so
+ * holding no locks, so that clock drivers are free to do whatever kind of
+ * locking or sleeping they need to.
  */
 static void
 settime_task_func(void *arg, int pending)
 {
 	struct timespec ts;
 	struct rtc_instance *rtc;
+	int error;
 
-	sx_xlock(&rtc_list_lock);
-	LIST_FOREACH(rtc, &rtc_list, rtc_entries) {
-		if (!(rtc->flags & CLOCKF_SETTIME_NO_TS)) {
-			getnanotime(&ts);
-			if (!(rtc->flags & CLOCKF_SETTIME_NO_ADJ)) {
-				ts.tv_sec -= utc_offset();
-				timespecadd(&ts, &rtc->resadj);
-			}
-		} else {
-			ts.tv_sec  = 0;
-			ts.tv_nsec = 0;
+	rtc = arg;
+	if (!(rtc->flags & CLOCKF_SETTIME_NO_TS)) {
+		getnanotime(&ts);
+		if (!(rtc->flags & CLOCKF_SETTIME_NO_ADJ)) {
+			ts.tv_sec -= utc_offset();
+			timespecadd(&ts, &rtc->resadj, &ts);
 		}
-		CLOCK_SETTIME(rtc->clockdev, &ts);
+	} else {
+		ts.tv_sec  = 0;
+		ts.tv_nsec = 0;
 	}
-	sx_xunlock(&rtc_list_lock);
+	error = CLOCK_SETTIME(rtc->clockdev, &ts);
+	if (error != 0 && bootverbose)
+		device_printf(rtc->clockdev, "CLOCK_SETTIME error %d\n", error);
+}
+
+static void
+clock_dbgprint_hdr(device_t dev, int rw)
+{
+	struct timespec now;
+
+	getnanotime(&now);
+	device_printf(dev, "%s at ", (rw & CLOCK_DBG_READ) ? "read " : "write");
+	clock_print_ts(&now, 9);
+	printf(": "); 
+}
+
+void
+clock_dbgprint_bcd(device_t dev, int rw, const struct bcd_clocktime *bct)
+{
+
+	if (show_io & rw) {
+		clock_dbgprint_hdr(dev, rw);
+		clock_print_bcd(bct, 9);
+		printf("\n");
+	}
+}
+
+void
+clock_dbgprint_ct(device_t dev, int rw, const struct clocktime *ct)
+{
+
+	if (show_io & rw) {
+		clock_dbgprint_hdr(dev, rw);
+		clock_print_ct(ct, 9);
+		printf("\n");
+	}
+}
+
+void
+clock_dbgprint_err(device_t dev, int rw, int err)
+{
+
+	if (show_io & rw) {
+		clock_dbgprint_hdr(dev, rw);
+		printf("error = %d\n", err);
+	}
+}
+
+void
+clock_dbgprint_ts(device_t dev, int rw, const struct timespec *ts)
+{
+
+	if (show_io & rw) {
+		clock_dbgprint_hdr(dev, rw);
+		clock_print_ts(ts, 9);
+		printf("\n");
+	}
 }
 
 void
@@ -152,8 +219,11 @@ clock_register_flags(device_t clockdev, long resolution, int flags)
 	newrtc->clockdev = clockdev;
 	newrtc->resolution = (int)resolution;
 	newrtc->flags = flags;
+	newrtc->schedns = 0;
 	newrtc->resadj.tv_sec  = newrtc->resolution / 2 / 1000000;
 	newrtc->resadj.tv_nsec = newrtc->resolution / 2 % 1000000 * 1000;
+	TIMEOUT_TASK_INIT(taskqueue_thread, &newrtc->stask, 0,
+		    settime_task_func, newrtc);
 
 	sx_xlock(&rtc_list_lock);
 	if (LIST_EMPTY(&rtc_list)) {
@@ -192,10 +262,60 @@ clock_unregister(device_t clockdev)
 	LIST_FOREACH_SAFE(rtc, &rtc_list, rtc_entries, tmp) {
 		if (rtc->clockdev == clockdev) {
 			LIST_REMOVE(rtc, rtc_entries);
-			free(rtc, M_DEVBUF);
+			break;
 		}
 	}
 	sx_xunlock(&rtc_list_lock);
+	if (rtc != NULL) {
+		taskqueue_cancel_timeout(taskqueue_thread, &rtc->stask, NULL);
+		taskqueue_drain_timeout(taskqueue_thread, &rtc->stask);
+		free(rtc, M_DEVBUF);
+	}
+}
+
+void
+clock_schedule(device_t clockdev, u_int offsetns)
+{
+	struct rtc_instance *rtc;
+
+	sx_xlock(&rtc_list_lock);
+	LIST_FOREACH(rtc, &rtc_list, rtc_entries) {
+		if (rtc->clockdev == clockdev) {
+			rtc->schedns = offsetns;
+			break;
+		}
+	}
+	sx_xunlock(&rtc_list_lock);
+}
+
+static int
+read_clocks(struct timespec *ts, bool debug_read)
+{
+	struct rtc_instance *rtc;
+	int error;
+
+	error = ENXIO;
+	sx_xlock(&rtc_list_lock);
+	LIST_FOREACH(rtc, &rtc_list, rtc_entries) {
+		if ((error = CLOCK_GETTIME(rtc->clockdev, ts)) != 0)
+			continue;
+		if (ts->tv_sec < 0 || ts->tv_nsec < 0) {
+			error = EINVAL;
+			continue;
+		}
+		if (!(rtc->flags & CLOCKF_GETTIME_NO_ADJ)) {
+			timespecadd(ts, &rtc->resadj, ts);
+			ts->tv_sec += utc_offset();
+		}
+		if (!debug_read) {
+			if (bootverbose)
+				device_printf(rtc->clockdev,
+				    "providing initial system time\n");
+			break;
+		}
+	}
+	sx_xunlock(&rtc_list_lock);
+	return (error);
 }
 
 /*
@@ -214,28 +334,9 @@ void
 inittodr(time_t base)
 {
 	struct timespec ts;
-	struct rtc_instance *rtc;
 	int error;
 
-	error = ENXIO;
-	sx_xlock(&rtc_list_lock);
-	LIST_FOREACH(rtc, &rtc_list, rtc_entries) {
-		if ((error = CLOCK_GETTIME(rtc->clockdev, &ts)) != 0)
-			continue;
-		if (ts.tv_sec < 0 || ts.tv_nsec < 0) {
-			error = EINVAL;
-			continue;
-		}
-		if (!(rtc->flags & CLOCKF_GETTIME_NO_ADJ)) {
-			timespecadd(&ts, &rtc->resadj);
-			ts.tv_sec += utc_offset();
-		}
-		if (bootverbose)
-			device_printf(rtc->clockdev,
-			    "providing initial system time\n");
-		break;
-	}
-	sx_xunlock(&rtc_list_lock);
+	error = read_clocks(&ts, false);
 
 	/*
 	 * Do not report errors from each clock; it is expected that some clocks
@@ -275,9 +376,52 @@ inittodr(time_t base)
 void
 resettodr(void)
 {
+	struct timespec now;
+	struct rtc_instance *rtc;
+	sbintime_t sbt;
+	long waitns;
 
 	if (disable_rtc_set)
 		return;
 
-	taskqueue_enqueue(taskqueue_thread, &settime_task);
+	sx_xlock(&rtc_list_lock);
+	LIST_FOREACH(rtc, &rtc_list, rtc_entries) {
+		if (rtc->schedns != 0) {
+			getnanotime(&now);
+			waitns = rtc->schedns - now.tv_nsec;
+			if (waitns < 0)
+				waitns += 1000000000;
+			sbt = nstosbt(waitns);
+		} else
+			sbt = 0;
+		taskqueue_enqueue_timeout_sbt(taskqueue_thread,
+		    &rtc->stask, -sbt, 0, C_PREL(31));
+	}
+	sx_xunlock(&rtc_list_lock);
+}
+
+static int
+sysctl_clock_do_io(SYSCTL_HANDLER_ARGS)
+{
+	struct timespec ts_discard;
+	int error, value;
+
+	value = 0;
+	error = sysctl_handle_int(oidp, &value, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+
+	switch (value) {
+	case CLOCK_DBG_READ:
+		if (read_clocks(&ts_discard, true) == ENXIO)
+			printf("No registered RTC clocks\n");
+		break;
+	case CLOCK_DBG_WRITE:
+		resettodr();
+		break;
+	default:
+                return (EINVAL);
+	}
+
+	return (0);
 }

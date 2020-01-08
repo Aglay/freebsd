@@ -1,6 +1,8 @@
     /*	$OpenBSD: machdep.c,v 1.33 1998/09/15 10:58:54 pefo Exp $	*/
 /* tracked to 1.38 */
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1988 University of Utah.
  * Copyright (c) 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -68,6 +70,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_kern.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
 #include <vm/vm_pager.h>
@@ -138,9 +141,7 @@ char pcpu_space[MAXCPU][PAGE_SIZE * 2] \
 
 struct pcpu *pcpup = (struct pcpu *)pcpu_space;
 
-vm_paddr_t phys_avail[PHYS_AVAIL_ENTRIES + 2];
-vm_paddr_t physmem_desc[PHYS_AVAIL_ENTRIES + 2];
-vm_paddr_t dump_avail[PHYS_AVAIL_ENTRIES + 2];
+vm_paddr_t physmem_desc[PHYS_AVAIL_COUNT];
 
 #ifdef UNIMPLEMENTED
 struct platform platform;
@@ -184,6 +185,8 @@ cpu_startup(void *dummy)
 	if (boothowto & RB_VERBOSE)
 		bootverbose++;
 
+	printf("CPU model: %s\n", cpu_model);
+
 	printf("real memory  = %ju (%juK bytes)\n", ptoa((uintmax_t)realmem),
 	    ptoa((uintmax_t)realmem) / 1024);
 
@@ -208,8 +211,8 @@ cpu_startup(void *dummy)
 	vm_ksubmap_init(&kmi);
 
 	printf("avail memory = %ju (%juMB)\n", 
-	    ptoa((uintmax_t)vm_cnt.v_free_count),
-	    ptoa((uintmax_t)vm_cnt.v_free_count) / 1048576);
+	    ptoa((uintmax_t)vm_free_count()),
+	    ptoa((uintmax_t)vm_free_count()) / 1048576);
 	cpu_init_interrupts();
 
 	/*
@@ -316,8 +319,6 @@ cpu_initclocks(void)
 	cpu_initclocks_bsp();
 }
 
-struct msgbuf *msgbufp = NULL;
-
 /*
  * Initialize the hardware exception vectors, and the jump table used to
  * call locore cache and TLB management functions, based on the kind
@@ -383,7 +384,11 @@ mips_vector_init(void)
 void
 mips_postboot_fixup(void)
 {
-	static char fake_preload[256];
+	/*
+	 * We store u_long sized objects into the reload area, so the array
+	 * must be so aligned. The standard allows any alignment for char data.
+	 */
+	_Alignas(_Alignof(u_long)) static char fake_preload[256];
 	caddr_t preload_ptr = (caddr_t)&fake_preload[0];
 	size_t size = 0;
 
@@ -511,9 +516,9 @@ spinlock_enter(void)
 		intr = intr_disable();
 		td->td_md.md_spinlock_count = 1;
 		td->td_md.md_saved_intr = intr;
+		critical_enter();
 	} else
 		td->td_md.md_spinlock_count++;
-	critical_enter();
 }
 
 void
@@ -523,11 +528,12 @@ spinlock_exit(void)
 	register_t intr;
 
 	td = curthread;
-	critical_exit();
 	intr = td->td_md.md_saved_intr;
 	td->td_md.md_spinlock_count--;
-	if (td->td_md.md_spinlock_count == 0)
+	if (td->td_md.md_spinlock_count == 0) {
+		critical_exit();
 		intr_restore(intr);
+	}
 }
 
 /*

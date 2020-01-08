@@ -55,7 +55,9 @@ uint8_t	r92c_temp_read(struct rtwn_softc *);
 
 /* r92c_chan.c */
 void	r92c_get_txpower(struct rtwn_softc *, int,
-	    struct ieee80211_channel *, uint16_t[]);
+	    struct ieee80211_channel *, uint8_t[]);
+void	r92c_write_txpower(struct rtwn_softc *, int,
+	    uint8_t power[]);
 void	r92c_set_bw20(struct rtwn_softc *, uint8_t);
 void	r92c_set_chan(struct rtwn_softc *, struct ieee80211_channel *);
 void	r92c_set_gain(struct rtwn_softc *, uint8_t);
@@ -100,6 +102,7 @@ void	r92c_efuse_postread(struct rtwn_softc *);
 void	r92c_parse_rom(struct rtwn_softc *, uint8_t *);
 
 /* r92c_rx.c */
+int	r92c_classify_intr(struct rtwn_softc *, void *, int);
 int8_t	r92c_get_rssi_cck(struct rtwn_softc *, void *);
 int8_t	r92c_get_rssi_ofdm(struct rtwn_softc *, void *);
 uint8_t	r92c_rx_radiotap_flags(const void *);

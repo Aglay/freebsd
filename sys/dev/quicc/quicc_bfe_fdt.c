@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 2006 Juniper Networks.
  * All rights reserved.
  *
@@ -38,7 +40,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/rman.h>
-#include <sys/tty.h>
 #include <machine/bus.h>
 
 #include <dev/ofw/ofw_bus.h>

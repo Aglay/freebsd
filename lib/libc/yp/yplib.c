@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1992/3 Theo de Raadt <deraadt@fsa.ca>
  * Copyright (c) 1998 Bill Paul <wpaul@ctr.columbia.edu>
  * All rights reserved.
@@ -524,7 +526,7 @@ gotit:
 		tv.tv_usec = 0;
 		ysd->dom_socket = RPC_ANYSOCK;
 		ysd->dom_client = clntudp_bufcreate(&ysd->dom_server_addr,
-			YPPROG, YPVERS, tv, &ysd->dom_socket, 1280, 2304);
+		    YPPROG, YPVERS, tv, &ysd->dom_socket, 65507, 65507);
 		if (ysd->dom_client == NULL) {
 			clnt_pcreateerror("clntudp_create");
 			ysd->dom_vers = -1;

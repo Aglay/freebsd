@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2003
  *	Bill Paul <wpaul@windriver.com>.  All rights reserved.
  *
@@ -280,6 +282,22 @@ ndisdrv_modevent(mod, cmd, arg)
 	return (error);
 }
 
+struct mclist_ctx {
+	uint8_t *mclist;
+	int mclistsz;
+};
+
+static u_int
+ndis_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct mclist_ctx *ctx = arg;
+
+	if (cnt < ctx->mclistsz)
+		bcopy(LLADDR(sdl), ctx->mclist + (ETHER_ADDR_LEN * cnt),
+		    ETHER_ADDR_LEN);
+	return (1);
+}
+
 /*
  * Program the 64-bit multicast hash filter.
  */
@@ -288,9 +306,8 @@ ndis_setmulti(sc)
 	struct ndis_softc	*sc;
 {
 	struct ifnet		*ifp;
-	struct ifmultiaddr	*ifma;
-	int			len, mclistsz, error;
-	uint8_t			*mclist;
+	struct mclist_ctx	ctx;
+	int			len, error;
 
 
 	if (!NDIS_INITIALIZED(sc))
@@ -311,40 +328,31 @@ ndis_setmulti(sc)
 		return;
 	}
 
-	if (TAILQ_EMPTY(&ifp->if_multiaddrs))
+	if (if_llmaddr_count(ifp) == 0)
 		return;
 
-	len = sizeof(mclistsz);
-	ndis_get_info(sc, OID_802_3_MAXIMUM_LIST_SIZE, &mclistsz, &len);
+	len = sizeof(ctx.mclistsz);
+	ndis_get_info(sc, OID_802_3_MAXIMUM_LIST_SIZE, &ctx.mclistsz, &len);
 
-	mclist = malloc(ETHER_ADDR_LEN * mclistsz, M_TEMP, M_NOWAIT|M_ZERO);
+	ctx.mclist = malloc(ETHER_ADDR_LEN * ctx.mclistsz, M_TEMP,
+	    M_NOWAIT | M_ZERO);
 
-	if (mclist == NULL) {
+	if (ctx.mclist == NULL) {
 		sc->ndis_filter |= NDIS_PACKET_TYPE_ALL_MULTICAST;
 		goto out;
 	}
 
 	sc->ndis_filter |= NDIS_PACKET_TYPE_MULTICAST;
 
-	len = 0;
-	if_maddr_rlock(ifp);
-	TAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		bcopy(LLADDR((struct sockaddr_dl *)ifma->ifma_addr),
-		    mclist + (ETHER_ADDR_LEN * len), ETHER_ADDR_LEN);
-		len++;
-		if (len > mclistsz) {
-			if_maddr_runlock(ifp);
-			sc->ndis_filter |= NDIS_PACKET_TYPE_ALL_MULTICAST;
-			sc->ndis_filter &= ~NDIS_PACKET_TYPE_MULTICAST;
+	len = if_foreach_llmaddr(ifp, ndis_copy_maddr, &ctx);
+	if (len > ctx.mclistsz) {
+		sc->ndis_filter |= NDIS_PACKET_TYPE_ALL_MULTICAST;
+		sc->ndis_filter &= ~NDIS_PACKET_TYPE_MULTICAST;
 			goto out;
-		}
 	}
-	if_maddr_runlock(ifp);
 
 	len = len * ETHER_ADDR_LEN;
-	error = ndis_set_info(sc, OID_802_3_MULTICAST_LIST, mclist, &len);
+	error = ndis_set_info(sc, OID_802_3_MULTICAST_LIST, ctx.mclist, &len);
 	if (error) {
 		device_printf(sc->ndis_dev, "set mclist failed: %d\n", error);
 		sc->ndis_filter |= NDIS_PACKET_TYPE_ALL_MULTICAST;
@@ -352,7 +360,7 @@ ndis_setmulti(sc)
 	}
 
 out:
-	free(mclist, M_TEMP);
+	free(ctx.mclist, M_TEMP);
 
 	len = sizeof(sc->ndis_filter);
 	error = ndis_set_info(sc, OID_GEN_CURRENT_PACKET_FILTER,
@@ -565,15 +573,6 @@ ndis_attach(device_t dev)
 	InitializeListHead(&sc->ndisusb_xferdonelist);
 	callout_init(&sc->ndis_stat_callout, 1);
 	mbufq_init(&sc->ndis_rxqueue, INT_MAX);	/* XXXGL: sane maximum */
-
-	if (sc->ndis_iftype == PCMCIABus) {
-		error = ndis_alloc_amem(sc);
-		if (error) {
-			device_printf(dev, "failed to allocate "
-			    "attribute memory\n");
-			goto fail;
-		}
-	}
 
 	/* Create sysctl registry nodes */
 	ndis_create_sysctls(sc);
@@ -1096,9 +1095,6 @@ ndis_detach(device_t dev)
 	if (ifp != NULL)
 		if_free(ifp);
 
-	if (sc->ndis_iftype == PCMCIABus)
-		ndis_free_amem(sc);
-
 	if (sc->ndis_sc)
 		ndis_destroy_dma(sc);
 
@@ -1418,7 +1414,7 @@ ndis_rxeof(adapter, packets, pktcnt)
 			p = packets[i];
 			if (p->np_oob.npo_status == NDIS_STATUS_SUCCESS) {
 				p->np_refcnt++;
-				(void)ndis_return_packet(NULL ,p, block);
+				ndis_return_packet(p);
 			}
 		}
 		return;
@@ -1431,7 +1427,7 @@ ndis_rxeof(adapter, packets, pktcnt)
 		if (ndis_ptom(&m0, p)) {
 			device_printf(sc->ndis_dev, "ptom failed\n");
 			if (p->np_oob.npo_status == NDIS_STATUS_SUCCESS)
-				(void)ndis_return_packet(NULL, p, block);
+				ndis_return_packet(p);
 		} else {
 #ifdef notdef
 			if (p->np_oob.npo_status == NDIS_STATUS_RESOURCES) {
@@ -2973,11 +2969,12 @@ ndis_80211ioctl(struct ieee80211com *ic, u_long cmd, void *data)
 	switch (cmd) {
 	case SIOCGDRVSPEC:
 	case SIOCSDRVSPEC:
-		error = copyin(ifr->ifr_data, &oid, sizeof(oid));
+		error = copyin(ifr_data_get_ptr(ifr), &oid, sizeof(oid));
 		if (error)
 			break;
 		oidbuf = malloc(oid.len, M_TEMP, M_WAITOK | M_ZERO);
-		error = copyin(ifr->ifr_data + sizeof(oid), oidbuf, oid.len);
+		error = copyin((caddr_t)ifr_data_get_ptr(ifr) + sizeof(oid),
+		    oidbuf, oid.len);
 	}
 
 	if (error) {
@@ -2999,7 +2996,7 @@ ndis_80211ioctl(struct ieee80211com *ic, u_long cmd, void *data)
 			NDIS_UNLOCK(sc);
 			break;
 		}
-		error = copyin(ifr->ifr_data, &evt, sizeof(evt));
+		error = copyin(ifr_data_get_ptr(ifr), &evt, sizeof(evt));
 		if (error) {
 			NDIS_UNLOCK(sc);
 			break;
@@ -3010,14 +3007,15 @@ ndis_80211ioctl(struct ieee80211com *ic, u_long cmd, void *data)
 			break;
 		}
 		error = copyout(&sc->ndis_evt[sc->ndis_evtcidx],
-		    ifr->ifr_data, sizeof(uint32_t) * 2);
+		    ifr_data_get_ptr(ifr), sizeof(uint32_t) * 2);
 		if (error) {
 			NDIS_UNLOCK(sc);
 			break;
 		}
 		if (sc->ndis_evt[sc->ndis_evtcidx].ne_len) {
 			error = copyout(sc->ndis_evt[sc->ndis_evtcidx].ne_buf,
-			    ifr->ifr_data + (sizeof(uint32_t) * 2),
+			    (caddr_t)ifr_data_get_ptr(ifr) +
+			    (sizeof(uint32_t) * 2),
 			    sc->ndis_evt[sc->ndis_evtcidx].ne_len);
 			if (error) {
 				NDIS_UNLOCK(sc);
@@ -3039,10 +3037,11 @@ ndis_80211ioctl(struct ieee80211com *ic, u_long cmd, void *data)
 	switch (cmd) {
 	case SIOCGDRVSPEC:
 	case SIOCSDRVSPEC:
-		error = copyout(&oid, ifr->ifr_data, sizeof(oid));
+		error = copyout(&oid, ifr_data_get_ptr(ifr), sizeof(oid));
 		if (error)
 			break;
-		error = copyout(oidbuf, ifr->ifr_data + sizeof(oid), oid.len);
+		error = copyout(oidbuf,
+		    (caddr_t)ifr_data_get_ptr(ifr) + sizeof(oid), oid.len);
 	}
 
 	free(oidbuf, M_TEMP);

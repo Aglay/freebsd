@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009-2013
  * 	Swinburne University of Technology, Melbourne, Australia
  * All rights reserved.
@@ -77,8 +79,6 @@ __FBSDID("$FreeBSD$");
 #include <vm/uma.h>
 
 #define	CDG_VERSION "0.1"
-
-#define	CAST_PTR_INT(X) (*((int*)(X)))
 
 /* Private delay-gradient induced congestion control signal. */
 #define	CC_CDG_DELAY 0x01000000
@@ -203,13 +203,13 @@ static MALLOC_DEFINE(M_CDG, "cdg data",
 
 static int ertt_id;
 
-static VNET_DEFINE(uint32_t, cdg_alpha_inc);
-static VNET_DEFINE(uint32_t, cdg_beta_delay);
-static VNET_DEFINE(uint32_t, cdg_beta_loss);
-static VNET_DEFINE(uint32_t, cdg_smoothing_factor);
-static VNET_DEFINE(uint32_t, cdg_exp_backoff_scale);
-static VNET_DEFINE(uint32_t, cdg_consec_cong);
-static VNET_DEFINE(uint32_t, cdg_hold_backoff);
+VNET_DEFINE_STATIC(uint32_t, cdg_alpha_inc);
+VNET_DEFINE_STATIC(uint32_t, cdg_beta_delay);
+VNET_DEFINE_STATIC(uint32_t, cdg_beta_loss);
+VNET_DEFINE_STATIC(uint32_t, cdg_smoothing_factor);
+VNET_DEFINE_STATIC(uint32_t, cdg_exp_backoff_scale);
+VNET_DEFINE_STATIC(uint32_t, cdg_consec_cong);
+VNET_DEFINE_STATIC(uint32_t, cdg_hold_backoff);
 #define	V_cdg_alpha_inc		VNET(cdg_alpha_inc)
 #define	V_cdg_beta_delay	VNET(cdg_beta_delay)
 #define	V_cdg_beta_loss		VNET(cdg_beta_loss)
@@ -356,22 +356,37 @@ cdg_cb_destroy(struct cc_var *ccv)
 static int
 cdg_beta_handler(SYSCTL_HANDLER_ARGS)
 {
+	int error;
+	uint32_t new;
 
-	if (req->newptr != NULL &&
-	    (CAST_PTR_INT(req->newptr) == 0 || CAST_PTR_INT(req->newptr) > 100))
-		return (EINVAL);
+	new = *(uint32_t *)arg1;
+	error = sysctl_handle_int(oidp, &new, 0, req);
+	if (error == 0 && req->newptr != NULL) {
+		if (new == 0 || new > 100)
+			error = EINVAL;
+		else
+			*(uint32_t *)arg1 = new;
+	}
 
-	return (sysctl_handle_int(oidp, arg1, arg2, req));
+	return (error);
 }
 
 static int
 cdg_exp_backoff_scale_handler(SYSCTL_HANDLER_ARGS)
 {
+	int error;
+	uint32_t new;
 
-	if (req->newptr != NULL && CAST_PTR_INT(req->newptr) < 1)
-		return (EINVAL);
+	new = *(uint32_t *)arg1;
+	error = sysctl_handle_int(oidp, &new, 0, req);
+	if (error == 0 && req->newptr != NULL) {
+		if (new < 1)
+			error = EINVAL;
+		else
+			*(uint32_t *)arg1 = new;
+	}
 
-	return (sysctl_handle_int(oidp, arg1, arg2, req));
+	return (error);
 }
 
 static inline uint32_t
@@ -431,11 +446,6 @@ static void
 cdg_cong_signal(struct cc_var *ccv, uint32_t signal_type)
 {
 	struct cdg *cdg_data = ccv->cc_data;
-	uint32_t cwin;
-	u_int mss;
-
-	cwin = CCV(ccv, snd_cwnd);
-	mss = CCV(ccv, t_maxseg);
 
 	switch(signal_type) {
 	case CC_CDG_DELAY:
@@ -453,7 +463,7 @@ cdg_cong_signal(struct cc_var *ccv, uint32_t signal_type)
 		 */
 		if (IN_CONGRECOVERY(CCV(ccv, t_flags)) ||
 		    cdg_data->queue_state < CDG_Q_FULL) {
-			CCV(ccv, snd_ssthresh) = cwin;
+			CCV(ccv, snd_ssthresh) = CCV(ccv, snd_cwnd);
 			CCV(ccv, snd_recover) = CCV(ccv, snd_max);
 		} else {
 			/*
@@ -466,18 +476,12 @@ cdg_cong_signal(struct cc_var *ccv, uint32_t signal_type)
 				    cdg_data->shadow_w, RENO_BETA);
 
 			CCV(ccv, snd_ssthresh) = max(cdg_data->shadow_w,
-			    cdg_window_decrease(ccv, cwin, V_cdg_beta_loss));
-			CCV(ccv, snd_cwnd) = CCV(ccv, snd_ssthresh);
+			    cdg_window_decrease(ccv, CCV(ccv, snd_cwnd),
+			    V_cdg_beta_loss));
 
 			cdg_data->window_incr = cdg_data->rtt_count = 0;
 		}
 		ENTER_RECOVERY(CCV(ccv, t_flags));
-		break;
-	case CC_RTO:
-		CCV(ccv, snd_ssthresh) =
-		    max((CCV(ccv, snd_max) - CCV(ccv, snd_una)) / 2 / mss, 2)
-			* mss;
-		CCV(ccv, snd_cwnd) = mss;
 		break;
 	default:
 		newreno_cc_algo.cong_signal(ccv, signal_type);
@@ -588,7 +592,11 @@ cdg_ack_received(struct cc_var *ccv, uint16_t ack_type)
 			qdiff_min = ((long)(cdg_data->minrtt_in_rtt -
 			    cdg_data->minrtt_in_prevrtt) << D_P_E );
 
-			calc_moving_average(cdg_data, qdiff_max, qdiff_min);
+			if (cdg_data->sample_q_size == 0) {
+				cdg_data->max_qtrend = qdiff_max;
+				cdg_data->min_qtrend = qdiff_min;
+			} else
+				calc_moving_average(cdg_data, qdiff_max, qdiff_min);
 
 			/* Probabilistic backoff with respect to gradient. */
 			if (slowstart && qdiff_min > 0)

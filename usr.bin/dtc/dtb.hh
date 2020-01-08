@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 David Chisnall
  * All rights reserved.
  *
@@ -107,6 +109,8 @@ inline const char *token_type_name(token_type t)
 			return "FDT_END";
 	}
 	assert(0);
+	// Not reached.
+	return nullptr;
 }
 
 /**

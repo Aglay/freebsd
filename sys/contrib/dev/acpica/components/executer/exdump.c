@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -229,7 +229,7 @@ static ACPI_EXDUMP_INFO     AcpiExDumpPackage[6] =
     {ACPI_EXD_INIT,     ACPI_EXD_TABLE_SIZE (AcpiExDumpPackage),        NULL},
     {ACPI_EXD_NODE,     ACPI_EXD_OFFSET (Package.Node),                 "Parent Node"},
     {ACPI_EXD_UINT8,    ACPI_EXD_OFFSET (Package.Flags),                "Flags"},
-    {ACPI_EXD_UINT32,   ACPI_EXD_OFFSET (Package.Count),                "Elements"},
+    {ACPI_EXD_UINT32,   ACPI_EXD_OFFSET (Package.Count),                "Element Count"},
     {ACPI_EXD_POINTER,  ACPI_EXD_OFFSET (Package.Elements),             "Element List"},
     {ACPI_EXD_PACKAGE,  0,                                              NULL}
 };
@@ -255,7 +255,7 @@ static ACPI_EXDUMP_INFO     AcpiExDumpMethod[9] =
     {ACPI_EXD_UINT8,    ACPI_EXD_OFFSET (Method.ParamCount),            "Parameter Count"},
     {ACPI_EXD_UINT8,    ACPI_EXD_OFFSET (Method.SyncLevel),             "Sync Level"},
     {ACPI_EXD_POINTER,  ACPI_EXD_OFFSET (Method.Mutex),                 "Mutex"},
-    {ACPI_EXD_UINT8,    ACPI_EXD_OFFSET (Method.OwnerId),               "Owner Id"},
+    {ACPI_EXD_UINT16,   ACPI_EXD_OFFSET (Method.OwnerId),               "Owner Id"},
     {ACPI_EXD_UINT8,    ACPI_EXD_OFFSET (Method.ThreadCount),           "Thread Count"},
     {ACPI_EXD_UINT32,   ACPI_EXD_OFFSET (Method.AmlLength),             "Aml Length"},
     {ACPI_EXD_POINTER,  ACPI_EXD_OFFSET (Method.AmlStart),              "Aml Start"}
@@ -422,8 +422,8 @@ static ACPI_EXDUMP_INFO     AcpiExDumpFieldCommon[7] =
 static ACPI_EXDUMP_INFO     AcpiExDumpNode[7] =
 {
     {ACPI_EXD_INIT,     ACPI_EXD_TABLE_SIZE (AcpiExDumpNode),           NULL},
-    {ACPI_EXD_UINT8,    ACPI_EXD_NSOFFSET (Flags),                      "Flags"},
-    {ACPI_EXD_UINT8,    ACPI_EXD_NSOFFSET (OwnerId),                    "Owner Id"},
+    {ACPI_EXD_UINT16,   ACPI_EXD_NSOFFSET (Flags),                      "Flags"},
+    {ACPI_EXD_UINT16,   ACPI_EXD_NSOFFSET (OwnerId),                    "Owner Id"},
     {ACPI_EXD_LIST,     ACPI_EXD_NSOFFSET (Object),                     "Object List"},
     {ACPI_EXD_NODE,     ACPI_EXD_NSOFFSET (Parent),                     "Parent"},
     {ACPI_EXD_NODE,     ACPI_EXD_NSOFFSET (Child),                      "Child"},
@@ -510,6 +510,11 @@ AcpiExDumpObject (
 
     while (Count)
     {
+        if (!ObjDesc)
+        {
+            return;
+        }
+
         Target = ACPI_ADD_PTR (UINT8, ObjDesc, Info->Offset);
         Name = Info->Name;
 
@@ -522,7 +527,8 @@ AcpiExDumpObject (
         case ACPI_EXD_TYPE:
 
             AcpiOsPrintf ("%20s : %2.2X [%s]\n", "Type",
-                ObjDesc->Common.Type, AcpiUtGetObjectTypeName (ObjDesc));
+                ObjDesc->Common.Type,
+                AcpiUtGetObjectTypeName (ObjDesc));
             break;
 
         case ACPI_EXD_UINT8:
@@ -588,10 +594,10 @@ AcpiExDumpObject (
             Start = *ACPI_CAST_PTR (void *, Target);
             Next = Start;
 
-            AcpiOsPrintf ("%20s : %p", Name, Next);
+            AcpiOsPrintf ("%20s : %p ", Name, Next);
             if (Next)
             {
-                AcpiOsPrintf ("(%s %2.2X)",
+                AcpiOsPrintf ("%s (Type %2.2X)",
                     AcpiUtGetObjectTypeName (Next), Next->Common.Type);
 
                 while (Next->Common.NextObject)
@@ -613,6 +619,10 @@ AcpiExDumpObject (
                         break;
                     }
                 }
+            }
+            else
+            {
+                AcpiOsPrintf ("- No attached objects");
             }
 
             AcpiOsPrintf ("\n");
@@ -737,7 +747,7 @@ AcpiExDumpOperand (
     UINT32                  Index;
 
 
-    ACPI_FUNCTION_NAME (ExDumpOperand)
+    ACPI_FUNCTION_NAME (ExDumpOperand);
 
 
     /* Check if debug output enabled */
@@ -1032,7 +1042,7 @@ AcpiExDumpOperands (
     const char              *OpcodeName,
     UINT32                  NumOperands)
 {
-    ACPI_FUNCTION_NAME (ExDumpOperands);
+    ACPI_FUNCTION_TRACE (ExDumpOperands);
 
 
     if (!OpcodeName)
@@ -1060,7 +1070,7 @@ AcpiExDumpOperands (
 
     ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
         "**** End operand dump for [%s]\n", OpcodeName));
-    return;
+    return_VOID;
 }
 
 
@@ -1294,7 +1304,8 @@ AcpiExDumpPackageObj (
 
     default:
 
-        AcpiOsPrintf ("[Unknown Type] %X\n", ObjDesc->Common.Type);
+        AcpiOsPrintf ("[%s] Type: %2.2X\n",
+            AcpiUtGetTypeName (ObjDesc->Common.Type), ObjDesc->Common.Type);
         break;
     }
 }
@@ -1338,10 +1349,19 @@ AcpiExDumpObjectDescriptor (
     {
         AcpiExDumpNamespaceNode ((ACPI_NAMESPACE_NODE *) ObjDesc, Flags);
 
-        AcpiOsPrintf ("\nAttached Object (%p):\n",
-            ((ACPI_NAMESPACE_NODE *) ObjDesc)->Object);
-
         ObjDesc = ((ACPI_NAMESPACE_NODE *) ObjDesc)->Object;
+        if (!ObjDesc)
+        {
+            return_VOID;
+        }
+
+        AcpiOsPrintf ("\nAttached Object %p", ObjDesc);
+        if (ACPI_GET_DESCRIPTOR_TYPE (ObjDesc) == ACPI_DESC_TYPE_NAMED)
+        {
+            AcpiOsPrintf (" - Namespace Node");
+        }
+
+        AcpiOsPrintf (":\n");
         goto DumpObject;
     }
 
@@ -1364,6 +1384,11 @@ AcpiExDumpObjectDescriptor (
 
 
 DumpObject:
+
+    if (!ObjDesc)
+    {
+        return_VOID;
+    }
 
     /* Common Fields */
 

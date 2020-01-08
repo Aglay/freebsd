@@ -62,12 +62,13 @@ class Guid
 {
 public:
 	/* Constructors */
+	/* Default constructor: an Invalid guid */
 	Guid();
+	/* Construct a guid from a provided integer */
 	Guid(uint64_t guid);
+	/* Construct a guid from a string in base 8, 10, or 16 */
 	Guid(const std::string &guid);
-
-	/* Assignment */
-	Guid& operator=(const Guid& rhs);
+	static Guid InvalidGuid();
 
 	/* Test the validity of this guid. */
 	bool IsValid()			 const;
@@ -80,8 +81,9 @@ public:
 	operator uint64_t()		 const;
 	operator bool()			 const;
 
-	static const uint64_t INVALID_GUID = 0;
 protected:
+	static const uint64_t INVALID_GUID = 0;
+
 	/* The integer value of the GUID. */
 	uint64_t  m_GUID;
 };
@@ -99,11 +101,10 @@ Guid::Guid(uint64_t guid)
 {
 }
 
-inline Guid&
-Guid::operator=(const Guid &rhs)
+inline Guid
+Guid::InvalidGuid()
 {
-	m_GUID = rhs.m_GUID;
-	return (*this);
+	return (Guid(INVALID_GUID));
 }
 
 inline bool

@@ -13,6 +13,18 @@
             ..
             event
             ..
+            gmock
+                internal
+                    custom
+                    ..
+                ..
+            ..
+            gtest
+                internal
+                    custom
+                    ..
+                ..
+            ..
             sqlite3
             ..
             ucl
@@ -25,8 +37,14 @@
         aout
         ..
         clang
-            4.0.0
+            9.0.1
                 include
+                    cuda_wrappers
+                    ..
+                    openmp_wrappers
+                    ..
+                    ppc_wrappers
+                    ..
                     sanitizer
                     ..
                 ..
@@ -55,8 +73,6 @@
         gcc
         ..
         ldscripts
-        ..
-        lint
         ..
         pkgconfig
         ..
@@ -124,6 +140,8 @@
         ..
         bsdinstall
         ..
+        dwatch
+        ..
         hyperv
         ..
         lpr
@@ -180,6 +198,12 @@
             ru_RU.UTF-8
             ..
             uk_UA.KOI8-U
+            ..
+        ..
+        certs
+            blacklisted
+            ..
+            trusted
             ..
         ..
         dict
@@ -239,6 +263,8 @@
             ..
             drivers
             ..
+            dwatch
+            ..
             etc
                 defaults
                 ..
@@ -248,8 +274,6 @@
             hast
             ..
             hostapd
-            ..
-            ibcs2
             ..
             indent
             ..
@@ -290,8 +314,6 @@
             mdoc
             ..
             netgraph
-            ..
-            pc-sysinstall
             ..
             perfmon
             ..
@@ -416,9 +438,9 @@
         ..
         keys
             pkg
-                revoked
+                revoked tags=package=runtime
                 ..
-                trusted
+                trusted tags=package=runtime
                 ..
             ..
         ..
@@ -633,6 +655,8 @@
             ..
             fr_FR.UTF-8
             ..
+            ga_IE.UTF-8
+            ..
             he_IL.UTF-8
             ..
             hi_IN.ISCII-DEV
@@ -807,158 +831,6 @@
             ..
         ..
         man
-/set uname=man
-            cat1
-            ..
-            cat2
-            ..
-            cat3
-            ..
-            cat4
-                amd64
-                ..
-                arm
-                ..
-                i386
-                ..
-                powerpc
-                ..
-                sparc64
-                ..
-            ..
-            cat5
-            ..
-            cat6
-            ..
-            cat7
-            ..
-            cat8
-                amd64
-                ..
-                i386
-                ..
-                powerpc
-                ..
-                sparc64
-                ..
-            ..
-            cat9
-            ..
-            en.ISO8859-1    uname=root
-                cat1
-                ..
-                cat2
-                ..
-                cat3
-                ..
-                cat4
-                    amd64
-                    ..
-                    arm
-                    ..
-                    i386
-                    ..
-                    powerpc
-                    ..
-                    sparc64
-                    ..
-                ..
-                cat5
-                ..
-                cat6
-                ..
-                cat7
-                ..
-                cat8
-                    amd64
-                    ..
-                    i386
-                    ..
-                    powerpc
-                    ..
-                    sparc64
-                    ..
-                ..
-                cat9
-                ..
-            ..
-            en.UTF-8        uname=root
-                cat1
-                ..
-                cat2
-                ..
-                cat3
-                ..
-                cat4
-                    amd64
-                    ..
-                    arm
-                    ..
-                    i386
-                    ..
-                    powerpc
-                    ..
-                    sparc64
-                    ..
-                ..
-                cat5
-                ..
-                cat6
-                ..
-                cat7
-                ..
-                cat8
-                    amd64
-                    ..
-                    i386
-                    ..
-                    powerpc
-                    ..
-                    sparc64
-                    ..
-                ..
-                cat9
-                ..
-            ..
-            ja              uname=root
-                cat1
-                ..
-                cat2
-                ..
-                cat3
-                ..
-                cat4
-                ..
-                cat5
-                ..
-                cat6
-                ..
-                cat7
-                ..
-                cat8
-                ..
-                cat9
-                ..
-/set uname=root
-                man1
-                ..
-                man2
-                ..
-                man3
-                ..
-                man4
-                ..
-                man5
-                ..
-                man6
-                ..
-                man7
-                ..
-                man8
-                ..
-                man9
-                ..
-            ..
             man1
             ..
             man2
@@ -966,6 +838,8 @@
             man3
             ..
             man4
+                aarch64
+                ..
                 amd64
                 ..
                 arm
@@ -1298,36 +1172,10 @@
         ..
         openssl
             man
-/set uname=man
-                cat1
-                ..
-                cat3
-                ..
-                en.ISO8859-1    uname=root
-                    cat1
-                    ..
-                    cat3
-                    ..
-                ..
-/set uname=root
                 man1
                 ..
                 man3
                 ..
-            ..
-        ..
-        pc-sysinstall
-            backend
-            ..
-            backend-partmanager
-            ..
-            backend-query
-            ..
-            conf
-                license
-                ..
-            ..
-            doc
             ..
         ..
         security

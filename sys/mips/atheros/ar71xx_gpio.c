@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009, Oleksandr Tymoshenko <gonzo@FreeBSD.org>
  * Copyright (c) 2009, Luiz Otavio O Souza. 
  * All rights reserved.
@@ -149,6 +151,8 @@ static int
 ar71xx_gpio_oe_is_high(void)
 {
 	switch (ar71xx_soc) {
+	case AR71XX_SOC_AR9341:
+	case AR71XX_SOC_AR9342:
 	case AR71XX_SOC_AR9344:
 	case AR71XX_SOC_QCA9533:
 	case AR71XX_SOC_QCA9533_V2:
@@ -224,9 +228,11 @@ ar71xx_gpio_pin_max(device_t dev, int *maxpin)
 			*maxpin = AR91XX_GPIO_PINS - 1;
 			break;
 		case AR71XX_SOC_AR7240:
-		case AR71XX_SOC_AR7241:
 		case AR71XX_SOC_AR7242:
 			*maxpin = AR724X_GPIO_PINS - 1;
+			break;
+		case AR71XX_SOC_AR7241:
+			*maxpin = AR7241_GPIO_PINS - 1;
 			break;
 		case AR71XX_SOC_AR9330:
 		case AR71XX_SOC_AR9331:
@@ -555,7 +561,7 @@ ar71xx_gpio_attach(device_t dev)
 		    &gpiomode) != 0)
 			continue;
 
-		/* We only handle mode=1 for now */
+		/* We only handle mode=1 (output) for now */
 		if (gpiomode != 1)
 			continue;
 

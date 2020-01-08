@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1982, 1989, 1993
  *	The Regents of the University of California.  All rights reserved.
  * (c) UNIX System Laboratories, Inc.
@@ -131,6 +133,10 @@ struct inode {
 #define	IN_TRUNCATED	0x0200		/* Journaled truncation pending. */
 
 #define	IN_UFS2		0x0400		/* UFS2 vs UFS1 */
+
+#define PRINT_INODE_FLAGS "\20\20b16\17b15\16b14\15b13" \
+	"\14b12\13is_ufs2\12truncated\11ea_lockwait\10ea_locked" \
+	"\7lazyaccess\6lazymod\5needsync\4modified\3update\2change\1access"
 
 #define	i_dirhash i_un.dirhash
 #define	i_snapblklist i_un.snapblklist

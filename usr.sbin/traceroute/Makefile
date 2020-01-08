@@ -5,6 +5,7 @@
 TRACEROUTE_DISTDIR?= ${SRCTOP}/contrib/traceroute
 .PATH: ${TRACEROUTE_DISTDIR}
 
+PACKAGE=	runtime
 PROG=	traceroute
 MAN=	traceroute.8
 SRCS=	as.c version.c traceroute.c ifaddrlist.c findsaddr-udp.c
@@ -33,7 +34,7 @@ LIBADD+=	ipsec
 .if ${MK_CASPER} != "no"
 LIBADD+=	casper
 LIBADD+=	cap_dns
-CFLAGS+=-DHAVE_LIBCASPER
+CFLAGS+=-DWITH_CASPER
 .endif
 
 CFLAGS+= -I${TRACEROUTE_DISTDIR}

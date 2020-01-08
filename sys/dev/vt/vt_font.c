@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2009 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -42,6 +44,7 @@ static MALLOC_DEFINE(M_VTFONT, "vtfont", "vt font");
 
 /* Some limits to prevent abnormal fonts from being loaded. */
 #define	VTFONT_MAXMAPPINGS	65536
+#define	VTFONT_MAXGLYPHS	131072
 #define	VTFONT_MAXGLYPHSIZE	2097152
 #define	VTFONT_MAXDIMENSION	128
 
@@ -89,11 +92,6 @@ vtfont_lookup(const struct vt_font *vf, term_char_t c)
 	unsigned int normal_map;
 	unsigned int bold_map;
 
-	/*
-	 * No support for printing right hand sides for CJK fullwidth
-	 * characters. Simply print a space and assume that the left
-	 * hand side describes the entire character.
-	 */
 	src = TCHAR_CHARACTER(c);
 	if (TCHAR_FORMAT(c) & TF_CJK_RIGHT) {
 		normal_map = VFNT_MAP_NORMAL_RIGHT;
@@ -171,7 +169,8 @@ vtfont_load(vfnt_t *f, struct vt_font **ret)
 	/* Make sure the dimensions are valid. */
 	if (f->width < 1 || f->height < 1)
 		return (EINVAL);
-	if (f->width > VTFONT_MAXDIMENSION || f->height > VTFONT_MAXDIMENSION)
+	if (f->width > VTFONT_MAXDIMENSION || f->height > VTFONT_MAXDIMENSION ||
+	    f->glyph_count > VTFONT_MAXGLYPHS)
 		return (E2BIG);
 
 	/* Not too many mappings. */

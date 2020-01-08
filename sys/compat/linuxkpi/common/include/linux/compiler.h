@@ -40,28 +40,32 @@
 #define __force
 #define __nocast
 #define __iomem
-#define __chk_user_ptr(x)		0
-#define __chk_io_ptr(x)			0
+#define __chk_user_ptr(x)		((void)0)
+#define __chk_io_ptr(x)			((void)0)
 #define __builtin_warning(x, y...)	(1)
 #define __acquires(x)
 #define __releases(x)
-#define __acquire(x)			0
-#define __release(x)			0
+#define __acquire(x)			do { } while (0)
+#define __release(x)			do { } while (0)
 #define __cond_lock(x,c)		(c)
 #define	__bitwise
 #define __devinitdata
 #define	__deprecated
 #define __init
+#define	__initconst
 #define	__devinit
 #define	__devexit
 #define __exit
 #define	__rcu
+#define	__percpu
+#define	__weak __weak_symbol
 #define	__malloc
 #define	___stringify(...)		#__VA_ARGS__
 #define	__stringify(...)		___stringify(__VA_ARGS__)
 #define	__attribute_const__		__attribute__((__const__))
 #undef __always_inline
 #define	__always_inline			inline
+#define	noinline			__noinline
 #define	____cacheline_aligned		__aligned(CACHE_LINE_SIZE)
 
 #define	likely(x)			__builtin_expect(!!(x), 1)
@@ -69,6 +73,7 @@
 #define typeof(x)			__typeof(x)
 
 #define	uninitialized_var(x)		x = x
+#define	__maybe_unused			__unused
 #define	__always_unused			__unused
 #define	__must_check			__result_use_check
 
@@ -76,11 +81,17 @@
 
 #define	barrier()			__asm__ __volatile__("": : :"memory")
 
+#if defined(LINUXKPI_VERSION) && LINUXKPI_VERSION >= 50000
+/* Moved from drm_os_freebsd.h */
+#define	lower_32_bits(n)		((u32)(n))
+#define	upper_32_bits(n)		((u32)(((n) >> 16) >> 16))
+#endif
+
 #define	___PASTE(a,b) a##b
 #define	__PASTE(a,b) ___PASTE(a,b)
 
 #define	ACCESS_ONCE(x)			(*(volatile __typeof(x) *)&(x))
-  
+
 #define	WRITE_ONCE(x,v) do {		\
 	barrier();			\
 	ACCESS_ONCE(x) = (v);		\

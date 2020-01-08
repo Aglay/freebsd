@@ -21,7 +21,7 @@
 
 /*
  * txtproto_print() derived from original code by Hannes Gredler
- * (hannes@juniper.net):
+ * (hannes@gredler.at):
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that: (1) source code
@@ -120,10 +120,21 @@ fn_print(netdissect_options *ndo,
 
 /*
  * Print out a null-terminated filename (or other ascii string) from
- * a fixed-length buffer.
- * If ep is NULL, assume no truncation check is needed.
+ * a fixed-length field in the packet buffer, or from what remains of
+ * the packet.
+ *
+ * n is the length of the fixed-length field, or the number of bytes
+ * remaining in the packet based on its on-the-network length.
+ *
+ * If ep is non-null, it should point just past the last captured byte
+ * of the packet, e.g. ndo->ndo_snapend.  If ep is NULL, we assume no
+ * truncation check, other than the checks of the field length/remaining
+ * packet data length, is needed.
+ *
  * Return the number of bytes of string processed, including the
- * terminating null, if not truncated.  Return 0 if truncated.
+ * terminating null, if not truncated; as the terminating null is
+ * included in the count, and as there must be a terminating null,
+ * this will always be non-zero.  Return 0 if truncated.
  */
 u_int
 fn_printztn(netdissect_options *ndo,
@@ -137,7 +148,8 @@ fn_printztn(netdissect_options *ndo,
 		if (n == 0 || (ep != NULL && s >= ep)) {
 			/*
 			 * Truncated.  This includes "no null before we
-			 * got to the end of the fixed-length buffer".
+			 * got to the end of the fixed-length buffer or
+			 * the end of the packet".
 			 *
 			 * XXX - BOOTP says "null-terminated", which
 			 * means the maximum length of the string, in
@@ -521,8 +533,9 @@ static char *
 bittok2str_internal(register const struct tok *lp, register const char *fmt,
 	   register u_int v, const char *sep)
 {
-        static char buf[256]; /* our stringbuffer */
-        int buflen=0;
+        static char buf[1024+1]; /* our string buffer */
+        char *bufp = buf;
+        size_t space_left = sizeof(buf), string_size;
         register u_int rotbit; /* this is the bit we rotate through all bitpositions */
         register u_int tokval;
         const char * sepstr = "";
@@ -537,8 +550,20 @@ bittok2str_internal(register const struct tok *lp, register const char *fmt,
                  */
 		if (tokval == (v&rotbit)) {
                     /* ok we have found something */
-                    buflen+=snprintf(buf+buflen, sizeof(buf)-buflen, "%s%s",
-                                     sepstr, lp->s);
+                    if (space_left <= 1)
+                        return (buf); /* only enough room left for NUL, if that */
+                    string_size = strlcpy(bufp, sepstr, space_left);
+                    if (string_size >= space_left)
+                        return (buf);    /* we ran out of room */
+                    bufp += string_size;
+                    space_left -= string_size;
+                    if (space_left <= 1)
+                        return (buf); /* only enough room left for NUL, if that */
+                    string_size = strlcpy(bufp, lp->s, space_left);
+                    if (string_size >= space_left)
+                        return (buf);    /* we ran out of room */
+                    bufp += string_size;
+                    space_left -= string_size;
                     sepstr = sep;
                     break;
                 }
@@ -547,7 +572,7 @@ bittok2str_internal(register const struct tok *lp, register const char *fmt,
             lp++;
 	}
 
-        if (buflen == 0)
+        if (bufp == buf)
             /* bummer - lets print the "unknown" message as advised in the fmt string if we got one */
             (void)snprintf(buf, sizeof(buf), fmt == NULL ? "#%08x" : fmt, v);
         return (buf);
@@ -902,7 +927,7 @@ safeputs(netdissect_options *ndo,
 {
 	u_int idx = 0;
 
-	while (*s && idx < maxlen) {
+	while (idx < maxlen && *s) {
 		safeputchar(ndo, *s);
 		idx++;
 		s++;

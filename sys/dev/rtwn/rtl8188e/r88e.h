@@ -24,9 +24,7 @@
 /*
  * Global definitions.
  */
-#define R88E_PUBQ_NPAGES	142
 #define R88E_TXPKTBUF_COUNT	177
-#define R88E_TX_PAGE_COUNT	169
 
 #define R88E_MACID_MAX		63
 #define R88E_RX_DMA_BUFFER_SIZE	0x2400
@@ -49,7 +47,7 @@ uint8_t	r88e_temp_read(struct rtwn_softc *);
 
 /* r88e_chan.c */
 void	r88e_get_txpower(struct rtwn_softc *, int,
-	    struct ieee80211_channel *, uint16_t[]);
+	    struct ieee80211_channel *, uint8_t[]);
 void	r88e_set_bw20(struct rtwn_softc *, uint8_t);
 void	r88e_set_gain(struct rtwn_softc *, uint8_t);
 
@@ -67,9 +65,8 @@ int	r88e_set_pwrmode(struct rtwn_softc *, struct ieee80211vap *, int);
 #endif
 
 /* r88e_init.c */
-void	r88e_init_bb(struct rtwn_softc *);
+void	r88e_init_bb_common(struct rtwn_softc *);
 void	r88e_init_rf(struct rtwn_softc *);
-int	r88e_power_on(struct rtwn_softc *);
 
 /* r88e_led.c */
 void	r88e_set_led(struct rtwn_softc *, int, int);
@@ -81,6 +78,7 @@ void	r88e_rf_write(struct rtwn_softc *, int, uint8_t, uint32_t);
 void	r88e_parse_rom(struct rtwn_softc *, uint8_t *);
 
 /* r88e_rx.c */
+int	r88e_classify_intr(struct rtwn_softc *, void *, int);
 void	r88e_ratectl_tx_complete(struct rtwn_softc *, uint8_t *, int);
 void	r88e_handle_c2h_report(struct rtwn_softc *, uint8_t *, int);
 int8_t	r88e_get_rssi_cck(struct rtwn_softc *, void *);

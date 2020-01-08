@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1999 Marcel Moolenaar
  * All rights reserved.
  *
@@ -6,24 +8,22 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer 
- *    in this position and unchanged.
+ *    notice, this list of conditions and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  *
  * $FreeBSD$
  */
@@ -57,9 +57,10 @@
 #define	LINUX_BLKSECTSET	0x1266
 #define	LINUX_BLKSECTGET	0x1267
 #define	LINUX_BLKSSZGET		0x1268
+#define	LINUX_BLKGETSIZE64	0x1272
 
 #define LINUX_IOCTL_DISK_MIN    LINUX_BLKROSET
-#define LINUX_IOCTL_DISK_MAX    LINUX_BLKSSZGET
+#define LINUX_IOCTL_DISK_MAX    LINUX_BLKGETSIZE64
 
 /*
  * hdio
@@ -198,7 +199,7 @@
 #define	LINUX_VT_SETMODE	0x5602
 #define	LINUX_VT_GETSTATE	0x5603
 #define	LINUX_VT_RELDISP	0x5605
-#define	LINUX_VT_ACTIVATE	0x5606  
+#define	LINUX_VT_ACTIVATE	0x5606
 #define	LINUX_VT_WAITACTIVE	0x5607
 
 #define	LINUX_IOCTL_CONSOLE_MIN	LINUX_KIOCSOUND
@@ -250,7 +251,7 @@
 #define	LINUX_IOCTL_SOCKET_MAX	LINUX_SIOCGIFCOUNT
 
 /*
- * Device private ioctl calls 
+ * Device private ioctl calls
  */
 #define LINUX_SIOCDEVPRIVATE	0x89F0  /* to 89FF */
 #define LINUX_IOCTL_PRIVATE_MIN	LINUX_SIOCDEVPRIVATE
@@ -428,13 +429,14 @@
 /* In addition to the termio values */
 #define	LINUX_VSTART		8
 #define	LINUX_VSTOP		9
-#define	LINUX_VSUSP 		10
+#define	LINUX_VSUSP		10
 #define	LINUX_VEOL		11
 #define	LINUX_VREPRINT		12
 #define	LINUX_VDISCARD		13
 #define	LINUX_VWERASE		14
 #define	LINUX_VLNEXT		15
 #define	LINUX_VEOL2		16
+#define	LINUX_VSTATUS		18
 #define	LINUX_NCCS		19
 
 #define	LINUX_POSIX_VDISABLE	'\0'
@@ -749,6 +751,7 @@
  * Linux btrfs clone operation
  */
 #define LINUX_BTRFS_IOC_CLONE		0x9409 /* 0x40049409 */
+#define LINUX_FS_IOC_FIEMAP		0x660b
 
 /*
  * Linux evdev ioctl min and max
@@ -770,7 +773,18 @@ struct linux_ioctl_handler {
 	int	low, high;
 };
 
+struct linux_ioctl_handler_element
+{
+	TAILQ_ENTRY(linux_ioctl_handler_element) list;
+	int	(*func)(struct thread *, struct linux_ioctl_args *);
+	int	low, high, span;
+};
+
 int	linux_ioctl_register_handler(struct linux_ioctl_handler *h);
 int	linux_ioctl_unregister_handler(struct linux_ioctl_handler *h);
+#ifdef COMPAT_LINUX32
+int	linux32_ioctl_register_handler(struct linux_ioctl_handler *h);
+int	linux32_ioctl_unregister_handler(struct linux_ioctl_handler *h);
+#endif
 
 #endif /* !_LINUX_IOCTL_H_ */

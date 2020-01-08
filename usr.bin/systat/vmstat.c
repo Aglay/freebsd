@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1983, 1989, 1992, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -55,6 +57,7 @@ static const char sccsid[] = "@(#)vmstat.c	8.2 (Berkeley) 1/12/94";
 #include <err.h>
 #include <errno.h>
 #include <langinfo.h>
+#include <libutil.h>
 #include <nlist.h>
 #include <paths.h>
 #include <signal.h>
@@ -63,7 +66,6 @@ static const char sccsid[] = "@(#)vmstat.c	8.2 (Berkeley) 1/12/94";
 #include <time.h>
 #include <unistd.h>
 #include <utmpx.h>
-#include <devstat.h>
 #include "systat.h"
 #include "extern.h"
 #include "devs.h"
@@ -122,22 +124,20 @@ static struct Info {
 static u_long kmem_size;
 static u_int v_page_count;
 
-struct statinfo cur, last, run;
 
 #define	total s.Total
 #define	nchtotal s.nchstats
 #define	oldnchtotal s1.nchstats
 
 static	enum state { BOOT, TIME, RUN } state = TIME;
+enum divisor { IEC = 0, SI = HN_DIVISOR_1000 };
 
 static void allocinfo(struct Info *);
 static void copyinfo(struct Info *, struct Info *);
 static float cputime(int);
-static void dinfo(int, int, struct statinfo *, struct statinfo *);
+static void do_putuint64(uint64_t, int, int, int, int);
 static void getinfo(struct Info *);
-static void putint(int, int, int, int);
-static void putfloat(double, int, int, int, int, int);
-static void putlongdouble(long double, int, int, int, int, int);
+static void putuint64(uint64_t, int, int, int);
 static int ucount(void);
 
 static	int ncpu;
@@ -203,16 +203,7 @@ initkre(void)
 	int i;
 	size_t sz;
 
-	if ((num_devices = devstat_getnumdevs(NULL)) < 0) {
-		warnx("%s", devstat_errbuf);
-		return(0);
-	}
-
-	cur.dinfo = calloc(1, sizeof(struct devinfo));
-	last.dinfo = calloc(1, sizeof(struct devinfo));
-	run.dinfo = calloc(1, sizeof(struct devinfo));
-
-	if (dsinit(MAXDRIVES, &cur, &last, &run) != 1)
+	if (dsinit(MAXDRIVES) != 1)
 		return(0);
 
 	if (nintr == 0) {
@@ -365,27 +356,7 @@ labelkre(void)
 	mvprintw(NAMEIROW, NAMEICOL, "Namei     Name-cache   Dir-cache");
 	mvprintw(NAMEIROW + 1, NAMEICOL,
 		"   Calls    hits   %%    hits   %%");
-	mvprintw(DISKROW, DISKCOL, "Disks");
-	mvprintw(DISKROW + 1, DISKCOL, "KB/t");
-	mvprintw(DISKROW + 2, DISKCOL, "tps");
-	mvprintw(DISKROW + 3, DISKCOL, "MB/s");
-	mvprintw(DISKROW + 4, DISKCOL, "%%busy");
-	/*
-	 * For now, we don't support a fourth disk statistic.  So there's
-	 * no point in providing a label for it.  If someone can think of a
-	 * fourth useful disk statistic, there is room to add it.
-	 */
-	/* mvprintw(DISKROW + 4, DISKCOL, " msps"); */
-	j = 0;
-	for (i = 0; i < num_devices && j < MAXDRIVES; i++)
-		if (dev_select[i].selected) {
-			char tmpstr[80];
-			sprintf(tmpstr, "%s%d", dev_select[i].device_name,
-				dev_select[i].unit_number);
-			mvprintw(DISKROW, DISKCOL + 5 + 6 * j,
-				" %5.5s", tmpstr);
-			j++;
-		}
+	dslabel(MAXDRIVES, DISKCOL, DISKROW);
 
 	for (i = 0; i < nintr; i++) {
 		if (intrloc[i] == 0)
@@ -395,7 +366,7 @@ labelkre(void)
 }
 
 #define X(fld)	{t=s.fld[i]; s.fld[i]-=s1.fld[i]; if(state==TIME) s1.fld[i]=t;}
-#define Q(fld)	{t=cur.fld[i]; cur.fld[i]-=last.fld[i]; if(state==TIME) last.fld[i]=t;}
+#define Q(fld)	{t=cur_dev.fld[i]; cur_dev.fld[i]-=last_dev.fld[i]; if(state==TIME) last_dev.fld[i]=t;}
 #define Y(fld)	{t = s.fld; s.fld -= s1.fld; if(state == TIME) s1.fld = t;}
 #define Z(fld)	{t = s.nchstats.fld; s.nchstats.fld -= s1.nchstats.fld; \
 	if(state == TIME) s1.nchstats.fld = t;}
@@ -489,15 +460,15 @@ showkre(void)
 	putfloat(100.0 * s.v_kmem_map_size / kmem_size,
 	   STATROW + 1, STATCOL + 22, 2, 0, 1);
 
-	putint(pgtokb(total.t_arm), MEMROW + 2, MEMCOL + 4, 7);
-	putint(pgtokb(total.t_armshr), MEMROW + 2, MEMCOL + 12, 7);
-	putint(pgtokb(total.t_avm), MEMROW + 2, MEMCOL + 20, 8);
-	putint(pgtokb(total.t_avmshr), MEMROW + 2, MEMCOL + 29, 8);
-	putint(pgtokb(total.t_rm), MEMROW + 3, MEMCOL + 4, 7);
-	putint(pgtokb(total.t_rmshr), MEMROW + 3, MEMCOL + 12, 7);
-	putint(pgtokb(total.t_vm), MEMROW + 3, MEMCOL + 20, 8);
-	putint(pgtokb(total.t_vmshr), MEMROW + 3, MEMCOL + 29, 8);
-	putint(pgtokb(total.t_free), MEMROW + 2, MEMCOL + 38, 7);
+	putuint64(pgtokb(total.t_arm), MEMROW + 2, MEMCOL + 4, 7);
+	putuint64(pgtokb(total.t_armshr), MEMROW + 2, MEMCOL + 12, 7);
+	putuint64(pgtokb(total.t_avm), MEMROW + 2, MEMCOL + 20, 8);
+	putuint64(pgtokb(total.t_avmshr), MEMROW + 2, MEMCOL + 29, 8);
+	putuint64(pgtokb(total.t_rm), MEMROW + 3, MEMCOL + 4, 7);
+	putuint64(pgtokb(total.t_rmshr), MEMROW + 3, MEMCOL + 12, 7);
+	putuint64(pgtokb(total.t_vm), MEMROW + 3, MEMCOL + 20, 8);
+	putuint64(pgtokb(total.t_vmshr), MEMROW + 3, MEMCOL + 29, 8);
+	putuint64(pgtokb(total.t_free), MEMROW + 2, MEMCOL + 38, 7);
 	putint(total.t_rq - 1, PROCSROW + 2, PROCSCOL, 3);
 	putint(total.t_pw, PROCSROW + 2, PROCSCOL + 4, 3);
 	putint(total.t_dw, PROCSROW + 2, PROCSCOL + 8, 3);
@@ -516,13 +487,13 @@ showkre(void)
 	PUTRATE(v_pdwakeups, VMSTATROW + 9, VMSTATCOL, 8);
 	PUTRATE(v_pdpages, VMSTATROW + 10, VMSTATCOL, 8);
 	PUTRATE(v_intrans, VMSTATROW + 11, VMSTATCOL, 8);
-	putint(pgtokb(s.v_wire_count), VMSTATROW + 12, VMSTATCOL, 8);
-	putint(pgtokb(s.v_active_count), VMSTATROW + 13, VMSTATCOL, 8);
-	putint(pgtokb(s.v_inactive_count), VMSTATROW + 14, VMSTATCOL, 8);
-	putint(pgtokb(s.v_laundry_count), VMSTATROW + 15, VMSTATCOL, 8);
-	putint(pgtokb(s.v_free_count), VMSTATROW + 16, VMSTATCOL, 8);
+	putuint64(pgtokb(s.v_wire_count), VMSTATROW + 12, VMSTATCOL, 8);
+	putuint64(pgtokb(s.v_active_count), VMSTATROW + 13, VMSTATCOL, 8);
+	putuint64(pgtokb(s.v_inactive_count), VMSTATROW + 14, VMSTATCOL, 8);
+	putuint64(pgtokb(s.v_laundry_count), VMSTATROW + 15, VMSTATCOL, 8);
+	putuint64(pgtokb(s.v_free_count), VMSTATROW + 16, VMSTATCOL, 8);
 	if (LINES - 1 > VMSTATROW + 17)
-		putint(s.bufspace / 1024, VMSTATROW + 17, VMSTATCOL, 8);
+		putuint64(s.bufspace / 1024, VMSTATROW + 17, VMSTATCOL, 8);
 	PUTRATE(v_vnodein, PAGEROW + 2, PAGECOL + 6, 5);
 	PUTRATE(v_vnodeout, PAGEROW + 2, PAGECOL + 12, 5);
 	PUTRATE(v_swapin, PAGEROW + 2, PAGECOL + 19, 5);
@@ -537,20 +508,17 @@ showkre(void)
 	PUTRATE(v_intr, GENSTATROW + 1, GENSTATCOL + 15, 4);
 	PUTRATE(v_soft, GENSTATROW + 1, GENSTATCOL + 20, 4);
 	PUTRATE(v_vm_faults, GENSTATROW + 1, GENSTATCOL + 25, 4);
-	for (i = 0, lc = 0; i < num_devices && lc < MAXDRIVES; i++)
-		if (dev_select[i].selected) {
-			switch(state) {
-			case TIME:
-				dinfo(i, ++lc, &cur, &last);
-				break;
-			case RUN:
-				dinfo(i, ++lc, &cur, &run);
-				break;
-			case BOOT:
-				dinfo(i, ++lc, &cur, NULL);
-				break;
-			}
-		}
+	switch(state) {
+	case TIME:
+		dsshow(MAXDRIVES, DISKCOL, DISKROW, &cur_dev, &last_dev);
+		break;
+	case RUN:
+		dsshow(MAXDRIVES, DISKCOL, DISKROW, &cur_dev, &run_dev);
+		break;
+	case BOOT:
+		dsshow(MAXDRIVES, DISKCOL, DISKROW, &cur_dev, NULL);
+		break;
+	}
 	putint(s.numdirtybuffers, VNSTATROW, VNSTATCOL, 7);
 	putint(s.desiredvnodes, VNSTATROW + 1, VNSTATCOL, 7);
 	putint(s.numvnodes, VNSTATROW + 2, VNSTATCOL, 7);
@@ -576,14 +544,14 @@ cmdkre(const char *cmd, const char *args)
 	if (prefix(cmd, "run")) {
 		retval = 1;
 		copyinfo(&s2, &s1);
-		switch (devstat_getdevs(NULL, &run)) {
+		switch (devstat_getdevs(NULL, &run_dev)) {
 		case -1:
 			errx(1, "%s", devstat_errbuf);
 			break;
 		case 1:
-			num_devices = run.dinfo->numdevs;
-			generation = run.dinfo->generation;
-			retval = dscmd("refresh", NULL, MAXDRIVES, &cur);
+			num_devices = run_dev.dinfo->numdevs;
+			generation = run_dev.dinfo->generation;
+			retval = dscmd("refresh", NULL, MAXDRIVES, &cur_dev);
 			if (retval == 2)
 				labelkre();
 			break;
@@ -606,14 +574,14 @@ cmdkre(const char *cmd, const char *args)
 		retval = 1;
 		if (state == RUN) {
 			getinfo(&s1);
-			switch (devstat_getdevs(NULL, &run)) {
+			switch (devstat_getdevs(NULL, &run_dev)) {
 			case -1:
 				errx(1, "%s", devstat_errbuf);
 				break;
 			case 1:
-				num_devices = run.dinfo->numdevs;
-				generation = run.dinfo->generation;
-				retval = dscmd("refresh",NULL, MAXDRIVES, &cur);
+				num_devices = run_dev.dinfo->numdevs;
+				generation = run_dev.dinfo->generation;
+				retval = dscmd("refresh",NULL, MAXDRIVES, &cur_dev);
 				if (retval == 2)
 					labelkre();
 				break;
@@ -623,7 +591,7 @@ cmdkre(const char *cmd, const char *args)
 		}
 		return (retval);
 	}
-	retval = dscmd(cmd, args, MAXDRIVES, &cur);
+	retval = dscmd(cmd, args, MAXDRIVES, &cur_dev);
 
 	if (retval == 2)
 		labelkre();
@@ -661,11 +629,26 @@ cputime(int indx)
 	return (s.time[indx] * 100.0 / lt);
 }
 
-static void
+void
 putint(int n, int l, int lc, int w)
+{
+
+	do_putuint64(n, l, lc, w, SI);
+}
+
+static void
+putuint64(uint64_t n, int l, int lc, int w)
+{
+
+	do_putuint64(n, l, lc, w, IEC);
+}
+
+static void
+do_putuint64(uint64_t n, int l, int lc, int w, int div)
 {
 	int snr;
 	char b[128];
+	char buf[128];
 
 	move(l, lc);
 #ifdef DEBUG
@@ -678,11 +661,12 @@ putint(int n, int l, int lc, int w)
 			addch(' ');
 		return;
 	}
-	snr = snprintf(b, sizeof(b), "%*d", w, n);
-	if (snr != w)
-		snr = snprintf(b, sizeof(b), "%*dk", w - 1, n / 1000);
-	if (snr != w)
-		snr = snprintf(b, sizeof(b), "%*dM", w - 1, n / 1000000);
+	snr = snprintf(b, sizeof(b), "%*ju", w, (uintmax_t)n);
+	if (snr != w) {
+		humanize_number(buf, w, n, "", HN_AUTOSCALE,
+		    HN_NOSPACE | HN_DECIMAL | div);
+		snr = snprintf(b, sizeof(b), "%*s", w, buf);
+	}
 	if (snr != w) {
 		while (w-- > 0)
 			addch('*');
@@ -691,7 +675,7 @@ putint(int n, int l, int lc, int w)
 	addstr(b);
 }
 
-static void
+void
 putfloat(double f, int l, int lc, int w, int d, int nz)
 {
 	int snr;
@@ -723,7 +707,7 @@ putfloat(double f, int l, int lc, int w, int d, int nz)
 	addstr(b);
 }
 
-static void
+void
 putlongdouble(long double f, int l, int lc, int w, int d, int nz)
 {
 	int snr;
@@ -763,7 +747,7 @@ getinfo(struct Info *ls)
 	int mib[2];
 
 	GETSYSCTL("kern.cp_time", ls->time);
-	GETSYSCTL("kern.cp_time", cur.cp_time);
+	GETSYSCTL("kern.cp_time", cur_dev.cp_time);
 	GETSYSCTL("vm.stats.sys.v_swtch", ls->v_swtch);
 	GETSYSCTL("vm.stats.sys.v_trap", ls->v_trap);
 	GETSYSCTL("vm.stats.sys.v_syscall", ls->v_syscall);
@@ -816,23 +800,12 @@ getinfo(struct Info *ls)
 	    size != sizeof(ncpu))
 		ncpu = 1;
 
-	tmp_dinfo = last.dinfo;
-	last.dinfo = cur.dinfo;
-	cur.dinfo = tmp_dinfo;
+	tmp_dinfo = last_dev.dinfo;
+	last_dev.dinfo = cur_dev.dinfo;
+	cur_dev.dinfo = tmp_dinfo;
 
-	last.snap_time = cur.snap_time;
-	switch (devstat_getdevs(NULL, &cur)) {
-	case -1:
-		errx(1, "%s", devstat_errbuf);
-		break;
-	case 1:
-		num_devices = cur.dinfo->numdevs;
-		generation = cur.dinfo->generation;
-		cmdkre("refresh", NULL);
-		break;
-	default:
-		break;
-	}
+	last_dev.snap_time = cur_dev.snap_time;
+	dsgetinfo(&cur_dev);
 }
 
 static void
@@ -858,39 +831,4 @@ copyinfo(struct Info *from, struct Info *to)
 	*to = *from;
 
 	bcopy(from->intrcnt, to->intrcnt = intrcnt, nintr * sizeof (int));
-}
-
-static void
-dinfo(int dn, int lc, struct statinfo *now, struct statinfo *then)
-{
-	long double transfers_per_second;
-	long double kb_per_transfer, mb_per_second;
-	long double elapsed_time, device_busy;
-	int di;
-
-	di = dev_select[dn].position;
-
-	if (then != NULL) {
-		/* Calculate relative to previous sample */
-		elapsed_time = now->snap_time - then->snap_time;
-	} else {
-		/* Calculate relative to device creation */
-		elapsed_time = now->snap_time - devstat_compute_etime(
-		    &now->dinfo->devices[di].creation_time, NULL);
-	}
-
-	if (devstat_compute_statistics(&now->dinfo->devices[di], then ?
-	    &then->dinfo->devices[di] : NULL, elapsed_time,
-	    DSM_KB_PER_TRANSFER, &kb_per_transfer,
-	    DSM_TRANSFERS_PER_SECOND, &transfers_per_second,
-	    DSM_MB_PER_SECOND, &mb_per_second,
-	    DSM_BUSY_PCT, &device_busy,
-	    DSM_NONE) != 0)
-		errx(1, "%s", devstat_errbuf);
-
-	lc = DISKCOL + lc * 6;
-	putlongdouble(kb_per_transfer, DISKROW + 1, lc, 5, 2, 0);
-	putlongdouble(transfers_per_second, DISKROW + 2, lc, 5, 0, 0);
-	putlongdouble(mb_per_second, DISKROW + 3, lc, 5, 2, 0);
-	putlongdouble(device_busy, DISKROW + 4, lc, 5, 0, 0);
 }

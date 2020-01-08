@@ -44,6 +44,10 @@
 #
 # DESTDIR	The tree where the module gets installed. [not set]
 #
+# KERNBUILDDIR
+#		Set to the location of the kernel build directory where
+#		the opt_*.h files, .o's and kernel winds up.
+#
 # +++ targets +++
 #
 # 	install:
@@ -69,22 +73,8 @@ KMODUNLOAD?=	/sbin/kldunload
 KMODISLOADED?=	/sbin/kldstat -q -n
 OBJCOPY?=	objcopy
 
-.include <bsd.init.mk>
-# Grab all the options for a kernel build. For backwards compat, we need to
-# do this after bsd.own.mk.
-.include "kern.opts.mk"
-.include <bsd.compiler.mk>
-.include "config.mk"
-
-# Search for kernel source tree in standard places.
-.for _dir in ${.CURDIR}/../.. ${.CURDIR}/../../.. /sys /usr/src/sys
-.if !defined(SYSDIR) && exists(${_dir}/kern/)
-SYSDIR=	${_dir:tA}
-.endif
-.endfor
-.if !defined(SYSDIR) || !exists(${SYSDIR}/kern/)
-.error "can't find kernel source tree"
-.endif
+.include "kmod.opts.mk"
+.include <bsd.sysdir.mk>
 
 .SUFFIXES: .out .o .c .cc .cxx .C .y .l .s .S .m
 
@@ -98,10 +88,18 @@ __KLD_SHARED=no
 .if !empty(CFLAGS:M-O[23s]) && empty(CFLAGS:M-fno-strict-aliasing)
 CFLAGS+=	-fno-strict-aliasing
 .endif
+.if ${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} < 50000
+WERROR?=	-Wno-error
+.else
 WERROR?=	-Werror
+.endif
+
 CFLAGS+=	${WERROR}
 CFLAGS+=	-D_KERNEL
 CFLAGS+=	-DKLD_MODULE
+.if defined(MODULE_TIED)
+CFLAGS+=	-DKLD_TIED
+.endif
 
 # Don't use any standard or source-relative include directories.
 NOSTDINC=	-nostdinc
@@ -113,7 +111,7 @@ CFLAGS+=	-DHAVE_KERNEL_OPTION_HEADERS -include ${KERNBUILDDIR}/opt_global.h
 # Add -I paths for system headers.  Individual module makefiles don't
 # need any -I paths for this.  Similar defaults for .PATH can't be
 # set because there are no standard paths for non-headers.
-CFLAGS+=	-I. -I${SYSDIR}
+CFLAGS+=	-I. -I${SYSDIR} -I${SYSDIR}/contrib/ck/include
 
 CFLAGS.gcc+=	-finline-limit=${INLINE_LIMIT}
 CFLAGS.gcc+=	-fms-extensions
@@ -126,7 +124,7 @@ CFLAGS+=	-fno-common
 LDFLAGS+=	-d -warn-common
 
 .if defined(LINKER_FEATURES) && ${LINKER_FEATURES:Mbuild-id}
-LDFLAGS+=	-Wl,--build-id=sha1
+LDFLAGS+=	--build-id=sha1
 .endif
 
 CFLAGS+=	${DEBUG_FLAGS}
@@ -134,7 +132,8 @@ CFLAGS+=	${DEBUG_FLAGS}
 CFLAGS+=	-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 .endif
 
-.if ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "riscv"
+.if ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "riscv" || \
+    ${MACHINE_CPUARCH} == "powerpc"
 CFLAGS+=	-fPIC
 .endif
 
@@ -152,6 +151,10 @@ CFLAGS+=	-funwind-tables
 
 .if ${MACHINE_CPUARCH} == powerpc
 CFLAGS+=	-mlongcall -fno-omit-frame-pointer
+.if ${LINKER_TYPE} == "lld"
+# TOC optimization in LLD (9.0) currently breaks kernel modules, so disable it
+LDFLAGS+=	--no-toc-optimize
+.endif
 .endif
 
 .if ${MACHINE_CPUARCH} == mips
@@ -213,7 +216,7 @@ ${PROG}.debug: ${FULLPROG}
 
 .if ${__KLD_SHARED} == yes
 ${FULLPROG}: ${KMOD}.kld
-	${LD} -m ${LD_EMULATION} -Bshareable -znotext ${_LDFLAGS} \
+	${LD} -m ${LD_EMULATION} -Bshareable -znotext -znorelro ${_LDFLAGS} \
 	    -o ${.TARGET} ${KMOD}.kld
 .if !defined(DEBUG_FLAGS)
 	${OBJCOPY} --strip-debug ${.TARGET}
@@ -225,12 +228,17 @@ EXPORT_SYMS?=	NO
 CLEANFILES+=	export_syms
 .endif
 
+.if exists(${SYSDIR}/conf/ldscript.kmod.${MACHINE_ARCH})
+LDSCRIPT_FLAGS?= -T ${SYSDIR}/conf/ldscript.kmod.${MACHINE_ARCH}
+.endif
+
 .if ${__KLD_SHARED} == yes
 ${KMOD}.kld: ${OBJS}
 .else
 ${FULLPROG}: ${OBJS}
 .endif
-	${LD} -m ${LD_EMULATION} ${_LDFLAGS} -r -d -o ${.TARGET} ${OBJS}
+	${LD} -m ${LD_EMULATION} ${_LDFLAGS} ${LDSCRIPT_FLAGS} -r -d \
+	    -o ${.TARGET} ${OBJS}
 .if ${MK_CTF} != "no"
 	${CTFMERGE} ${CTFFLAGS} -o ${.TARGET} ${OBJS}
 .endif
@@ -239,14 +247,14 @@ ${FULLPROG}: ${OBJS}
 .if ${EXPORT_SYMS} == NO
 	:> export_syms
 .elif !exists(${.CURDIR}/${EXPORT_SYMS})
-	echo ${EXPORT_SYMS} > export_syms
+	echo -n "${EXPORT_SYMS:@s@$s${.newline}@}" > export_syms
 .else
 	grep -v '^#' < ${EXPORT_SYMS} > export_syms
 .endif
 	${AWK} -f ${SYSDIR}/conf/kmod_syms.awk ${.TARGET} \
 	    export_syms | xargs -J% ${OBJCOPY} % ${.TARGET}
 .endif
-.endif
+.endif # defined(EXPORT_SYMS)
 .if defined(PREFIX_SYMS)
 	${AWK} -v prefix=${PREFIX_SYMS} -f ${SYSDIR}/conf/kmod_syms_prefix.awk \
 	    ${.TARGET} /dev/null | xargs -J% ${OBJCOPY} % ${.TARGET}
@@ -255,10 +263,12 @@ ${FULLPROG}: ${OBJS}
 	${OBJCOPY} --strip-debug ${.TARGET}
 .endif
 
-_ILINKS=machine
-.if ${MACHINE} != ${MACHINE_CPUARCH} && ${MACHINE} != "arm64"
-_ILINKS+=${MACHINE_CPUARCH}
+.if ${COMPILER_TYPE} == "clang" || \
+    (${COMPILER_TYPE} == "gcc" && ${COMPILER_VERSION} >= 60000)
+_MAP_DEBUG_PREFIX= yes
 .endif
+
+_ILINKS=machine
 .if ${MACHINE_CPUARCH} == "i386" || ${MACHINE_CPUARCH} == "amd64"
 _ILINKS+=x86
 .endif
@@ -271,9 +281,17 @@ beforebuild: ${_ILINKS}
 
 # Ensure that the links exist without depending on it when it exists which
 # causes all the modules to be rebuilt when the directory pointed to changes.
+# Ensure that debug info references the path in the source tree.
 .for _link in ${_ILINKS}
 .if !exists(${.OBJDIR}/${_link})
 OBJS_DEPEND_GUESS+=	${_link}
+.endif
+.if defined(_MAP_DEBUG_PREFIX)
+.if ${_link} == "machine"
+CFLAGS+= -fdebug-prefix-map=./machine=${SYSDIR}/${MACHINE}/include
+.else
+CFLAGS+= -fdebug-prefix-map=./${_link}=${SYSDIR}/${_link}/include
+.endif
 .endif
 .endfor
 
@@ -288,7 +306,7 @@ ${_ILINKS}:
 	esac ; \
 	path=`(cd $$path && /bin/pwd)` ; \
 	${ECHO} ${.TARGET:T} "->" $$path ; \
-	ln -fhs $$path ${.TARGET:T}
+	ln -fns $$path ${.TARGET:T}
 
 CLEANFILES+= ${PROG} ${KMOD}.kld ${OBJS}
 
@@ -323,8 +341,8 @@ afterinstall: _kldxref
 .ORDER: _installlinks _kldxref
 _kldxref: .PHONY
 	@if type kldxref >/dev/null 2>&1; then \
-		${ECHO} kldxref ${DESTDIR}${KMODDIR}; \
-		kldxref ${DESTDIR}${KMODDIR}; \
+		${ECHO} ${KLDXREF_CMD} ${DESTDIR}${KMODDIR}; \
+		${KLDXREF_CMD} ${DESTDIR}${KMODDIR}; \
 	fi
 .endif
 .endif # !target(realinstall)
@@ -365,8 +383,14 @@ ${_src}:
 .endfor
 .endif
 
+# Add the sanitizer C flags
+CFLAGS+=	${SAN_CFLAGS}
+
+# Add the gcov flags
+CFLAGS+=	${GCOV_CFLAGS}
+
 # Respect configuration-specific C flags.
-CFLAGS+=	${CONF_CFLAGS}
+CFLAGS+=	${ARCH_FLAGS} ${CONF_CFLAGS}
 
 .if !empty(SRCS:Mvnode_if.c)
 CLEANFILES+=	vnode_if.c
@@ -444,33 +468,50 @@ usbdevs_data.h: ${SYSDIR}/tools/usbdevs2h.awk ${SYSDIR}/dev/usb/usbdevs
 	${AWK} -f ${SYSDIR}/tools/usbdevs2h.awk ${SYSDIR}/dev/usb/usbdevs -d
 .endif
 
+.if !empty(SRCS:Msdiodevs.h)
+CLEANFILES+=	sdiodevs.h
+sdiodevs.h: ${SYSDIR}/tools/sdiodevs2h.awk ${SYSDIR}/dev/sdio/sdiodevs
+	${AWK} -f ${SYSDIR}/tools/sdiodevs2h.awk ${SYSDIR}/dev/sdio/sdiodevs -h
+.endif
+
+.if !empty(SRCS:Msdiodevs_data.h)
+CLEANFILES+=	sdiodevs_data.h
+sdiodevs_data.h: ${SYSDIR}/tools/sdiodevs2h.awk ${SYSDIR}/dev/sdio/sdiodevs
+	${AWK} -f ${SYSDIR}/tools/sdiodevs2h.awk ${SYSDIR}/dev/sdio/sdiodevs -d
+.endif
+
 .if !empty(SRCS:Macpi_quirks.h)
 CLEANFILES+=	acpi_quirks.h
 acpi_quirks.h: ${SYSDIR}/tools/acpi_quirks2h.awk ${SYSDIR}/dev/acpica/acpi_quirks
 	${AWK} -f ${SYSDIR}/tools/acpi_quirks2h.awk ${SYSDIR}/dev/acpica/acpi_quirks
 .endif
 
-.if !empty(SRCS:Massym.s) || !empty(DPSRCS:Massym.s)
-CLEANFILES+=	assym.s genassym.o
+.if !empty(SRCS:Massym.inc) || !empty(DPSRCS:Massym.inc)
+CLEANFILES+=	assym.inc genassym.o
 DEPENDOBJS+=	genassym.o
-assym.s: genassym.o
-.if defined(KERNBUILDDIR)
-genassym.o: opt_global.h
+DPSRCS+=	offset.inc
 .endif
-assym.s: ${SYSDIR}/kern/genassym.sh
+.if defined(MODULE_TIED)
+DPSRCS+=	offset.inc
+.endif
+.if !empty(SRCS:Moffset.inc) || !empty(DPSRCS:Moffset.inc)
+CLEANFILES+=	offset.inc genoffset.o
+DEPENDOBJS+=	genoffset.o
+.endif
+assym.inc: genassym.o
+offset.inc: genoffset.o
+assym.inc: ${SYSDIR}/kern/genassym.sh
 	sh ${SYSDIR}/kern/genassym.sh genassym.o > ${.TARGET}
-genassym.o: ${SYSDIR}/${MACHINE}/${MACHINE}/genassym.c
+genassym.o: ${SYSDIR}/${MACHINE}/${MACHINE}/genassym.c offset.inc
 genassym.o: ${SRCS:Mopt_*.h}
 	${CC} -c ${CFLAGS:N-flto:N-fno-common} \
 	    ${SYSDIR}/${MACHINE}/${MACHINE}/genassym.c
-.endif
-
-lint: ${SRCS}
-	${LINT} ${LINTKERNFLAGS} ${CFLAGS:M-[DILU]*} ${.ALLSRC:M*.c}
-
-.if defined(KERNBUILDDIR)
-${OBJS}: opt_global.h
-.endif
+offset.inc: ${SYSDIR}/kern/genoffset.sh genoffset.o
+	sh ${SYSDIR}/kern/genoffset.sh genoffset.o > ${.TARGET}
+genoffset.o: ${SYSDIR}/kern/genoffset.c
+genoffset.o: ${SRCS:Mopt_*.h}
+	${CC} -c ${CFLAGS:N-flto:N-fno-common} \
+	    ${SYSDIR}/kern/genoffset.c
 
 CLEANDEPENDFILES+=	${_ILINKS}
 # .depend needs include links so we remove them only together.
@@ -478,6 +519,9 @@ cleanilinks:
 	rm -f ${_ILINKS}
 
 OBJS_DEPEND_GUESS+= ${SRCS:M*.h}
+.if defined(KERNBUILDDIR)
+OBJS_DEPEND_GUESS+= opt_global.h
+.endif
 
 .include <bsd.dep.mk>
 .include <bsd.clang-analyze.mk>

@@ -1,5 +1,7 @@
 /*-
- * Copyright (c) 2005-2011 Pawel Jakub Dawidek <pawel@dawidek.net>
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
+ * Copyright (c) 2005-2019 Pawel Jakub Dawidek <pawel@dawidek.net>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -100,6 +102,11 @@
 #define	G_ELI_FLAG_NODELETE		0x00000040
 /* This GELI supports GELIBoot */
 #define	G_ELI_FLAG_GELIBOOT		0x00000080
+/* Hide passphrase length in GELIboot. */
+#define	G_ELI_FLAG_GELIDISPLAYPASS	0x00000100
+/* Expand provider automatically. */
+#define	G_ELI_FLAG_AUTORESIZE		0x00000200
+
 /* RUNTIME FLAGS. */
 /* Provider was open for writing. */
 #define	G_ELI_FLAG_WOPEN		0x00010000
@@ -148,34 +155,16 @@ extern int g_eli_debug;
 extern u_int g_eli_overwrites;
 extern u_int g_eli_batch;
 
-#define	G_ELI_DEBUG(lvl, ...)	do {					\
-	if (g_eli_debug >= (lvl)) {					\
-		printf("GEOM_ELI");					\
-		if (g_eli_debug > 0)					\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf("\n");						\
-	}								\
-} while (0)
-#define	G_ELI_LOGREQ(lvl, bp, ...)	do {				\
-	if (g_eli_debug >= (lvl)) {					\
-		printf("GEOM_ELI");					\
-		if (g_eli_debug > 0)					\
-			printf("[%u]", lvl);				\
-		printf(": ");						\
-		printf(__VA_ARGS__);					\
-		printf(" ");						\
-		g_print_bio(bp);					\
-		printf("\n");						\
-	}								\
-} while (0)
+#define	G_ELI_DEBUG(lvl, ...) \
+    _GEOM_DEBUG("GEOM_ELI", g_eli_debug, (lvl), NULL, __VA_ARGS__)
+#define	G_ELI_LOGREQ(lvl, bp, ...) \
+    _GEOM_DEBUG("GEOM_ELI", g_eli_debug, (lvl), (bp), __VA_ARGS__)
 
 struct g_eli_worker {
 	struct g_eli_softc	*w_softc;
 	struct proc		*w_proc;
 	u_int			 w_number;
-	uint64_t		 w_sid;
+	crypto_session_t	 w_sid;
 	boolean_t		 w_active;
 	LIST_ENTRY(g_eli_worker) w_next;
 };
@@ -207,6 +196,7 @@ struct g_eli_softc {
 	int		 sc_inflight;
 	off_t		 sc_mediasize;
 	size_t		 sc_sectorsize;
+	off_t		 sc_provsize;
 	u_int		 sc_bytes_per_sector;
 	u_int		 sc_data_per_sector;
 #ifndef _KERNEL
@@ -604,6 +594,23 @@ g_eli_hashlen(u_int algo)
 	return (0);
 }
 
+static __inline off_t
+eli_mediasize(const struct g_eli_softc *sc, off_t mediasize, u_int sectorsize)
+{
+
+	if ((sc->sc_flags & G_ELI_FLAG_ONETIME) == 0) {
+		mediasize -= sectorsize;
+	}
+	if ((sc->sc_flags & G_ELI_FLAG_AUTH) == 0) {
+		mediasize -= (mediasize % sc->sc_sectorsize);
+	} else {
+		mediasize /= sc->sc_bytes_per_sector;
+		mediasize *= sc->sc_sectorsize;
+	}
+
+	return (mediasize);
+}
+
 static __inline void
 eli_metadata_softc(struct g_eli_softc *sc, const struct g_eli_metadata *md,
     u_int sectorsize, off_t mediasize)
@@ -645,16 +652,9 @@ eli_metadata_softc(struct g_eli_softc *sc, const struct g_eli_metadata *md,
 		    (md->md_sectorsize - 1) / sc->sc_data_per_sector + 1;
 		sc->sc_bytes_per_sector *= sectorsize;
 	}
+	sc->sc_provsize = mediasize;
 	sc->sc_sectorsize = md->md_sectorsize;
-	sc->sc_mediasize = mediasize;
-	if (!(sc->sc_flags & G_ELI_FLAG_ONETIME))
-		sc->sc_mediasize -= sectorsize;
-	if (!(sc->sc_flags & G_ELI_FLAG_AUTH))
-		sc->sc_mediasize -= (sc->sc_mediasize % sc->sc_sectorsize);
-	else {
-		sc->sc_mediasize /= sc->sc_bytes_per_sector;
-		sc->sc_mediasize *= sc->sc_sectorsize;
-	}
+	sc->sc_mediasize = eli_mediasize(sc, mediasize, sectorsize);
 	sc->sc_ekeylen = md->md_keylen;
 }
 
@@ -684,6 +684,8 @@ void g_eli_crypto_ivgen(struct g_eli_softc *sc, off_t offset, u_char *iv,
 
 void g_eli_mkey_hmac(unsigned char *mkey, const unsigned char *key);
 int g_eli_mkey_decrypt(const struct g_eli_metadata *md,
+    const unsigned char *key, unsigned char *mkey, unsigned keyp);
+int g_eli_mkey_decrypt_any(const struct g_eli_metadata *md,
     const unsigned char *key, unsigned char *mkey, unsigned *nkeyp);
 int g_eli_mkey_encrypt(unsigned algo, const unsigned char *key, unsigned keylen,
     unsigned char *mkey);
@@ -701,12 +703,12 @@ struct hmac_ctx {
 	SHA512_CTX	outerctx;
 };
 
-void g_eli_crypto_hmac_init(struct hmac_ctx *ctx, const uint8_t *hkey,
+void g_eli_crypto_hmac_init(struct hmac_ctx *ctx, const char *hkey,
     size_t hkeylen);
 void g_eli_crypto_hmac_update(struct hmac_ctx *ctx, const uint8_t *data,
     size_t datasize);
 void g_eli_crypto_hmac_final(struct hmac_ctx *ctx, uint8_t *md, size_t mdsize);
-void g_eli_crypto_hmac(const uint8_t *hkey, size_t hkeysize,
+void g_eli_crypto_hmac(const char *hkey, size_t hkeysize,
     const uint8_t *data, size_t datasize, uint8_t *md, size_t mdsize);
 
 void g_eli_key_fill(struct g_eli_softc *sc, struct g_eli_key *key,
@@ -714,6 +716,7 @@ void g_eli_key_fill(struct g_eli_softc *sc, struct g_eli_key *key,
 #ifdef _KERNEL
 void g_eli_key_init(struct g_eli_softc *sc);
 void g_eli_key_destroy(struct g_eli_softc *sc);
+void g_eli_key_resize(struct g_eli_softc *sc);
 uint8_t *g_eli_key_hold(struct g_eli_softc *sc, off_t offset, size_t blocksize);
 void g_eli_key_drop(struct g_eli_softc *sc, uint8_t *rawkey);
 #endif

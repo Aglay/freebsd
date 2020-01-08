@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1991, 1993
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -79,7 +81,7 @@ struct lockf_entry {
 	struct	task *lf_async_task;/* (c) Async lock callback */
 	LIST_ENTRY(lockf_entry) lf_link;  /* (s) Linkage for lock lists */
 	struct lockf_edge_list lf_outedges; /* (s) list of out-edges */
-	struct lockf_edge_list lf_inedges; /* (s) list of out-edges */
+	struct lockf_edge_list lf_inedges; /* (s) list of in-edges */
 	int	lf_refs;	    /* (s) ref count */
 };
 LIST_HEAD(lockf_entry_list, lockf_entry);

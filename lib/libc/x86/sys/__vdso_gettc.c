@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2012 Konstantin Belousov <kib@FreeBSD.org>
- * Copyright (c) 2016, 2017 The FreeBSD Foundation
+ * Copyright (c) 2016, 2017, 2019 The FreeBSD Foundation
  * All rights reserved.
  *
  * Portions of this software were developed by Konstantin Belousov
@@ -50,51 +50,39 @@ __FBSDID("$FreeBSD$");
 #ifdef WANT_HYPERV
 #include <dev/hyperv/hyperv.h>
 #endif
+#include <x86/ifunc.h>
 #include "libc_private.h"
 
 static void
-lfence_mb(void)
+rdtsc_mb_lfence(void)
 {
-#if defined(__i386__)
-	static int lfence_works = -1;
-	u_int cpuid_supported, p[4];
 
-	if (lfence_works == -1) {
-		__asm __volatile(
-		    "	pushfl\n"
-		    "	popl	%%eax\n"
-		    "	movl    %%eax,%%ecx\n"
-		    "	xorl    $0x200000,%%eax\n"
-		    "	pushl	%%eax\n"
-		    "	popfl\n"
-		    "	pushfl\n"
-		    "	popl    %%eax\n"
-		    "	xorl    %%eax,%%ecx\n"
-		    "	je	1f\n"
-		    "	movl	$1,%0\n"
-		    "	jmp	2f\n"
-		    "1:	movl	$0,%0\n"
-		    "2:\n"
-		    : "=r" (cpuid_supported) : : "eax", "ecx", "cc");
-		if (cpuid_supported) {
-			__asm __volatile(
-			    "	pushl	%%ebx\n"
-			    "	cpuid\n"
-			    "	movl	%%ebx,%1\n"
-			    "	popl	%%ebx\n"
-			    : "=a" (p[0]), "=r" (p[1]), "=c" (p[2]), "=d" (p[3])
-			    :  "0" (0x1));
-			lfence_works = (p[3] & CPUID_SSE2) != 0;
-		} else
-			lfence_works = 0;
-	}
-	if (lfence_works == 1)
-		lfence();
-#elif defined(__amd64__)
 	lfence();
-#else
-#error "arch"
-#endif
+}
+
+static void
+rdtsc_mb_mfence(void)
+{
+
+	mfence();
+}
+
+static void
+rdtsc_mb_none(void)
+{
+}
+
+DEFINE_UIFUNC(static, void, rdtsc_mb, (void))
+{
+	u_int p[4];
+	/* Not a typo, string matches our do_cpuid() registers use. */
+	static const char intel_id[] = "GenuntelineI";
+
+	if ((cpu_feature & CPUID_SSE2) == 0)
+		return (rdtsc_mb_none);
+	do_cpuid(0, p);
+	return (memcmp(p + 1, intel_id, sizeof(intel_id) - 1) == 0 ?
+	    rdtsc_mb_lfence : rdtsc_mb_mfence);
 }
 
 static u_int
@@ -102,7 +90,7 @@ __vdso_gettc_rdtsc_low(const struct vdso_timehands *th)
 {
 	u_int rv;
 
-	lfence_mb();
+	rdtsc_mb();
 	__asm __volatile("rdtsc; shrd %%cl, %%edx, %0"
 	    : "=a" (rv) : "c" (th->th_x86_shift) : "edx");
 	return (rv);
@@ -112,7 +100,7 @@ static u_int
 __vdso_rdtsc32(void)
 {
 
-	lfence_mb();
+	rdtsc_mb();
 	return (rdtsc32());
 }
 
@@ -146,25 +134,24 @@ __vdso_init_hpet(uint32_t u)
 	if (old_map != NULL)
 		return;
 
-	if (cap_getmode(&mode) == 0 && mode != 0)
-		goto fail;
-
-	fd = _open(devname, O_RDONLY);
-	if (fd == -1)
-		goto fail;
+	/*
+	 * Explicitely check for the capability mode to avoid
+	 * triggering trap_enocap on the device open by absolute path.
+	 */
+	if ((cap_getmode(&mode) == 0 && mode != 0) ||
+	    (fd = _open(devname, O_RDONLY)) == -1) {
+		/* Prevent the caller from re-entering. */
+		atomic_cmpset_rel_ptr((volatile uintptr_t *)&hpet_dev_map[u],
+		    (uintptr_t)old_map, (uintptr_t)MAP_FAILED);
+		return;
+	}
 
 	new_map = mmap(NULL, PAGE_SIZE, PROT_READ, MAP_SHARED, fd, 0);
 	_close(fd);
 	if (atomic_cmpset_rel_ptr((volatile uintptr_t *)&hpet_dev_map[u],
 	    (uintptr_t)old_map, (uintptr_t)new_map) == 0 &&
 	    new_map != MAP_FAILED)
-	munmap((void *)new_map, PAGE_SIZE);
-
-	return;
-fail:
-	/* Prevent the caller from re-entering. */
-	atomic_cmpset_rel_ptr((volatile uintptr_t *)&hpet_dev_map[u],
-	    (uintptr_t)old_map, (uintptr_t)MAP_FAILED);
+		munmap((void *)new_map, PAGE_SIZE);
 }
 
 #ifdef WANT_HYPERV
@@ -212,7 +199,7 @@ __vdso_hyperv_tsc(struct hyperv_reftsc *tsc_ref, u_int *tc)
 		scale = tsc_ref->tsc_scale;
 		ofs = tsc_ref->tsc_ofs;
 
-		lfence_mb();
+		rdtsc_mb();
 		tsc = rdtsc();
 
 		/* ret = ((tsc * scale) >> 64) + ofs */

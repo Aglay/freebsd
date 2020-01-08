@@ -2,6 +2,8 @@
 /*	$NetBSD: msdosfs_vnops.c,v 1.68 1998/02/10 14:10:04 mrg Exp $	*/
 
 /*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (C) 1994, 1995, 1997 Wolfgang Solfrank.
  * Copyright (C) 1994, 1995, 1997 TooLs GmbH.
  * All rights reserved.
@@ -76,8 +78,6 @@
 #include <fs/msdosfs/denode.h>
 #include <fs/msdosfs/fat.h>
 #include <fs/msdosfs/msdosfsmount.h>
-
-#define	DOS_FILESIZE_MAX	0xffffffff
 
 /*
  * Prototypes for MSDOSFS vnode operations
@@ -176,7 +176,7 @@ msdosfs_create(struct vop_create_args *ap)
 	ndirent.de_FileSize = 0;
 	ndirent.de_pmp = pdep->de_pmp;
 	ndirent.de_flag = DE_ACCESS | DE_CREATE | DE_UPDATE;
-	getnanotime(&ts);
+	vfs_timestamp(&ts);
 	DETIMES(&ndirent, &ts, &ts, &ts);
 	error = createde(&ndirent, pdep, &dep, cnp);
 	if (error)
@@ -214,7 +214,7 @@ msdosfs_close(struct vop_close_args *ap)
 
 	VI_LOCK(vp);
 	if (vp->v_usecount > 1) {
-		getnanotime(&ts);
+		vfs_timestamp(&ts);
 		DETIMES(dep, &ts, &ts, &ts);
 	}
 	VI_UNLOCK(vp);
@@ -264,7 +264,7 @@ msdosfs_getattr(struct vop_getattr_args *ap)
 	u_long dirsperblk = pmp->pm_BytesPerSec / sizeof(struct direntry);
 	uint64_t fileid;
 
-	getnanotime(&ts);
+	vfs_timestamp(&ts);
 	DETIMES(dep, &ts, &ts, &ts);
 	vap->va_fsid = dev2udev(pmp->pm_dev);
 	/*
@@ -287,7 +287,9 @@ msdosfs_getattr(struct vop_getattr_args *ap)
 	vap->va_fileid = fileid;
 
 	mode = S_IRWXU|S_IRWXG|S_IRWXO;
-	vap->va_mode = mode & 
+	if (dep->de_Attributes & ATTR_READONLY)
+		mode &= ~(S_IWUSR|S_IWGRP|S_IWOTH);
+	vap->va_mode = mode &
 	    (ap->a_vp->v_type == VDIR ? pmp->pm_dirmask : pmp->pm_mask);
 	vap->va_uid = pmp->pm_uid;
 	vap->va_gid = pmp->pm_gid;
@@ -348,10 +350,13 @@ msdosfs_setattr(struct vop_setattr_args *ap)
 	    (vap->va_bytes != VNOVAL) || (vap->va_gen != VNOVAL)) {
 #ifdef MSDOSFS_DEBUG
 		printf("msdosfs_setattr(): returning EINVAL\n");
-		printf("    va_type %d, va_nlink %x, va_fsid %lx, va_fileid %lx\n",
-		    vap->va_type, vap->va_nlink, vap->va_fsid, vap->va_fileid);
-		printf("    va_blocksize %lx, va_rdev %x, va_bytes %qx, va_gen %lx\n",
-		    vap->va_blocksize, vap->va_rdev, vap->va_bytes, vap->va_gen);
+		printf("    va_type %d, va_nlink %llx, va_fsid %llx, va_fileid %llx\n",
+		    vap->va_type, (unsigned long long)vap->va_nlink,
+		    (unsigned long long)vap->va_fsid,
+		    (unsigned long long)vap->va_fileid);
+		printf("    va_blocksize %lx, va_rdev %llx, va_bytes %llx, va_gen %lx\n",
+		    vap->va_blocksize, (unsigned long long)vap->va_rdev,
+		    (unsigned long long)vap->va_bytes, vap->va_gen);
 		printf("    va_uid %x, va_gid %x\n",
 		    vap->va_uid, vap->va_gid);
 #endif
@@ -373,7 +378,7 @@ msdosfs_setattr(struct vop_setattr_args *ap)
 		if (vp->v_mount->mnt_flag & MNT_RDONLY)
 			return (EROFS);
 		if (cred->cr_uid != pmp->pm_uid) {
-			error = priv_check_cred(cred, PRIV_VFS_ADMIN, 0);
+			error = priv_check_cred(cred, PRIV_VFS_ADMIN);
 			if (error)
 				return (error);
 		}
@@ -422,7 +427,7 @@ msdosfs_setattr(struct vop_setattr_args *ap)
 			gid = pmp->pm_gid;
 		if (cred->cr_uid != pmp->pm_uid || uid != pmp->pm_uid ||
 		    (gid != pmp->pm_gid && !groupmember(gid, cred))) {
-			error = priv_check_cred(cred, PRIV_VFS_CHOWN, 0);
+			error = priv_check_cred(cred, PRIV_VFS_CHOWN);
 			if (error)
 				return (error);
 		}
@@ -493,13 +498,13 @@ msdosfs_setattr(struct vop_setattr_args *ap)
 		if (vp->v_mount->mnt_flag & MNT_RDONLY)
 			return (EROFS);
 		if (cred->cr_uid != pmp->pm_uid) {
-			error = priv_check_cred(cred, PRIV_VFS_ADMIN, 0);
+			error = priv_check_cred(cred, PRIV_VFS_ADMIN);
 			if (error)
 				return (error);
 		}
 		if (vp->v_type != VDIR) {
 			/* We ignore the read and execute bits. */
-			if (vap->va_mode & VWRITE)
+			if (vap->va_mode & S_IWUSR)
 				dep->de_Attributes &= ~ATTR_READONLY;
 			else
 				dep->de_Attributes |= ATTR_READONLY;
@@ -541,7 +546,7 @@ msdosfs_read(struct vop_read_args *ap)
 	 * The caller is supposed to ensure that
 	 * uio->uio_offset >= 0 and uio->uio_resid >= 0.
 	 * We don't need to check for large offsets as in ffs because
-	 * dep->de_FileSize <= DOS_FILESIZE_MAX < OFF_MAX, so large
+	 * dep->de_FileSize <= MSDOSFS_FILESIZE_MAX < OFF_MAX, so large
 	 * offsets cannot cause overflow even in theory.
 	 */
 
@@ -656,7 +661,7 @@ msdosfs_write(struct vop_write_args *ap)
 	 * The caller is supposed to ensure that
 	 * uio->uio_offset >= 0 and uio->uio_resid >= 0.
 	 */
-	if ((uoff_t)uio->uio_offset + uio->uio_resid > DOS_FILESIZE_MAX)
+	if ((uoff_t)uio->uio_offset + uio->uio_resid > MSDOSFS_FILESIZE_MAX)
 		return (EFBIG);
 
 	/*
@@ -753,7 +758,6 @@ msdosfs_write(struct vop_write_args *ap)
 			 */
 			error = bread(thisvp, bn, pmp->pm_bpcluster, cred, &bp);
 			if (error) {
-				brelse(bp);
 				break;
 			}
 		}
@@ -848,7 +852,7 @@ msdosfs_fsync(struct vop_fsync_args *ap)
 		devvp = VTODE(ap->a_vp)->de_pmp->pm_devvp;
 		vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
 		allerror = VOP_FSYNC(devvp, MNT_WAIT, ap->a_td);
-		VOP_UNLOCK(devvp, 0);
+		VOP_UNLOCK(devvp);
 	} else
 		allerror = 0;
 
@@ -1005,7 +1009,7 @@ abortit:
 		    (fcnp->cn_flags & ISDOTDOT) ||
 		    (tcnp->cn_flags & ISDOTDOT) ||
 		    (ip->de_flag & DE_RENAME)) {
-			VOP_UNLOCK(fvp, 0);
+			VOP_UNLOCK(fvp);
 			error = EINVAL;
 			goto abortit;
 		}
@@ -1036,7 +1040,7 @@ abortit:
 	 * call to doscheckpath().
 	 */
 	error = VOP_ACCESS(fvp, VWRITE, tcnp->cn_cred, tcnp->cn_thread);
-	VOP_UNLOCK(fvp, 0);
+	VOP_UNLOCK(fvp);
 	if (VTODE(fdvp)->de_StartCluster != VTODE(tdvp)->de_StartCluster)
 		newparent = 1;
 	if (doingdirectory && newparent) {
@@ -1105,7 +1109,7 @@ abortit:
 	if ((fcnp->cn_flags & SAVESTART) == 0)
 		panic("msdosfs_rename: lost from startdir");
 	if (!newparent)
-		VOP_UNLOCK(tdvp, 0);
+		VOP_UNLOCK(tdvp);
 	if (relookup(fdvp, &fvp, fcnp) == 0)
 		vrele(fdvp);
 	if (fvp == NULL) {
@@ -1115,7 +1119,7 @@ abortit:
 		if (doingdirectory)
 			panic("rename: lost dir entry");
 		if (newparent)
-			VOP_UNLOCK(tdvp, 0);
+			VOP_UNLOCK(tdvp);
 		vrele(tdvp);
 		vrele(ap->a_fvp);
 		return 0;
@@ -1135,9 +1139,9 @@ abortit:
 	if (xp != ip) {
 		if (doingdirectory)
 			panic("rename: lost dir entry");
-		VOP_UNLOCK(fvp, 0);
+		VOP_UNLOCK(fvp);
 		if (newparent)
-			VOP_UNLOCK(fdvp, 0);
+			VOP_UNLOCK(fdvp);
 		vrele(ap->a_fvp);
 		xp = NULL;
 	} else {
@@ -1160,8 +1164,8 @@ abortit:
 		if (error) {
 			memcpy(ip->de_Name, oldname, 11);
 			if (newparent)
-				VOP_UNLOCK(fdvp, 0);
-			VOP_UNLOCK(fvp, 0);
+				VOP_UNLOCK(fdvp);
+			VOP_UNLOCK(fvp);
 			goto bad;
 		}
 		/*
@@ -1181,8 +1185,8 @@ abortit:
 		if (error) {
 			/* XXX should downgrade to ro here, fs is corrupt */
 			if (newparent)
-				VOP_UNLOCK(fdvp, 0);
-			VOP_UNLOCK(fvp, 0);
+				VOP_UNLOCK(fdvp);
+			VOP_UNLOCK(fvp);
 			goto bad;
 		}
 		if (!doingdirectory) {
@@ -1191,8 +1195,8 @@ abortit:
 			if (error) {
 				/* XXX should downgrade to ro here, fs is corrupt */
 				if (newparent)
-					VOP_UNLOCK(fdvp, 0);
-				VOP_UNLOCK(fvp, 0);
+					VOP_UNLOCK(fdvp);
+				VOP_UNLOCK(fvp);
 				goto bad;
 			}
 			if (ip->de_dirclust == MSDOSFSROOT)
@@ -1202,7 +1206,7 @@ abortit:
 		}
 		reinsert(ip);
 		if (newparent)
-			VOP_UNLOCK(fdvp, 0);
+			VOP_UNLOCK(fdvp);
 	}
 
 	/*
@@ -1220,8 +1224,7 @@ abortit:
 			      NOCRED, &bp);
 		if (error) {
 			/* XXX should downgrade to ro here, fs is corrupt */
-			brelse(bp);
-			VOP_UNLOCK(fvp, 0);
+			VOP_UNLOCK(fvp);
 			goto bad;
 		}
 		dotdotp = (struct direntry *)bp->b_data + 1;
@@ -1235,7 +1238,7 @@ abortit:
 			bdwrite(bp);
 		else if ((error = bwrite(bp)) != 0) {
 			/* XXX should downgrade to ro here, fs is corrupt */
-			VOP_UNLOCK(fvp, 0);
+			VOP_UNLOCK(fvp);
 			goto bad;
 		}
 	}
@@ -1248,7 +1251,7 @@ abortit:
 	 * namecache entries that were installed for this direntry.
 	 */
 	cache_purge(fvp);
-	VOP_UNLOCK(fvp, 0);
+	VOP_UNLOCK(fvp);
 bad:
 	if (xp)
 		vput(tvp);
@@ -1323,7 +1326,7 @@ msdosfs_mkdir(struct vop_mkdir_args *ap)
 	memset(&ndirent, 0, sizeof(ndirent));
 	ndirent.de_pmp = pmp;
 	ndirent.de_flag = DE_ACCESS | DE_CREATE | DE_UPDATE;
-	getnanotime(&ts);
+	vfs_timestamp(&ts);
 	DETIMES(&ndirent, &ts, &ts, &ts);
 
 	/*
@@ -1545,14 +1548,18 @@ msdosfs_readdir(struct vop_readdir_args *ap)
 				switch (n) {
 				case 0:
 					dirbuf.d_namlen = 1;
-					strcpy(dirbuf.d_name, ".");
+					dirbuf.d_name[0] = '.';
 					break;
 				case 1:
 					dirbuf.d_namlen = 2;
-					strcpy(dirbuf.d_name, "..");
+					dirbuf.d_name[0] = '.';
+					dirbuf.d_name[1] = '.';
 					break;
 				}
 				dirbuf.d_reclen = GENERIC_DIRSIZ(&dirbuf);
+				/* NOTE: d_off is the offset of the *next* entry. */
+				dirbuf.d_off = offset + sizeof(struct direntry);
+				dirent_terminate(&dirbuf);
 				if (uio->uio_resid < dirbuf.d_reclen)
 					goto out;
 				error = uiomove(&dirbuf, dirbuf.d_reclen, uio);
@@ -1584,7 +1591,6 @@ msdosfs_readdir(struct vop_readdir_args *ap)
 			break;
 		error = bread(pmp->pm_devvp, bn, blsize, NOCRED, &bp);
 		if (error) {
-			brelse(bp);
 			return (error);
 		}
 		n = min(n, blsize - bp->b_resid);
@@ -1676,6 +1682,8 @@ msdosfs_readdir(struct vop_readdir_args *ap)
 				mbnambuf_flush(&nb, &dirbuf);
 			chksum = -1;
 			dirbuf.d_reclen = GENERIC_DIRSIZ(&dirbuf);
+			/* NOTE: d_off is the offset of the *next* entry. */
+			dirbuf.d_off = offset + sizeof(struct direntry);
 			if (uio->uio_resid < dirbuf.d_reclen) {
 				brelse(bp);
 				goto out;
@@ -1729,6 +1737,7 @@ out:
 static int
 msdosfs_bmap(struct vop_bmap_args *ap)
 {
+	struct fatcache savefc;
 	struct denode *dep;
 	struct mount *mp;
 	struct msdosfsmount *pmp;
@@ -1755,6 +1764,20 @@ msdosfs_bmap(struct vop_bmap_args *ap)
 	if (error != 0 || (ap->a_runp == NULL && ap->a_runb == NULL))
 		return (error);
 
+	/*
+	 * Prepare to back out updates of the fatchain cache after the one
+	 * for the first block done by pcbmap() above.  Without the backout,
+	 * then whenever the caller doesn't do i/o to all of the blocks that
+	 * we find, the single useful cache entry would be too far in advance
+	 * of the actual i/o to work for the next sequential i/o.  Then the
+	 * FAT would be searched from the beginning.  With the backout, the
+	 * FAT is searched starting at most a few blocks early.  This wastes
+	 * much less time.  Time is also wasted finding more blocks than the
+	 * caller will do i/o to.  This is necessary because the runlength
+	 * parameters are output-only.
+	 */
+	savefc = dep->de_fc[FC_LASTMAP];
+
 	mp = vp->v_mount;
 	maxio = mp->mnt_iosize_max / mp->mnt_stat.f_iosize;
 	bnpercn = de_cn2bn(pmp, 1);
@@ -1776,6 +1799,7 @@ msdosfs_bmap(struct vop_bmap_args *ap)
 		}
 		*ap->a_runb = run - 1;
 	}
+	dep->de_fc[FC_LASTMAP] = savefc;
 	return (0);
 }
 
@@ -1869,11 +1893,17 @@ msdosfs_pathconf(struct vop_pathconf_args *ap)
 	struct msdosfsmount *pmp = VTODE(ap->a_vp)->de_pmp;
 
 	switch (ap->a_name) {
+	case _PC_FILESIZEBITS:
+		*ap->a_retval = 32;
+		return (0);
 	case _PC_LINK_MAX:
 		*ap->a_retval = 1;
 		return (0);
 	case _PC_NAME_MAX:
 		*ap->a_retval = pmp->pm_flags & MSDOSFSMNT_LONGNAME ? WIN_MAXLEN : 12;
+		return (0);
+	case _PC_CHOWN_RESTRICTED:
+		*ap->a_retval = 1;
 		return (0);
 	case _PC_NO_TRUNC:
 		*ap->a_retval = 0;
@@ -1932,3 +1962,4 @@ struct vop_vector msdosfs_vnodeops = {
 	.vop_write =		msdosfs_write,
 	.vop_vptofh =		msdosfs_vptofh,
 };
+VFS_VOP_VECTOR_REGISTER(msdosfs_vnodeops);

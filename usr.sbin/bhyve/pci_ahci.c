@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013  Zhixiang Yu <zcore@freebsd.org>
  * Copyright (c) 2015-2016 Alexander Motin <mav@FreeBSD.org>
  * All rights reserved.
@@ -103,7 +105,7 @@ enum sata_fis_type {
  * ATA commands
  */
 #define	ATA_SF_ENAB_SATA_SF		0x10
-#define		ATA_SATA_SF_AN		0x05
+#define	ATA_SATA_SF_AN			0x05
 #define	ATA_SF_DIS_SATA_SF		0x90
 
 /*
@@ -116,6 +118,8 @@ static FILE *dbg;
 #define DPRINTF(format, arg...)
 #endif
 #define WPRINTF(format, arg...) printf(format, ##arg)
+
+#define AHCI_PORT_IDENT 20 + 1
 
 struct ahci_ioreq {
 	struct blockif_req io_req;
@@ -134,7 +138,7 @@ struct ahci_port {
 	struct pci_ahci_softc *pr_sc;
 	uint8_t *cmd_lst;
 	uint8_t *rfis;
-	char ident[20 + 1];
+	char ident[AHCI_PORT_IDENT];
 	int port;
 	int atapi;
 	int reset;
@@ -236,7 +240,7 @@ ahci_generate_intr(struct pci_ahci_softc *sc, uint32_t mask)
 		if (p->is & p->ie)
 			sc->is |= (1 << i);
 	}
-	DPRINTF("%s(%08x) %08x\n", __func__, mask, sc->is);
+	DPRINTF("%s(%08x) %08x\n\r", __func__, mask, sc->is);
 
 	/* If there is nothing enabled -- clear legacy interrupt and exit. */
 	if (sc->is == 0 || (sc->ghc & AHCI_GHC_IE) == 0) {
@@ -278,7 +282,7 @@ ahci_port_intr(struct ahci_port *p)
 	struct pci_devinst *pi = sc->asc_pi;
 	int nmsg;
 
-	DPRINTF("%s(%d) %08x/%08x %08x\n", __func__,
+	DPRINTF("%s(%d) %08x/%08x %08x\n\r", __func__,
 	    p->port, p->is, p->ie, sc->is);
 
 	/* If there is nothing enabled -- we are done. */
@@ -337,7 +341,7 @@ ahci_write_fis(struct ahci_port *p, enum sata_fis_type ft, uint8_t *fis)
 		irq = (fis[1] & (1 << 6)) ? AHCI_P_IX_PS : 0;
 		break;
 	default:
-		WPRINTF("unsupported fis type %d\n", ft);
+		WPRINTF("unsupported fis type %d\n\r", ft);
 		return;
 	}
 	if (fis[2] & ATA_S_ERROR) {
@@ -1597,7 +1601,7 @@ handle_packet_cmd(struct ahci_port *p, int slot, uint8_t *cfis)
 		DPRINTF("ACMD:");
 		for (i = 0; i < 16; i++)
 			DPRINTF("%02x ", acmd[i]);
-		DPRINTF("\n");
+		DPRINTF("\n\r");
 	}
 #endif
 
@@ -1784,7 +1788,7 @@ ahci_handle_cmd(struct ahci_port *p, int slot, uint8_t *cfis)
 			handle_packet_cmd(p, slot, cfis);
 		break;
 	default:
-		WPRINTF("Unsupported cmd:%02x\n", cfis[2]);
+		WPRINTF("Unsupported cmd:%02x\n\r", cfis[2]);
 		ahci_write_fis_d2h(p, slot, cfis,
 		    (ATA_E_ABORT << 8) | ATA_S_READY | ATA_S_ERROR);
 		break;
@@ -1814,22 +1818,22 @@ ahci_handle_slot(struct ahci_port *p, int slot)
 #ifdef AHCI_DEBUG
 	prdt = (struct ahci_prdt_entry *)(cfis + 0x80);
 
-	DPRINTF("\ncfis:");
+	DPRINTF("\n\rcfis:");
 	for (i = 0; i < cfl; i++) {
 		if (i % 10 == 0)
-			DPRINTF("\n");
+			DPRINTF("\n\r");
 		DPRINTF("%02x ", cfis[i]);
 	}
-	DPRINTF("\n");
+	DPRINTF("\n\r");
 
 	for (i = 0; i < hdr->prdtl; i++) {
-		DPRINTF("%d@%08"PRIx64"\n", prdt->dbc & 0x3fffff, prdt->dba);
+		DPRINTF("%d@%08"PRIx64"\n\r", prdt->dbc & 0x3fffff, prdt->dba);
 		prdt++;
 	}
 #endif
 
 	if (cfis[0] != FIS_TYPE_REGH2D) {
-		WPRINTF("Not a H2D FIS:%02x\n", cfis[0]);
+		WPRINTF("Not a H2D FIS:%02x\n\r", cfis[0]);
 		return;
 	}
 
@@ -1885,7 +1889,7 @@ ata_ioreq_cb(struct blockif_req *br, int err)
 	uint8_t *cfis;
 	int slot, ncq, dsm;
 
-	DPRINTF("%s %d\n", __func__, err);
+	DPRINTF("%s %d\n\r", __func__, err);
 
 	ncq = dsm = 0;
 	aior = br->br_param;
@@ -1945,7 +1949,7 @@ ata_ioreq_cb(struct blockif_req *br, int err)
 	ahci_handle_port(p);
 out:
 	pthread_mutex_unlock(&sc->mtx);
-	DPRINTF("%s exit\n", __func__);
+	DPRINTF("%s exit\n\r", __func__);
 }
 
 static void
@@ -1959,7 +1963,7 @@ atapi_ioreq_cb(struct blockif_req *br, int err)
 	uint32_t tfd;
 	int slot;
 
-	DPRINTF("%s %d\n", __func__, err);
+	DPRINTF("%s %d\n\r", __func__, err);
 
 	aior = br->br_param;
 	p = aior->io_pr;
@@ -2007,7 +2011,7 @@ atapi_ioreq_cb(struct blockif_req *br, int err)
 	ahci_handle_port(p);
 out:
 	pthread_mutex_unlock(&sc->mtx);
-	DPRINTF("%s exit\n", __func__);
+	DPRINTF("%s exit\n\r", __func__);
 }
 
 static void
@@ -2044,7 +2048,7 @@ pci_ahci_port_write(struct pci_ahci_softc *sc, uint64_t offset, uint64_t value)
 	offset = (offset - AHCI_OFFSET) % AHCI_STEP;
 	struct ahci_port *p = &sc->port[port];
 
-	DPRINTF("pci_ahci_port %d: write offset 0x%"PRIx64" value 0x%"PRIx64"\n",
+	DPRINTF("pci_ahci_port %d: write offset 0x%"PRIx64" value 0x%"PRIx64"\n\r",
 		port, offset, value);
 
 	switch (offset) {
@@ -2116,7 +2120,7 @@ pci_ahci_port_write(struct pci_ahci_softc *sc, uint64_t offset, uint64_t value)
 	case AHCI_P_TFD:
 	case AHCI_P_SIG:
 	case AHCI_P_SSTS:
-		WPRINTF("pci_ahci_port: read only registers 0x%"PRIx64"\n", offset);
+		WPRINTF("pci_ahci_port: read only registers 0x%"PRIx64"\n\r", offset);
 		break;
 	case AHCI_P_SCTL:
 		p->sctl = value;
@@ -2145,7 +2149,7 @@ pci_ahci_port_write(struct pci_ahci_softc *sc, uint64_t offset, uint64_t value)
 static void
 pci_ahci_host_write(struct pci_ahci_softc *sc, uint64_t offset, uint64_t value)
 {
-	DPRINTF("pci_ahci_host: write offset 0x%"PRIx64" value 0x%"PRIx64"\n",
+	DPRINTF("pci_ahci_host: write offset 0x%"PRIx64" value 0x%"PRIx64"\n\r",
 		offset, value);
 
 	switch (offset) {
@@ -2153,7 +2157,7 @@ pci_ahci_host_write(struct pci_ahci_softc *sc, uint64_t offset, uint64_t value)
 	case AHCI_PI:
 	case AHCI_VS:
 	case AHCI_CAP2:
-		DPRINTF("pci_ahci_host: read only registers 0x%"PRIx64"\n", offset);
+		DPRINTF("pci_ahci_host: read only registers 0x%"PRIx64"\n\r", offset);
 		break;
 	case AHCI_GHC:
 		if (value & AHCI_GHC_HR) {
@@ -2191,7 +2195,7 @@ pci_ahci_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	else if (offset < AHCI_OFFSET + sc->ports * AHCI_STEP)
 		pci_ahci_port_write(sc, offset, value);
 	else
-		WPRINTF("pci_ahci: unknown i/o write offset 0x%"PRIx64"\n", offset);
+		WPRINTF("pci_ahci: unknown i/o write offset 0x%"PRIx64"\n\r", offset);
 
 	pthread_mutex_unlock(&sc->mtx);
 }
@@ -2222,7 +2226,7 @@ pci_ahci_host_read(struct pci_ahci_softc *sc, uint64_t offset)
 		value = 0;
 		break;
 	}
-	DPRINTF("pci_ahci_host: read offset 0x%"PRIx64" value 0x%x\n",
+	DPRINTF("pci_ahci_host: read offset 0x%"PRIx64" value 0x%x\n\r",
 		offset, value);
 
 	return (value);
@@ -2263,7 +2267,7 @@ pci_ahci_port_read(struct pci_ahci_softc *sc, uint64_t offset)
 		break;
 	}
 
-	DPRINTF("pci_ahci_port %d: read offset 0x%"PRIx64" value 0x%x\n",
+	DPRINTF("pci_ahci_port %d: read offset 0x%"PRIx64" value 0x%x\n\r",
 		port, offset, value);
 
 	return value;
@@ -2290,7 +2294,7 @@ pci_ahci_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx,
 		value = pci_ahci_port_read(sc, offset);
 	else {
 		value = 0;
-		WPRINTF("pci_ahci: unknown i/o read offset 0x%"PRIx64"\n",
+		WPRINTF("pci_ahci: unknown i/o read offset 0x%"PRIx64"\n\r",
 		    regoff);
 	}
 	value >>= 8 * (regoff & 0x3);
@@ -2372,7 +2376,8 @@ pci_ahci_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts, int atapi)
 		MD5Init(&mdctx);
 		MD5Update(&mdctx, opts, strlen(opts));
 		MD5Final(digest, &mdctx);
-		sprintf(sc->port[p].ident, "BHYVE-%02X%02X-%02X%02X-%02X%02X",
+		snprintf(sc->port[p].ident, AHCI_PORT_IDENT,
+		    "BHYVE-%02X%02X-%02X%02X-%02X%02X",
 		    digest[0], digest[1], digest[2], digest[3], digest[4],
 		    digest[5]);
 

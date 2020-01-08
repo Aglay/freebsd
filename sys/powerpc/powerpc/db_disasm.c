@@ -224,7 +224,7 @@ const struct opcode opcodes_1f[] = {
 	{ "ldx",	0xfc0007fe, 0x7c00002a, Op_D | Op_A | Op_B },
 	{ "lwzx",	0xfc0007fe, 0x7c00002e, Op_D | Op_A | Op_B },
 	{ "slw",	0xfc0007fe, 0x7c000030, Op_D | Op_A | Op_B | Op_Rc },
-	{ "cntlzw",	0xfc0007fe, 0x7c000034, Op_D | Op_A | Op_Rc },
+	{ "cntlzw",	0xfc0007fe, 0x7c000034, Op_S | Op_A | Op_Rc },
 	{ "sld",	0xfc0007fe, 0x7c000036, Op_D | Op_A | Op_B | Op_Rc },
 	{ "and",	0xfc0007fe, 0x7c000038, Op_D | Op_A | Op_B | Op_Rc },
 	{ "cmplw",	0xfc2007fe, 0x7c000040, Op_crfD | Op_A | Op_B },
@@ -310,7 +310,9 @@ const struct opcode opcodes_1f[] = {
 	{ "lfsux",	0xfc0007fe, 0x7c00046e, Op_D | Op_A | Op_B },
 	{ "mfsr",	0xfc0007fe, 0x7c0004a6, Op_D | Op_SR },
 	{ "lswi",	0xfc0007fe, 0x7c0004aa, Op_D | Op_A | Op_NB },
-	{ "sync",	0xfc0007fe, 0x7c0004ac, 0 },
+	{ "sync",	0xfc6007fe, 0x7c0004ac, 0 },
+	{ "lwsync",	0xfc6007fe, 0x7c2004ac, 0 },
+	{ "ptesync",	0xfc6007fe, 0x7c4004ac, 0 },
 	{ "lfdx",	0xfc0007fe, 0x7c0004ae, Op_D | Op_A | Op_B },
 	{ "lfdux",	0xfc0007fe, 0x7c0004ee, Op_D | Op_A | Op_B },
 	{ "mfsrin",	0xfc0007fe, 0x7c000526, Op_D | Op_B },
@@ -1071,6 +1073,8 @@ db_disasm(db_addr_t loc, bool extended)
 	int class;
 	instr_t opcode;
 	opcode = *(instr_t *)(loc);
+	if (extended)
+		db_printf("|%08x| ", opcode);
 	class = opcode >> 26;
 	(opcodes_base[class])(opcode, loc);
 

@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2017, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -214,10 +214,11 @@ AcpiUtIsAmlTable (
 
     /* These are the only tables that contain executable AML */
 
-    if (ACPI_COMPARE_NAME (Table->Signature, ACPI_SIG_DSDT) ||
-        ACPI_COMPARE_NAME (Table->Signature, ACPI_SIG_PSDT) ||
-        ACPI_COMPARE_NAME (Table->Signature, ACPI_SIG_SSDT) ||
-        ACPI_COMPARE_NAME (Table->Signature, ACPI_SIG_OSDT))
+    if (ACPI_COMPARE_NAMESEG (Table->Signature, ACPI_SIG_DSDT) ||
+        ACPI_COMPARE_NAMESEG (Table->Signature, ACPI_SIG_PSDT) ||
+        ACPI_COMPARE_NAMESEG (Table->Signature, ACPI_SIG_SSDT) ||
+        ACPI_COMPARE_NAMESEG (Table->Signature, ACPI_SIG_OSDT) ||
+        ACPI_IS_OEM_SIG (Table->Signature))
     {
         return (TRUE);
     }
@@ -363,7 +364,7 @@ AcpiUtCreateUpdateStateAndPush (
  *
  * RETURN:      Status
  *
- * DESCRIPTION: Walk through a package
+ * DESCRIPTION: Walk through a package, including subpackages
  *
  ******************************************************************************/
 
@@ -377,8 +378,8 @@ AcpiUtWalkPackageTree (
     ACPI_STATUS             Status = AE_OK;
     ACPI_GENERIC_STATE      *StateList = NULL;
     ACPI_GENERIC_STATE      *State;
-    UINT32                  ThisIndex;
     ACPI_OPERAND_OBJECT     *ThisSourceObj;
+    UINT32                  ThisIndex;
 
 
     ACPI_FUNCTION_TRACE (UtWalkPackageTree);
@@ -395,8 +396,10 @@ AcpiUtWalkPackageTree (
         /* Get one element of the package */
 
         ThisIndex = State->Pkg.Index;
-        ThisSourceObj = (ACPI_OPERAND_OBJECT *)
+        ThisSourceObj =
             State->Pkg.SourceObject->Package.Elements[ThisIndex];
+        State->Pkg.ThisTargetObj =
+            &State->Pkg.SourceObject->Package.Elements[ThisIndex];
 
         /*
          * Check for:
@@ -412,7 +415,7 @@ AcpiUtWalkPackageTree (
             (ThisSourceObj->Common.Type != ACPI_TYPE_PACKAGE))
         {
             Status = WalkCallback (ACPI_COPY_TYPE_SIMPLE, ThisSourceObj,
-                                    State, Context);
+                State, Context);
             if (ACPI_FAILURE (Status))
             {
                 return_ACPI_STATUS (Status);
@@ -484,6 +487,9 @@ AcpiUtWalkPackageTree (
     }
 
     /* We should never get here */
+
+    ACPI_ERROR ((AE_INFO,
+        "State list did not terminate correctly"));
 
     return_ACPI_STATUS (AE_AML_INTERNAL);
 }

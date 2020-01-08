@@ -1,6 +1,8 @@
 /*	$NetBSD: makefs.c,v 1.26 2006/10/22 21:11:56 christos Exp $	*/
 
-/*
+/*-
+ * SPDX-License-Identifier: BSD-4-Clause
+ *
  * Copyright (c) 2001-2003 Wasabi Systems, Inc.
  * All rights reserved.
  *
@@ -72,8 +74,9 @@ static fstype_t fstypes[] = {
 	# name, name ## _prep_opts, name ## _parse_opts, \
 	name ## _cleanup_opts, name ## _makefs  \
 }
-	ENTRY(ffs),
 	ENTRY(cd9660),
+	ENTRY(ffs),
+	ENTRY(msdos),
 	{ .type = NULL	},
 };
 

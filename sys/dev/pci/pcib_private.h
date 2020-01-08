@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Copyright (c) 1994,1995 Stefan Esser, Wolfgang StanglMeier
  * Copyright (c) 2000 Michael Smith <msmith@freebsd.org>
  * Copyright (c) 2000 BSDi
@@ -139,7 +141,12 @@ struct pcib_softc
     struct callout pcie_ab_timer;
     struct callout pcie_cc_timer;
     struct callout pcie_dll_timer;
+    struct mtx	*pcie_hp_lock;
 };
+
+#define PCIB_HP_LOCK(sc)	mtx_lock((sc)->pcie_hp_lock)
+#define PCIB_HP_UNLOCK(sc)	mtx_unlock((sc)->pcie_hp_lock)
+#define PCIB_HP_LOCK_ASSERT(sc)	mtx_assert((sc)->pcie_hp_lock, MA_OWNED)
 
 #define	PCIB_SUPPORTED_ARI_VER	1
 

@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2010 The FreeBSD Foundation
  * All rights reserved.
  *
@@ -376,8 +378,9 @@ print_rules(char *rules, int hflag, int nflag)
 static void
 enosys(void)
 {
-	int error, racct_enable;
 	size_t racct_enable_len;
+	int error;
+	bool racct_enable;
 
 	racct_enable_len = sizeof(racct_enable);
 	error = sysctlbyname("kern.racct.enable",
@@ -390,7 +393,7 @@ enosys(void)
 		err(1, "sysctlbyname");
 	}
 
-	if (racct_enable == 0)
+	if (!racct_enable)
 		errx(1, "RACCT/RCTL present, but disabled; enable using kern.racct.enable=1 tunable");
 }
 
@@ -586,7 +589,7 @@ usage(void)
 }
 
 int
-main(int argc __unused, char **argv __unused)
+main(int argc, char **argv)
 {
 	int ch, aflag = 0, hflag = 0, nflag = 0, lflag = 0, rflag = 0,
 	    uflag = 0;

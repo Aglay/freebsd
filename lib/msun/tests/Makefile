@@ -4,8 +4,6 @@
 
 TESTSRC=	${SRCTOP}/contrib/netbsd-tests/lib/libm
 
-WARNS?=		0
-
 # All architectures on FreeBSD have fenv.h
 CFLAGS+=	-DHAVE_FENV_H
 
@@ -70,7 +68,7 @@ TAP_TESTS_C+=	nan_test
 TAP_TESTS_C+=	nearbyint_test
 TAP_TESTS_C+=	next_test
 TAP_TESTS_C+=	rem_test
-TAP_TESTS_C+=	trig_test
+ATF_TESTS_C+=	trig_test
 
 .if !empty(PROG) && !empty(TAP_TESTS_C:M${PROG})
 CFLAGS+=	-O0
@@ -86,6 +84,8 @@ SRCS.ilogb2_test=	ilogb_test.c
 
 LIBADD+=	m
 
+WARNS?=		1
+
 # Copied from lib/msun/Makefile
 .if ${MACHINE_CPUARCH} == "i386"
 ARCH_SUBDIR= i387
@@ -98,6 +98,8 @@ ARCH_SUBDIR= ${MACHINE_CPUARCH}
 # XXX: for some odd reason float.h doesn't tell the full story about what the
 # precision is.
 CFLAGS+=	-DLDBL_PREC=${LDBL_PREC}
+
+CFLAGS.fe_round_test+=	-D__HAVE_FENV
 
 .include <netbsd-tests.test.mk>
 

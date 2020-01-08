@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2004-07 Applied Micro Circuits Corporation.
  * Copyright (c) 2004-05 Vinod Kashyap.
  * Copyright (c) 2000 Michael Smith
@@ -549,7 +551,7 @@ tw_osli_alloc_mem(struct twa_softc *sc)
 	/* Create the parent dma tag. */
 	if (bus_dma_tag_create(bus_get_dma_tag(sc->bus_dev), /* parent */
 				sc->alignment,		/* alignment */
-				0,			/* boundary */
+				TW_OSLI_DMA_BOUNDARY,	/* boundary */
 				BUS_SPACE_MAXADDR,	/* lowaddr */
 				BUS_SPACE_MAXADDR, 	/* highaddr */
 				NULL, NULL, 		/* filter, filterarg */

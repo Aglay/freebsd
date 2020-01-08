@@ -91,11 +91,12 @@ struct delayed_work {
 
 #define	DECLARE_DELAYED_WORK(name, fn)					\
 	struct delayed_work name;					\
-	static void name##_init(void *arg)				\
+	static void __linux_delayed_ ## name ## _init(void *arg)	\
 	{								\
 		linux_init_delayed_work(&name, fn);			\
 	}								\
-	SYSINIT(name, SI_SUB_LOCK, SI_ORDER_SECOND, name##_init, NULL)
+	SYSINIT(name, SI_SUB_LOCK, SI_ORDER_SECOND,			\
+	    __linux_delayed_ ## name##_init, NULL)
 
 static inline struct delayed_work *
 to_delayed_work(struct work_struct *work)
@@ -103,7 +104,7 @@ to_delayed_work(struct work_struct *work)
 	return (container_of(work, struct delayed_work, work));
 }
 
-#define	INIT_WORK(work, fn) 	 					\
+#define	INIT_WORK(work, fn)						\
 do {									\
 	(work)->func = (fn);						\
 	(work)->work_queue = NULL;					\
@@ -115,6 +116,9 @@ do {									\
 	INIT_WORK(work, fn)
 
 #define	INIT_DELAYED_WORK(dwork, fn) \
+	linux_init_delayed_work(dwork, fn)
+
+#define	INIT_DELAYED_WORK_ONSTACK(dwork, fn) \
 	linux_init_delayed_work(dwork, fn)
 
 #define	INIT_DEFERRABLE_WORK(dwork, fn) \
@@ -206,15 +210,20 @@ do {									\
 #define	destroy_workqueue(wq) \
 	linux_destroy_workqueue(wq)
 
+#define	current_work() \
+	linux_current_work()
+
 /* prototypes */
 
 extern struct workqueue_struct *system_wq;
 extern struct workqueue_struct *system_long_wq;
 extern struct workqueue_struct *system_unbound_wq;
+extern struct workqueue_struct *system_highpri_wq;
 extern struct workqueue_struct *system_power_efficient_wq;
 
 extern void linux_init_delayed_work(struct delayed_work *, work_func_t);
 extern void linux_work_fn(void *, int);
+extern void linux_delayed_work_fn(void *, int);
 extern struct workqueue_struct *linux_create_workqueue_common(const char *, int);
 extern void linux_destroy_workqueue(struct workqueue_struct *);
 extern bool linux_queue_work_on(int cpu, struct workqueue_struct *, struct work_struct *);
@@ -227,5 +236,6 @@ extern bool linux_flush_work(struct work_struct *);
 extern bool linux_flush_delayed_work(struct delayed_work *);
 extern bool linux_work_pending(struct work_struct *);
 extern bool linux_work_busy(struct work_struct *);
+extern struct work_struct *linux_current_work(void);
 
 #endif					/* _LINUX_WORKQUEUE_H_ */

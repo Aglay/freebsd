@@ -1,7 +1,9 @@
 /*-
- * Copyright (c) 2003 John Baldwin <jhb@FreeBSD.org>
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 1996, by Steve Passe
  * All rights reserved.
+ * Copyright (c) 2003 John Baldwin <jhb@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -34,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/limits.h>
 #include <sys/malloc.h>
+#include <sys/smp.h>
 #ifdef NEW_PCIB
 #include <sys/rman.h>
 #endif
@@ -52,6 +55,7 @@ __FBSDID("$FreeBSD$");
 #include <machine/intr_machdep.h>
 #include <x86/apicvar.h>
 #include <machine/md_var.h>
+#include <machine/pc/bios.h>
 #ifdef NEW_PCIB
 #include <machine/resource.h>
 #endif
@@ -159,7 +163,7 @@ struct pci_route_interrupt_args {
 static mpfps_t mpfps;
 static mpcth_t mpct;
 static ext_entry_ptr mpet;
-static void *ioapics[MAX_APIC_ID + 1];
+static void *ioapics[IOAPIC_MAX_ID + 1];
 static bus_datum *busses;
 static int mptable_nioapics, mptable_nbusses, mptable_maxbusid;
 static int pci0 = -1;
@@ -191,6 +195,7 @@ static void	mptable_pci_setup(void);
 static int	mptable_probe(void);
 static int	mptable_probe_cpus(void);
 static void	mptable_probe_cpus_handler(u_char *entry, void *arg __unused);
+static void	mptable_setup_cpus_handler(u_char *entry, void *arg __unused);
 static void	mptable_register(void *dummy);
 static int	mptable_setup_local(void);
 static int	mptable_setup_io(void);
@@ -202,11 +207,11 @@ static void	mptable_walk_table(mptable_entry_handler *handler, void *arg);
 static int	search_for_sig(u_int32_t target, int count);
 
 static struct apic_enumerator mptable_enumerator = {
-	"MPTable",
-	mptable_probe,
-	mptable_probe_cpus,
-	mptable_setup_local,
-	mptable_setup_io
+	.apic_name = "MPTable",
+	.apic_probe = mptable_probe,
+	.apic_probe_cpus = mptable_probe_cpus,
+	.apic_setup_local = mptable_setup_local,
+	.apic_setup_io = mptable_setup_io
 };
 
 /*
@@ -217,8 +222,9 @@ static int
 search_for_sig(u_int32_t target, int count)
 {
 	int     x;
-	u_int32_t *addr = (u_int32_t *) (KERNBASE + target);
+	u_int32_t *addr;
 
+	addr = (u_int32_t *)BIOS_PADDRTOVADDR(target);
 	for (x = 0; x < count; x += 4)
 		if (addr[x] == MP_SIG)
 			/* make array index a byte index */
@@ -249,7 +255,7 @@ mptable_probe(void)
 	u_int32_t target;
 
 	/* see if EBDA exists */
-	if ((segment = (u_long) * (u_short *) (KERNBASE + 0x40e)) != 0) {
+	if ((segment = *(u_short *)BIOS_PADDRTOVADDR(0x40e)) != 0) {
 		/* search first 1K of EBDA */
 		target = (u_int32_t) (segment << 4);
 		if ((x = search_for_sig(target, 1024 / 4)) >= 0)
@@ -270,7 +276,7 @@ mptable_probe(void)
 	return (ENXIO);
 
 found:
-	mpfps = (mpfps_t)(KERNBASE + x);
+	mpfps = (mpfps_t)BIOS_PADDRTOVADDR(x);
 
 	/* Map in the configuration table if it exists. */
 	if (mpfps->config_type != 0) {
@@ -291,7 +297,7 @@ found:
 			    __func__);
 			return (ENXIO);
 		}
-		mpct = (mpcth_t)(KERNBASE + (uintptr_t)mpfps->pap);
+		mpct = (mpcth_t)BIOS_PADDRTOVADDR((uintptr_t)mpfps->pap);
 		if (mpct->base_table_length + (uintptr_t)mpfps->pap >=
 		    1024 * 1024) {
 			printf("%s: Unable to map end of MP Config Table\n",
@@ -329,14 +335,13 @@ mptable_probe_cpus(void)
 
 	/* Is this a pre-defined config? */
 	if (mpfps->config_type != 0) {
-		lapic_create(0, 1);
-		lapic_create(1, 0);
-	} else {
-		cpu_mask = 0;
-		mptable_walk_table(mptable_probe_cpus_handler, &cpu_mask);
-#ifdef MPTABLE_FORCE_HTT
-		mptable_hyperthread_fixup(cpu_mask);
+#ifdef SMP
+		mp_ncpus = 2;
+		mp_maxid = 1;
 #endif
+		max_apic_id = 1;
+	} else {
+		mptable_walk_table(mptable_probe_cpus_handler, &cpu_mask);
 	}
 	return (0);
 }
@@ -348,13 +353,22 @@ static int
 mptable_setup_local(void)
 {
 	vm_paddr_t addr;
+	u_int cpu_mask;
 
 	/* Is this a pre-defined config? */
 	printf("MPTable: <");
 	if (mpfps->config_type != 0) {
+		lapic_create(0, 1);
+		lapic_create(1, 0);
 		addr = DEFAULT_APIC_BASE;
 		printf("Default Configuration %d", mpfps->config_type);
+
 	} else {
+		cpu_mask = 0;
+		mptable_walk_table(mptable_setup_cpus_handler, &cpu_mask);
+#ifdef MPTABLE_FORCE_HTT
+		mptable_hyperthread_fixup(cpu_mask);
+#endif
 		addr = mpct->apic_address;
 		printf("%.*s %.*s", (int)sizeof(mpct->oem_id), mpct->oem_id,
 		    (int)sizeof(mpct->product_id), mpct->product_id);
@@ -387,7 +401,7 @@ mptable_setup_io(void)
 	mptable_parse_ints();
 
 	/* Fourth, we register all the I/O APIC's. */
-	for (i = 0; i <= MAX_APIC_ID; i++)
+	for (i = 0; i <= IOAPIC_MAX_ID; i++)
 		if (ioapics[i] != NULL)
 			ioapic_register(ioapics[i]);
 
@@ -464,6 +478,27 @@ mptable_walk_extended_table(mptable_extended_entry_handler *handler, void *arg)
 
 static void
 mptable_probe_cpus_handler(u_char *entry, void *arg)
+{
+	proc_entry_ptr proc;
+
+	switch (*entry) {
+	case MPCT_ENTRY_PROCESSOR:
+		proc = (proc_entry_ptr)entry;
+		if (proc->cpu_flags & PROCENTRY_FLAG_EN &&
+		    proc->apic_id < MAX_LAPIC_ID && mp_ncpus < MAXCPU) {
+#ifdef SMP
+			mp_ncpus++;
+			mp_maxid = mp_ncpus - 1;
+#endif
+			max_apic_id = max(max_apic_id, proc->apic_id);
+		}
+		break;
+	}
+}
+
+
+static void
+mptable_setup_cpus_handler(u_char *entry, void *arg)
 {
 	proc_entry_ptr proc;
 	u_int *cpu_mask;
@@ -564,7 +599,7 @@ mptable_parse_apics_and_busses_handler(u_char *entry, void *arg __unused)
 		apic = (io_apic_entry_ptr)entry;
 		if (!(apic->apic_flags & IOAPICENTRY_FLAG_EN))
 			break;
-		if (apic->apic_id > MAX_APIC_ID)
+		if (apic->apic_id > IOAPIC_MAX_ID)
 			panic("%s: I/O APIC ID %d too high", __func__,
 			    apic->apic_id);
 		if (ioapics[apic->apic_id] != NULL)
@@ -711,7 +746,7 @@ mptable_parse_io_int(int_entry_ptr intr)
 			return;
 		}
 	}
-	if (apic_id > MAX_APIC_ID) {
+	if (apic_id > IOAPIC_MAX_ID) {
 		printf("MPTable: Ignoring interrupt entry for ioapic%d\n",
 		    intr->dst_apic_id);
 		return;

@@ -37,7 +37,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/lock.h>
-#include <sys/rwlock.h>
+#include <sys/rmlock.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
@@ -96,7 +96,6 @@ fib4_rte_to_nh_extended(struct rtentry *rte, struct in_addr dst,
     uint32_t flags, struct nhop4_extended *pnh4)
 {
 	struct sockaddr_in *gw;
-	struct in_ifaddr *ia;
 
 	if ((flags & NHR_IFAIF) != 0)
 		pnh4->nh_ifp = rte->rt_ifa->ifa_ifp;
@@ -113,10 +112,8 @@ fib4_rte_to_nh_extended(struct rtentry *rte, struct in_addr dst,
 	gw = (struct sockaddr_in *)rt_key(rte);
 	if (gw->sin_addr.s_addr == 0)
 		pnh4->nh_flags |= NHF_DEFAULT;
-	/* XXX: Set RTF_BROADCAST if GW address is broadcast */
-
-	ia = ifatoia(rte->rt_ifa);
-	pnh4->nh_src = IA_SIN(ia)->sin_addr;
+	pnh4->nh_ia = ifatoia(rte->rt_ifa);
+	pnh4->nh_src = IA_SIN(pnh4->nh_ia)->sin_addr;
 }
 
 /*
@@ -134,6 +131,7 @@ int
 fib4_lookup_nh_basic(uint32_t fibnum, struct in_addr dst, uint32_t flags,
     uint32_t flowid, struct nhop4_basic *pnh4)
 {
+	RIB_RLOCK_TRACKER;
 	struct rib_head *rh;
 	struct radix_node *rn;
 	struct sockaddr_in sin;
@@ -182,6 +180,7 @@ int
 fib4_lookup_nh_ext(uint32_t fibnum, struct in_addr dst, uint32_t flags,
     uint32_t flowid, struct nhop4_extended *pnh4)
 {
+	RIB_RLOCK_TRACKER;
 	struct rib_head *rh;
 	struct radix_node *rn;
 	struct sockaddr_in sin;

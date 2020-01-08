@@ -1,4 +1,6 @@
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ *
  * Copyright (c) 2013 Oleksandr Tymoshenko <gonzo@freebsd.org>
  * All rights reserved.
  *
@@ -380,7 +382,7 @@ am335x_syscons_configure(int flags)
 	 * to fetch data from FDT and go with defaults if failed
 	 */
 	root = OF_finddevice("/");
-	if ((root != 0) && 
+	if ((root != -1) && 
 	    (display = am335x_syscons_find_panel_node(root))) {
 		if ((OF_getencprop(display, "panel_width", &cell,
 		    sizeof(cell))) > 0)
@@ -768,22 +770,3 @@ int am335x_lcd_syscons_setup(vm_offset_t vaddr, vm_paddr_t paddr,
 
 	return (0);
 }
-
-/*
- * Define a stub keyboard driver in case one hasn't been
- * compiled into the kernel
- */
-#include <sys/kbio.h>
-#include <dev/kbd/kbdreg.h>
-
-static int dummy_kbd_configure(int flags);
-
-keyboard_switch_t am335x_dummysw;
-
-static int
-dummy_kbd_configure(int flags)
-{
-
-	return (0);
-}
-KEYBOARD_DRIVER(am335x_dummy, am335x_dummysw, dummy_kbd_configure);
